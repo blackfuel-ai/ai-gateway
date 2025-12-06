@@ -8,13 +8,15 @@ package translator
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
-	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 )
 
 func TestAnthropicToGCPAnthropicTranslator_RequestBody_ModelNameOverride(t *testing.T) {
@@ -53,13 +55,13 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_ModelNameOverride(t *test
 			translator := NewAnthropicToGCPAnthropicTranslator("2023-06-01", tt.override)
 
 			// Create the request using map structure.
-			originalReq := &anthropicschema.MessagesRequest{
-				"model": tt.inputModel,
-				"messages": []anthropic.MessageParam{
+			originalReq := &anthropic.MessagesRequest{
+				Model: tt.inputModel,
+				Messages: []anthropic.MessageParam{
 					{
-						Role: anthropic.MessageParamRoleUser,
-						Content: []anthropic.ContentBlockParamUnion{
-							anthropic.NewTextBlock("Hello"),
+						Role: anthropic.MessageRoleUser,
+						Content: anthropic.MessageContent{
+							Text: "Hello",
 						},
 					},
 				},
@@ -71,14 +73,14 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_ModelNameOverride(t *test
 			require.NotNil(t, bodyMutation)
 
 			// Check path header contains expected model.
-			pathHeader := headerMutation.SetHeaders[0]
-			require.Equal(t, ":path", pathHeader.Header.Key)
+			pathHeader := headerMutation[0]
+			require.Equal(t, pathHeaderName, pathHeader.Key())
 			expectedPath := "publishers/anthropic/models/" + tt.expectedInPath + ":rawPredict"
-			assert.Equal(t, expectedPath, string(pathHeader.Header.RawValue))
+			assert.Equal(t, expectedPath, pathHeader.Value())
 
 			// Check that model field is removed from body (since it's in the path).
 			var modifiedReq map[string]any
-			err = json.Unmarshal(bodyMutation.GetBody(), &modifiedReq)
+			err = json.Unmarshal(bodyMutation, &modifiedReq)
 			require.NoError(t, err)
 			_, hasModel := modifiedReq["model"]
 			assert.False(t, hasModel, "model field should be removed from request body")
@@ -90,39 +92,41 @@ func TestAnthropicToGCPAnthropicTranslator_ComprehensiveMarshalling(t *testing.T
 	translator := NewAnthropicToGCPAnthropicTranslator("2023-06-01", "")
 
 	// Create a comprehensive MessagesRequest with all possible fields using map structure.
-	originalReq := &anthropicschema.MessagesRequest{
-		"model": "claude-3-opus-20240229",
-		"messages": []anthropic.MessageParam{
+	originalReq := &anthropic.MessagesRequest{
+		Model: "claude-3-opus-20240229",
+		Messages: []anthropic.MessageParam{
 			{
-				Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock("Hello, how are you?"),
+				Role:    anthropic.MessageRoleUser,
+				Content: anthropic.MessageContent{Text: "Hello, how are you?"},
+			},
+			{
+				Role: anthropic.MessageRoleAssistant,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{Text: &anthropic.TextBlockParam{Text: "I'm doing well, thank you!"}},
+					},
 				},
 			},
 			{
-				Role: anthropic.MessageParamRoleAssistant,
-				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock("I'm doing well, thank you!"),
-				},
-			},
-			{
-				Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock("Can you help me with the weather?"),
+				Role: anthropic.MessageRoleUser,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{Text: &anthropic.TextBlockParam{Text: "Can you help me with the weather?"}},
+					},
 				},
 			},
 		},
-		"max_tokens":     1024,
-		"stream":         false,
-		"temperature":    func() *float64 { v := 0.7; return &v }(),
-		"top_p":          func() *float64 { v := 0.95; return &v }(),
-		"stop_sequences": []string{"Human:", "Assistant:"},
-		"system":         "You are a helpful weather assistant.",
-		"tools": []anthropic.ToolParam{
+		MaxTokens:     1024,
+		Stream:        false,
+		Temperature:   func() *float64 { v := 0.7; return &v }(),
+		TopP:          func() *float64 { v := 0.95; return &v }(),
+		StopSequences: []string{"Human:", "Assistant:"},
+		System:        &anthropic.SystemPrompt{Text: "You are a helpful weather assistant."},
+		Tools: []anthropic.Tool{
 			{
 				Name:        "get_weather",
-				Description: anthropic.String("Get current weather information"),
-				InputSchema: anthropic.ToolInputSchemaParam{
+				Description: "Get current weather information",
+				InputSchema: anthropic.ToolInputSchema{
 					Type: "object",
 					Properties: map[string]any{
 						"location": map[string]any{
@@ -134,18 +138,21 @@ func TestAnthropicToGCPAnthropicTranslator_ComprehensiveMarshalling(t *testing.T
 				},
 			},
 		},
-		"tool_choice": anthropic.ToolChoiceUnionParam{
-			OfAuto: &anthropic.ToolChoiceAutoParam{},
-		},
+		ToolChoice: ptr.To(anthropic.ToolChoice(map[string]any{
+			"type": "auto",
+		})),
 	}
 
-	headerMutation, bodyMutation, err := translator.RequestBody(nil, originalReq, false)
+	raw, err := json.Marshal(originalReq)
+	require.NoError(t, err)
+
+	headerMutation, bodyMutation, err := translator.RequestBody(raw, originalReq, false)
 	require.NoError(t, err)
 	require.NotNil(t, headerMutation)
 	require.NotNil(t, bodyMutation)
 
 	var outputReq map[string]any
-	err = json.Unmarshal(bodyMutation.GetBody(), &outputReq)
+	err = json.Unmarshal(bodyMutation, &outputReq)
 	require.NoError(t, err)
 
 	require.NotContains(t, outputReq, "model", "model field should be removed for GCP")
@@ -159,7 +166,7 @@ func TestAnthropicToGCPAnthropicTranslator_ComprehensiveMarshalling(t *testing.T
 
 	require.Equal(t, float64(1024), outputReq["max_tokens"])
 	// stream: false is now included in the map
-	require.Equal(t, false, outputReq["stream"])
+	require.NotContains(t, outputReq, "stream")
 	require.Equal(t, 0.7, outputReq["temperature"])
 	require.Equal(t, 0.95, outputReq["top_p"])
 	require.Equal(t, "You are a helpful weather assistant.", outputReq["system"])
@@ -179,10 +186,10 @@ func TestAnthropicToGCPAnthropicTranslator_ComprehensiveMarshalling(t *testing.T
 
 	require.NotEmpty(t, toolChoice)
 
-	pathHeader := headerMutation.SetHeaders[0]
-	require.Equal(t, ":path", pathHeader.Header.Key)
+	pathHeader := headerMutation[0]
+	require.Equal(t, ":path", pathHeader.Key())
 	expectedPath := "publishers/anthropic/models/claude-3-opus-20240229:rawPredict"
-	require.Equal(t, expectedPath, string(pathHeader.Header.RawValue))
+	require.Equal(t, expectedPath, pathHeader.Value())
 }
 
 func TestAnthropicToGCPAnthropicTranslator_BackendVersionHandling(t *testing.T) {
@@ -216,17 +223,19 @@ func TestAnthropicToGCPAnthropicTranslator_BackendVersionHandling(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			translator := NewAnthropicToGCPAnthropicTranslator(tt.backendVersion, "")
 
-			originalReq := &anthropicschema.MessagesRequest{
-				"model": "claude-3-sonnet-20240229",
-				"messages": []anthropic.MessageParam{
+			originalReq := &anthropic.MessagesRequest{
+				Model: "claude-3-sonnet-20240229",
+				Messages: []anthropic.MessageParam{
 					{
-						Role: anthropic.MessageParamRoleUser,
-						Content: []anthropic.ContentBlockParamUnion{
-							anthropic.NewTextBlock("Hello"),
+						Role: anthropic.MessageRoleUser,
+						Content: anthropic.MessageContent{
+							Array: []anthropic.ContentBlockParam{
+								{Text: &anthropic.TextBlockParam{Text: "Hello"}},
+							},
 						},
 					},
 				},
-				"max_tokens": 100,
+				MaxTokens: 100,
 			}
 
 			_, bodyMutation, err := translator.RequestBody(nil, originalReq, false)
@@ -241,7 +250,7 @@ func TestAnthropicToGCPAnthropicTranslator_BackendVersionHandling(t *testing.T) 
 			require.NotNil(t, bodyMutation)
 
 			var outputReq map[string]any
-			err = json.Unmarshal(bodyMutation.GetBody(), &outputReq)
+			err = json.Unmarshal(bodyMutation, &outputReq)
 			require.NoError(t, err)
 
 			require.Contains(t, outputReq, "anthropic_version")
@@ -282,29 +291,18 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_StreamingPaths(t *testing
 		t.Run(tt.name, func(t *testing.T) {
 			translator := NewAnthropicToGCPAnthropicTranslator("2023-06-01", "")
 
-			reqBody := map[string]any{
-				"model":    "claude-3-sonnet-20240229",
-				"messages": []map[string]any{{"role": "user", "content": "Test"}},
-			}
-
-			if tt.stream != nil {
-				reqBody["stream"] = tt.stream
-			}
-
-			parsedReq := &anthropicschema.MessagesRequest{
-				"model": "claude-3-sonnet-20240229",
-				"messages": []anthropic.MessageParam{
+			parsedReq := &anthropic.MessagesRequest{
+				Model: "claude-3-sonnet-20240229",
+				Messages: []anthropic.MessageParam{
 					{
-						Role: anthropic.MessageParamRoleUser,
-						Content: []anthropic.ContentBlockParamUnion{
-							anthropic.NewTextBlock("Test"),
-						},
+						Role:    anthropic.MessageRoleUser,
+						Content: anthropic.MessageContent{Text: "Test"},
 					},
 				},
 			}
 			if tt.stream != nil {
 				if streamVal, ok := tt.stream.(bool); ok {
-					(*parsedReq)["stream"] = streamVal
+					parsedReq.Stream = streamVal
 				}
 			}
 
@@ -313,9 +311,10 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_StreamingPaths(t *testing
 			require.NotNil(t, headerMutation)
 
 			// Check path contains expected specifier.
-			pathHeader := headerMutation.SetHeaders[0]
+			pathHeader := headerMutation[0]
 			expectedPath := "publishers/anthropic/models/claude-3-sonnet-20240229:" + tt.expectedSpecifier
-			assert.Equal(t, expectedPath, string(pathHeader.Header.RawValue))
+			assert.Equal(t, pathHeaderName, pathHeader.Key())
+			assert.Equal(t, expectedPath, pathHeader.Value())
 		})
 	}
 }
@@ -326,40 +325,34 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_FieldPassthrough(t *testi
 	temp := 0.7
 	topP := 0.95
 	topK := 40
-	parsedReq := &anthropicschema.MessagesRequest{
-		"model": "claude-3-sonnet-20240229",
-		"messages": []anthropic.MessageParam{
+	parsedReq := &anthropic.MessagesRequest{
+		Model: "claude-3-sonnet-20240229",
+		Messages: []anthropic.MessageParam{
 			{
-				Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock("Hello, world!"),
-				},
+				Role:    anthropic.MessageRoleUser,
+				Content: anthropic.MessageContent{Text: "Hello, world!"},
 			},
 			{
-				Role: anthropic.MessageParamRoleAssistant,
-				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock("Hi there!"),
-				},
+				Role:    anthropic.MessageRoleAssistant,
+				Content: anthropic.MessageContent{Text: "Hi there!"},
 			},
 			{
-				Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{
-					anthropic.NewTextBlock("How are you?"),
-				},
+				Role:    anthropic.MessageRoleUser,
+				Content: anthropic.MessageContent{Text: "How are you?"},
 			},
 		},
-		"max_tokens":     1000,
-		"temperature":    &temp,
-		"top_p":          &topP,
-		"top_k":          &topK,
-		"stop_sequences": []string{"Human:", "Assistant:"},
-		"stream":         false,
-		"system":         "You are a helpful assistant",
-		"tools": []anthropic.ToolParam{
+		MaxTokens:     1000,
+		Temperature:   &temp,
+		TopP:          &topP,
+		TopK:          &topK,
+		StopSequences: []string{"Human:", "Assistant:"},
+		Stream:        false,
+		System:        &anthropic.SystemPrompt{Text: "You are a helpful assistant"},
+		Tools: []anthropic.Tool{
 			{
 				Name:        "get_weather",
-				Description: anthropic.String("Get weather info"),
-				InputSchema: anthropic.ToolInputSchemaParam{
+				Description: "Get weather info",
+				InputSchema: anthropic.ToolInputSchema{
 					Type: "object",
 					Properties: map[string]any{
 						"location": map[string]any{"type": "string"},
@@ -367,16 +360,21 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_FieldPassthrough(t *testi
 				},
 			},
 		},
-		"tool_choice": map[string]any{"type": "auto"},
-		"metadata":    map[string]any{"user.id": "test123"},
+		ToolChoice: ptr.To(anthropic.ToolChoice(map[string]any{
+			"type": "auto",
+		})),
+		Metadata: &anthropic.MessagesMetadata{UserID: ptr.To("test123")},
 	}
 
-	_, bodyMutation, err := translator.RequestBody(nil, parsedReq, false)
+	raw, err := json.Marshal(parsedReq)
+	require.NoError(t, err)
+
+	_, bodyMutation, err := translator.RequestBody(raw, parsedReq, false)
 	require.NoError(t, err)
 	require.NotNil(t, bodyMutation)
 
 	var modifiedReq map[string]any
-	err = json.Unmarshal(bodyMutation.GetBody(), &modifiedReq)
+	err = json.Unmarshal(bodyMutation, &modifiedReq)
 	require.NoError(t, err)
 
 	// Messages should be preserved.
@@ -396,7 +394,7 @@ func TestAnthropicToGCPAnthropicTranslator_RequestBody_FieldPassthrough(t *testi
 	require.Equal(t, "Assistant:", stopSeq[1])
 
 	// Boolean false values are now included in the map.
-	require.Equal(t, false, modifiedReq["stream"])
+	require.NotContains(t, modifiedReq, "stream")
 
 	// String values are preserved.
 	require.Equal(t, "You are a helpful assistant", modifiedReq["system"])
@@ -448,13 +446,13 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_ZeroTokenUsage(t *testin
 	translator := NewAnthropicToGCPAnthropicTranslator("2023-06-01", "")
 
 	// Test response with zero token usage.
-	respBody := anthropic.Message{
+	respBody := anthropic.MessagesResponse{
 		ID:      "msg_zero",
 		Type:    "message",
 		Role:    "assistant",
-		Content: []anthropic.ContentBlockUnion{{Type: "text", Text: ""}},
+		Content: []anthropic.MessagesContentBlock{{Text: &anthropic.TextBlock{Text: "Hello"}}},
 		Model:   "claude-3-sonnet-20240229",
-		Usage: anthropic.Usage{
+		Usage: &anthropic.Usage{
 			InputTokens:  0,
 			OutputTokens: 0,
 		},
@@ -466,15 +464,11 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_ZeroTokenUsage(t *testin
 	bodyReader := bytes.NewReader(bodyBytes)
 	respHeaders := map[string]string{"content-type": "application/json"}
 
-	_, _, tokenUsage, _, err := translator.ResponseBody(respHeaders, bodyReader, true)
+	_, _, tokenUsage, _, err := translator.ResponseBody(respHeaders, bodyReader, true, nil)
 	require.NoError(t, err)
 
-	expectedUsage := LLMTokenUsage{
-		InputTokens:  0,
-		OutputTokens: 0,
-		TotalTokens:  0,
-	}
-	assert.Equal(t, expectedUsage, tokenUsage)
+	expected := tokenUsageFrom(0, 0, 0, 0)
+	assert.Equal(t, expected, tokenUsage)
 }
 
 func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingTokenUsage(t *testing.T) {
@@ -485,57 +479,37 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingTokenUsage(t *t
 		name          string
 		chunk         string
 		endOfStream   bool
-		expectedUsage LLMTokenUsage
+		expectedUsage metrics.TokenUsage
 	}{
 		{
-			name:        "regular streaming chunk without usage",
-			chunk:       "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" to me.\"}}\n\n",
-			endOfStream: false,
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 0,
-				TotalTokens:  0,
-			},
+			name:          "regular streaming chunk without usage",
+			chunk:         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" to me.\"}}\n\n",
+			endOfStream:   false,
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1),
 		},
 		{
-			name:        "message_delta chunk with token usage",
-			chunk:       "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":84}}\n\n",
-			endOfStream: false,
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 84,
-				TotalTokens:  84,
-			},
+			name:          "message_delta chunk with token usage",
+			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":84}}\n\n",
+			endOfStream:   false,
+			expectedUsage: tokenUsageFrom(0, 0, 84, 84),
 		},
 		{
-			name:        "message_stop chunk without usage",
-			chunk:       "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-			endOfStream: false,
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 0,
-				TotalTokens:  0,
-			},
+			name:          "message_stop chunk without usage",
+			chunk:         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+			endOfStream:   false,
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1),
 		},
 		{
-			name:        "invalid json chunk",
-			chunk:       "event: invalid\ndata: {\"invalid\": \"json\"}\n\n",
-			endOfStream: false,
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 0,
-				TotalTokens:  0,
-			},
+			name:          "invalid json chunk",
+			chunk:         "event: invalid\ndata: {\"invalid\": \"json\"}\n\n",
+			endOfStream:   false,
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1),
 		},
 		{
-			name:        "message_delta with decimal output_tokens",
-			chunk:       "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42.0}}\n\n",
-			endOfStream: false,
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 42,
-				TotalTokens:  42,
-			},
+			name:          "message_delta with decimal output_tokens",
+			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42.0}}\n\n",
+			endOfStream:   false,
+			expectedUsage: tokenUsageFrom(0, 0, 42, 42),
 		},
 	}
 
@@ -544,7 +518,7 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingTokenUsage(t *t
 			bodyReader := bytes.NewReader([]byte(tt.chunk))
 			respHeaders := map[string]string{"content-type": "application/json"}
 
-			headerMutation, bodyMutation, tokenUsage, _, err := translator.ResponseBody(respHeaders, bodyReader, tt.endOfStream)
+			headerMutation, bodyMutation, tokenUsage, _, err := translator.ResponseBody(respHeaders, bodyReader, tt.endOfStream, nil)
 
 			require.NoError(t, err)
 			require.Nil(t, headerMutation)
@@ -561,43 +535,27 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingEdgeCases(t *te
 	tests := []struct {
 		name          string
 		chunk         string
-		expectedUsage LLMTokenUsage
+		expectedUsage metrics.TokenUsage
 	}{
 		{
-			name:  "message_start without message field",
-			chunk: "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 0,
-				TotalTokens:  0,
-			},
+			name:          "message_start without message field",
+			chunk:         "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+			expectedUsage: metrics.TokenUsage{},
 		},
 		{
-			name:  "message_start without usage field",
-			chunk: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\"}}\n\n",
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 0,
-				TotalTokens:  0,
-			},
+			name:          "message_start without usage field",
+			chunk:         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\"}}\n\n",
+			expectedUsage: metrics.TokenUsage{},
 		},
 		{
-			name:  "message_delta without usage field",
-			chunk: "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 0,
-				TotalTokens:  0,
-			},
+			name:          "message_delta without usage field",
+			chunk:         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+			expectedUsage: tokenUsageFrom(0, 0, 0, 0),
 		},
 		{
-			name:  "invalid json in data",
-			chunk: "event: message_start\ndata: {invalid json}\n\n",
-			expectedUsage: LLMTokenUsage{
-				InputTokens:  0,
-				OutputTokens: 0,
-				TotalTokens:  0,
-			},
+			name:          "invalid json in data",
+			chunk:         "event: message_start\ndata: {invalid json}\n\n",
+			expectedUsage: tokenUsageFrom(-1, -1, -1, -1),
 		},
 	}
 
@@ -606,7 +564,7 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingEdgeCases(t *te
 			bodyReader := bytes.NewReader([]byte(tt.chunk))
 			respHeaders := map[string]string{"content-type": "application/json"}
 
-			headerMutation, bodyMutation, tokenUsage, _, err := translator.ResponseBody(respHeaders, bodyReader, false)
+			headerMutation, bodyMutation, tokenUsage, _, err := translator.ResponseBody(respHeaders, bodyReader, false, nil)
 
 			require.NoError(t, err)
 			require.Nil(t, headerMutation)
@@ -614,4 +572,86 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingEdgeCases(t *te
 			require.Equal(t, tt.expectedUsage, tokenUsage)
 		})
 	}
+}
+
+func tokenUsageFrom(in, cachedInput, out, total int32) metrics.TokenUsage {
+	var usage metrics.TokenUsage
+	if in >= 0 {
+		usage.SetInputTokens(uint32(in))
+	}
+	if cachedInput >= 0 {
+		usage.SetCachedInputTokens(uint32(cachedInput))
+	}
+	if out >= 0 {
+		usage.SetOutputTokens(uint32(out))
+	}
+	if total >= 0 {
+		usage.SetTotalTokens(uint32(total))
+	}
+	return usage
+}
+
+func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingFullScenario(t *testing.T) {
+	// Test to reproduce and verify fix for the input_token=0 issue in Anthropic streaming
+	// This test verifies that input_tokens from message_start are preserved when
+	// message_delta doesn't provide input_tokens (real-world scenario)
+
+	translator := NewAnthropicToGCPAnthropicTranslator("v1", "")
+
+	// Simulate request body to set stream=true
+	reqBody := anthropic.MessagesRequest{
+		Stream: true,
+		Model:  "claude-3-sonnet-20240229",
+	}
+	_, _, err := translator.RequestBody([]byte(`{"stream":true}`), &reqBody, false)
+	require.NoError(t, err)
+
+	// Sample streaming response from Anthropic with realistic flow:
+	// 1. message_start provides input_tokens=15
+	// 2. content_block events provide the actual text content
+	// 3. message_delta at the end provides output_tokens=5 but no input_tokens
+	// 4. message_stop ends the stream
+	sseStream := `event: message_start
+data: {"type": "message_start", "message": {"id": "msg_123", "type": "message", "role": "assistant", "content": [], "model": "claude-3-sonnet-20240229", "usage": {"input_tokens": 15, "output_tokens": 0}}}
+
+event: content_block_start
+data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+
+event: content_block_delta
+data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}
+
+event: content_block_stop
+data: {"type": "content_block_stop", "index": 0}
+
+event: message_delta
+data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}
+
+event: message_stop
+data: {"type": "message_stop"}
+
+`
+
+	// Process the streaming response
+	reader := strings.NewReader(sseStream)
+	_, _, tokenUsage, _, err := translator.ResponseBody(nil, reader, false, nil)
+	require.NoError(t, err)
+
+	// Verify token usage - this should preserve input_tokens from message_start
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	totalTokens, totalSet := tokenUsage.TotalTokens()
+	cachedTokens, cachedSet := tokenUsage.CachedInputTokens()
+
+	// Assertions
+	assert.True(t, inputSet, "Input tokens should be set")
+	assert.Equal(t, uint32(15), inputTokens, "Input tokens should be preserved from message_start")
+
+	assert.True(t, outputSet, "Output tokens should be set")
+	assert.Equal(t, uint32(5), outputTokens, "Output tokens should come from message_delta")
+
+	assert.True(t, totalSet, "Total tokens should be calculated")
+	assert.Equal(t, uint32(20), totalTokens, "Total tokens should be input + output")
+
+	assert.True(t, cachedSet, "Cached tokens should be set")
+	assert.Equal(t, uint32(0), cachedTokens, "No cached tokens in this scenario")
 }
