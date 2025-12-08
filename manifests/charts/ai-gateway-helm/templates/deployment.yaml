@@ -84,6 +84,9 @@ spec:
             {{- if ne .Values.controller.maxRecvMsgSize nil }}
             - --maxRecvMsgSize={{ .Values.controller.maxRecvMsgSize }}
             {{- end }}
+            {{- if ne .Values.controller.extProcGrpcMaxRecvMsgSize nil }}
+            - --extProcGrpcMaxRecvMsgSize={{ .Values.controller.extProcGrpcMaxRecvMsgSize }}
+            {{- end }}
             - --cacheSyncTimeout={{ .Values.controller.watch.cacheSyncTimeout }}
             - --watchNamespaces={{ join "," .Values.controller.watch.namespaces }}
             - --mcpSessionEncryptionSeed={{ .Values.controller.mcp.sessionEncryption.seed }}
