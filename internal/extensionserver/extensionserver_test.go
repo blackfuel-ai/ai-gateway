@@ -66,20 +66,20 @@ const udsPath = "/tmp/uds/test.sock"
 
 func TestNew(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 	require.NotNil(t, s)
 }
 
 func TestCheck(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 	_, err := s.Check(t.Context(), nil)
 	require.NoError(t, err)
 }
 
 func TestWatch(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 	err := s.Watch(nil, nil)
 	require.Error(t, err)
 	require.Equal(t, "rpc error: code = Unimplemented desc = Watch is not implemented", err.Error())
@@ -87,7 +87,7 @@ func TestWatch(t *testing.T) {
 
 func TestServerPostTranslateModify(t *testing.T) {
 	t.Run("existing", func(t *testing.T) {
-		s := New(newFakeClient(), logr.Discard(), udsPath, false)
+		s := New(newFakeClient(), logr.Discard(), udsPath, false, 0)
 		req := &egextension.PostTranslateModifyRequest{Clusters: []*clusterv3.Cluster{{Name: extProcUDSClusterName}}}
 		res, err := s.PostTranslateModify(t.Context(), req)
 		require.Equal(t, &egextension.PostTranslateModifyResponse{
@@ -96,7 +96,7 @@ func TestServerPostTranslateModify(t *testing.T) {
 		require.NoError(t, err)
 	})
 	t.Run("not existing", func(t *testing.T) {
-		s := New(newFakeClient(), logr.Discard(), udsPath, false)
+		s := New(newFakeClient(), logr.Discard(), udsPath, false, 0)
 		res, err := s.PostTranslateModify(t.Context(), &egextension.PostTranslateModifyRequest{
 			Clusters: []*clusterv3.Cluster{{Name: "foo"}},
 		})
@@ -151,7 +151,7 @@ func Test_maybeModifyCluster(t *testing.T) {
 	} {
 		t.Run("error/"+tc.errLog, func(t *testing.T) {
 			var buf bytes.Buffer
-			s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false)
+			s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false, 0)
 			err = s.maybeModifyCluster(tc.c)
 			require.NoError(t, err)
 			t.Logf("buf: %s", buf.String())
@@ -177,7 +177,7 @@ func Test_maybeModifyCluster(t *testing.T) {
 			},
 		}
 		var buf bytes.Buffer
-		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false)
+		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false, 0)
 		err = s.maybeModifyCluster(cluster)
 		require.NoError(t, err)
 		require.Empty(t, buf.String())
@@ -249,7 +249,7 @@ func TestMaybeModifyClusterExtended(t *testing.T) {
 
 	t.Run("AIGatewayRoute not found", func(t *testing.T) {
 		var buf bytes.Buffer
-		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false)
+		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false, 0)
 		cluster := &clusterv3.Cluster{Name: "httproute/test-ns/nonexistent-route/rule/0", Metadata: &corev3.Metadata{}}
 		err = s.maybeModifyCluster(cluster)
 		require.NoError(t, err)
@@ -258,7 +258,7 @@ func TestMaybeModifyClusterExtended(t *testing.T) {
 
 	t.Run("cluster with InferencePool metadata and existing route", func(t *testing.T) {
 		var buf bytes.Buffer
-		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false)
+		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false, 0)
 
 		cluster := &clusterv3.Cluster{
 			Name: "httproute/test-ns/inference-route/rule/0",
@@ -287,7 +287,7 @@ func TestMaybeModifyClusterExtended(t *testing.T) {
 	})
 
 	t.Run("cluster with existing HttpProtocolOptions", func(t *testing.T) {
-		s := New(c, logr.Discard(), udsPath, false)
+		s := New(c, logr.Discard(), udsPath, false, 0)
 
 		// Create existing HttpProtocolOptions.
 		existingPO := &httpv3.HttpProtocolOptions{
@@ -335,7 +335,7 @@ func TestMaybeModifyClusterExtended(t *testing.T) {
 	})
 
 	t.Run("cluster with existing ext_proc filter", func(t *testing.T) {
-		s := New(c, logr.Discard(), udsPath, false)
+		s := New(c, logr.Discard(), udsPath, false, 0)
 
 		// Create HttpProtocolOptions with existing ext_proc filter.
 		existingPO := &httpv3.HttpProtocolOptions{
@@ -378,7 +378,7 @@ func TestMaybeModifyClusterExtended(t *testing.T) {
 	})
 
 	t.Run("cluster with no existing HttpFilters", func(t *testing.T) {
-		s := New(c, logr.Discard(), udsPath, false)
+		s := New(c, logr.Discard(), udsPath, false, 0)
 
 		cluster := &clusterv3.Cluster{
 			Name: "httproute/test-ns/inference-route/rule/0",
@@ -411,7 +411,7 @@ func TestMaybeModifyClusterExtended(t *testing.T) {
 
 	t.Run("invalid HttpProtocolOptions unmarshal", func(t *testing.T) {
 		var buf bytes.Buffer
-		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false)
+		s := New(c, logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false, 0)
 
 		// Create invalid Any message.
 		invalidAny := &anypb.Any{
@@ -441,7 +441,7 @@ func TestMaybeModifyClusterExtended(t *testing.T) {
 
 // TestMaybeModifyListenerAndRoutes tests the maybeModifyListenerAndRoutes function.
 func TestMaybeModifyListenerAndRoutes(t *testing.T) {
-	s := New(newFakeClient(), logr.Discard(), udsPath, false)
+	s := New(newFakeClient(), logr.Discard(), udsPath, false, 0)
 
 	// Helper function to create a basic listener.
 	createListener := func(name, routeConfigName string) *listenerv3.Listener {
@@ -641,7 +641,7 @@ func TestMaybeModifyListenerAndRoutes(t *testing.T) {
 
 // TestPatchListenerWithInferencePoolFilters tests the patchListenerWithInferencePoolFilters function.
 func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
-	s := New(newFakeClient(), logr.Discard(), udsPath, false)
+	s := New(newFakeClient(), logr.Discard(), udsPath, false, 0)
 
 	// Helper function to create an InferencePool.
 	createInferencePool := func(name, namespace string) *gwaiev1.InferencePool {
@@ -690,7 +690,7 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
 
 	t.Run("listener with filter chains but no HCM", func(t *testing.T) {
 		var buf bytes.Buffer
-		server := New(newFakeClient(), logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false)
+		server := New(newFakeClient(), logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false, 0)
 
 		listener := &listenerv3.Listener{
 			Name: "test-listener",
@@ -817,7 +817,7 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
 
 	t.Run("error marshaling updated HCM", func(_ *testing.T) {
 		var buf bytes.Buffer
-		server := New(newFakeClient(), logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false)
+		server := New(newFakeClient(), logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{})), udsPath, false, 0)
 
 		// Create a listener with an HCM that will cause marshaling issues.
 		// This is a bit tricky to test, but we can create a scenario where the HCM is modified
@@ -835,7 +835,7 @@ func TestPatchListenerWithInferencePoolFilters(t *testing.T) {
 
 // TestPatchVirtualHostWithInferencePool tests the patchVirtualHostWithInferencePool function.
 func TestPatchVirtualHostWithInferencePool(t *testing.T) {
-	s := New(newFakeClient(), logr.Discard(), udsPath, false)
+	s := New(newFakeClient(), logr.Discard(), udsPath, false, 0)
 
 	// Helper function to create an InferencePool.
 	createInferencePool := func(name, namespace string) *gwaiev1.InferencePool {
@@ -1043,7 +1043,7 @@ func TestPatchVirtualHostWithInferencePool(t *testing.T) {
 // TestPostClusterModify tests the PostClusterModify method.
 func TestPostClusterModify(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 
 	t.Run("nil cluster", func(t *testing.T) {
 		req := &egextension.PostClusterModifyRequest{Cluster: nil}
@@ -1082,7 +1082,7 @@ func TestPostClusterModify(t *testing.T) {
 		// Use a logger that captures output for debugging.
 		var buf bytes.Buffer
 		logger := logr.FromSlogHandler(slog.NewTextHandler(&buf, &slog.HandlerOptions{}))
-		s := New(newFakeClient(), logger, udsPath, false)
+		s := New(newFakeClient(), logger, udsPath, false, 0)
 
 		cluster := &clusterv3.Cluster{
 			Name:     "test-cluster",
@@ -1126,7 +1126,7 @@ func TestPostClusterModify(t *testing.T) {
 // TestPostRouteModify tests the PostRouteModify method.
 func TestPostRouteModify(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 
 	t.Run("nil route", func(t *testing.T) {
 		req := &egextension.PostRouteModifyRequest{Route: nil}
@@ -1189,7 +1189,7 @@ func TestPostRouteModify(t *testing.T) {
 // TestConstructInferencePoolsFrom tests the constructInferencePoolsFrom method.
 func TestConstructInferencePoolsFrom(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 
 	t.Run("empty resources", func(t *testing.T) {
 		result := s.constructInferencePoolsFrom([]*egextension.ExtensionResource{})
@@ -1665,7 +1665,7 @@ func TestBuildClustersForInferencePoolEndpointPickers(t *testing.T) {
 // TestPostTranslateModify tests the PostTranslateModify method.
 func TestPostTranslateModify(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 
 	t.Run("empty request", func(t *testing.T) {
 		req := &egextension.PostTranslateModifyRequest{}
@@ -1692,7 +1692,7 @@ func TestPostTranslateModify(t *testing.T) {
 // TestList tests the List method (health check).
 func TestList(t *testing.T) {
 	logger := logr.Discard()
-	s := New(newFakeClient(), logger, udsPath, false)
+	s := New(newFakeClient(), logger, udsPath, false, 0)
 
 	t.Run("list health statuses", func(t *testing.T) {
 		resp, err := s.List(context.Background(), &grpc_health_v1.HealthListRequest{})

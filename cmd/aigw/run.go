@@ -174,7 +174,7 @@ func run(ctx context.Context, c cmdRun, o *runOpts, stdout, stderr io.Writer) er
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 	s := grpc.NewServer()
-	extSrv := extensionserver.New(fakeClient, ctrl.Log, o.extprocUDSPath, true)
+	extSrv := extensionserver.New(fakeClient, ctrl.Log, o.extprocUDSPath, true, 0) // 0 uses default
 	egextension.RegisterEnvoyGatewayExtensionServer(s, extSrv)
 	grpc_health_v1.RegisterHealthServer(s, extSrv)
 

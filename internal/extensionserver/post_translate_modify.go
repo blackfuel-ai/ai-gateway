@@ -617,13 +617,7 @@ func (s *Server) insertRouterLevelAIGatewayExtProc(listener *listenerv3.Listener
 			return nil // The filter is already present, nothing to do.
 		}
 		epAny, err := toAny(&extprocv3.ExternalProcessor{
-			GrpcService: &corev3.GrpcService{
-				TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
-					EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
-						ClusterName: extProcUDSClusterName,
-					},
-				},
-			},
+			GrpcService: s.buildExtProcGrpcService(),
 			MetadataOptions: &extprocv3.MetadataOptions{
 				ReceivingNamespaces: &extprocv3.MetadataOptions_MetadataNamespaces{
 					Untyped: []string{aigv1a1.AIGatewayFilterMetadataNamespace},
@@ -805,4 +799,22 @@ func findListenerRouteConfigs(listener *listenerv3.Listener) []string {
 		return names // Return names collected so far, even if no RDS in default filter chain.
 	}
 	return append(names, rds.RouteConfigName) // Add default filter chain's route config name.
+}
+
+// buildExtProcGrpcService creates a GrpcService configuration for the external processor.
+// This configures Envoy's gRPC client to communicate with the extProc server over UDS,
+// including the max receive message length to handle large request/response bodies.
+func (s *Server) buildExtProcGrpcService() *corev3.GrpcService {
+	return &corev3.GrpcService{
+		TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
+			EnvoyGrpc: &corev3.GrpcService_EnvoyGrpc{
+				ClusterName: extProcUDSClusterName,
+				// MaxReceiveMessageLength sets the maximum message size that Envoy's gRPC client
+				// can receive from the extProc server. The router-level ext_proc buffers full
+				// request/response bodies (ProcessingMode_BUFFERED), so this limit must accommodate
+				// large payloads. Default Envoy limit is 4MB which causes RESOURCE_EXHAUSTED errors.
+				MaxReceiveMessageLength: wrapperspb.UInt32(s.extProcGrpcMaxRecvMsgSize),
+			},
+		},
+	}
 }

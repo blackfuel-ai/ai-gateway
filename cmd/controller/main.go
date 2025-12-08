@@ -55,8 +55,10 @@ type flags struct {
 	extProcImagePullSecrets        string
 	// extProcMaxRecvMsgSize is the maximum message size in bytes that the gRPC server can receive.
 	extProcMaxRecvMsgSize int
+	// extProcGrpcMaxRecvMsgSize is the maximum message size in bytes that Envoy's gRPC client can receive.
+	extProcGrpcMaxRecvMsgSize int
 	// maxRecvMsgSize is the maximum message size in bytes that the gRPC extension server can receive.
-	maxRecvMsgSize                         int
+	maxRecvMsgSize int
 	mcpSessionEncryptionSeed               string
 	mcpFallbackSessionEncryptionSeed       string
 	mcpSessionEncryptionIterations         int
@@ -177,6 +179,12 @@ func parseAndValidateFlags(args []string) (flags, error) {
 		512*1024*1024,
 		"Maximum message size in bytes that the gRPC server can receive for extProc. Default is 512MB.",
 	)
+	extProcGrpcMaxRecvMsgSize := fs.Int(
+		"extProcGrpcMaxRecvMsgSize",
+		extensionserver.DefaultExtProcGrpcMaxRecvMsgSize,
+		"Maximum message size in bytes that Envoy's gRPC client can receive when communicating with the extProc server. "+
+			"This affects the router-level ext_proc filter which buffers full request/response bodies. Default is 16MB.",
+	)
 	maxRecvMsgSize := fs.Int(
 		"maxRecvMsgSize",
 		4*1024*1024,
@@ -287,6 +295,7 @@ func parseAndValidateFlags(args []string) (flags, error) {
 		extProcExtraEnvVars:                    *extProcExtraEnvVars,
 		extProcImagePullSecrets:                *extProcImagePullSecrets,
 		extProcMaxRecvMsgSize:                  *extProcMaxRecvMsgSize,
+		extProcGrpcMaxRecvMsgSize:              *extProcGrpcMaxRecvMsgSize,
 		maxRecvMsgSize:                         *maxRecvMsgSize,
 		watchNamespaces:                        parseWatchNamespaces(*watchNamespaces),
 		cacheSyncTimeout:                       *cacheSyncTimeout,
@@ -351,7 +360,7 @@ func main() {
 	// Start the extension server running alongside the controller.
 	const extProcUDSPath = "/etc/ai-gateway-extproc-uds/run.sock"
 	s := grpc.NewServer(grpc.MaxRecvMsgSize(parsedFlags.maxRecvMsgSize))
-	extSrv := extensionserver.New(mgr.GetClient(), ctrl.Log, extProcUDSPath, false)
+	extSrv := extensionserver.New(mgr.GetClient(), ctrl.Log, extProcUDSPath, false, uint32(parsedFlags.extProcGrpcMaxRecvMsgSize))
 	egextension.RegisterEnvoyGatewayExtensionServer(s, extSrv)
 	grpc_health_v1.RegisterHealthServer(s, extSrv)
 	go func() {
