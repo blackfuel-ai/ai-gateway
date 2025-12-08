@@ -196,6 +196,12 @@ controller:
   # resources (configuration) is big. Defaults to 4MB.
   # maxRecvMsgSize: "4194304"
 
+  # extProcMaxRecvMsgSize is the maximum message size in bytes that the extProc gRPC server can receive
+  # from Envoy proxy. This value should be increased when handling large request payloads.
+  # Defaults to 512MB (536870912 bytes).
+  # Example: "16777216" for 16MB to handle large context requests
+  # extProcMaxRecvMsgSize: "536870912"
+
   # MCP Proxy settings
   mcp:
     # Configuration for MCP session encryption.
