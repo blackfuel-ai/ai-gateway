@@ -59,8 +59,8 @@ jobs:
       - name: Extract metadata
         id: meta
         run: |
-          # Use semver with blackfuel build number: v0.4.0+bf<run_number>
-          TAG="v${{ env.BASE_VERSION }}+bf${{ github.run_number }}"
+          # Use v0.4.0-bf<run_number> format (Docker tags don't support +)
+          TAG="v${{ env.BASE_VERSION }}-bf${{ github.run_number }}"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Building tag: ${TAG}"
 
@@ -109,9 +109,8 @@ jobs:
       - name: Extract metadata
         id: meta
         run: |
-          # Use semver with blackfuel build number: v0.4.0+bf<run_number>
-          # Note: + is valid in semver but some registries need it URL-encoded
-          VERSION="v${{ env.BASE_VERSION }}+bf${{ github.run_number }}"
+          # Use v0.4.0-bf<run_number> format for helm charts (consistent with Docker)
+          VERSION="v${{ env.BASE_VERSION }}-bf${{ github.run_number }}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building helm chart version: ${VERSION}"
 
