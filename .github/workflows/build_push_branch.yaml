@@ -114,8 +114,13 @@ jobs:
           # Use branch name and short SHA as version
           BRANCH_NAME=${GITHUB_REF#refs/heads/}
           SHORT_SHA=${GITHUB_SHA::7}
-          # Sanitize version (replace / with -)
-          VERSION=$(echo "${BRANCH_NAME}-${SHORT_SHA}" | sed 's/\//-/g')
+          # Sanitize tag (replace / with -)
+          TAG=$(echo "${BRANCH_NAME}-${SHORT_SHA}" | sed 's/\//-/g')
+          # Create valid semver: 0.0.0-<sanitized-branch>.<sha>
+          # Helm requires valid semver, so we use prerelease format
+          SEMVER_BRANCH=$(echo "${BRANCH_NAME}" | sed 's/\//-/g' | sed 's/[^a-zA-Z0-9-]/-/g')
+          VERSION="0.0.0-${SEMVER_BRANCH}.${SHORT_SHA}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building helm chart version: ${VERSION}"
 
@@ -123,7 +128,7 @@ jobs:
         run: |
           make helm-push \
             HELM_CHART_VERSION="${{ steps.meta.outputs.version }}" \
-            TAG="${{ steps.meta.outputs.version }}" \
+            TAG="${{ steps.meta.outputs.tag }}" \
             OCI_REGISTRY="${{ env.REGISTRY }}/${{ github.repository_owner }}"
 
       - name: Output helm chart references
