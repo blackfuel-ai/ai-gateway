@@ -1619,3 +1619,133 @@ func Test_parseParamsAndMaybeStartSpan_NilParam(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, s)
 }
+
+func TestExtractClaimHeaders(t *testing.T) {
+	tests := []struct {
+		name           string
+		authHeader     string
+		claimToHeaders []filterapi.ClaimToHeader
+		expected       map[string]string
+	}{
+		{
+			name:           "no claim to headers config",
+			authHeader:     "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwiZW1haWwiOiJ0ZXN0QGV4YW1wbGUuY29tIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+			claimToHeaders: nil,
+			expected:       nil,
+		},
+		{
+			name:       "no auth header",
+			authHeader: "",
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "sub", Header: "X-User-Id"},
+			},
+			expected: nil,
+		},
+		{
+			name:       "invalid auth header format",
+			authHeader: "Basic dXNlcjpwYXNz",
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "sub", Header: "X-User-Id"},
+			},
+			expected: nil,
+		},
+		{
+			name:       "extract simple claims",
+			authHeader: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwiZW1haWwiOiJ0ZXN0QGV4YW1wbGUuY29tIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "sub", Header: "X-User-Id"},
+				{Claim: "email", Header: "X-User-Email"},
+			},
+			expected: map[string]string{
+				"X-User-Id":    "1234567890",
+				"X-User-Email": "test@example.com",
+			},
+		},
+		{
+			name:       "missing claim",
+			authHeader: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "sub", Header: "X-User-Id"},
+				{Claim: "nonexistent", Header: "X-Missing"},
+			},
+			expected: map[string]string{
+				"X-User-Id": "1234567890",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+
+			result := extractClaimHeaders(req, tt.claimToHeaders)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGetNestedClaim(t *testing.T) {
+	tests := []struct {
+		name      string
+		claims    map[string]interface{}
+		claimPath string
+		expected  string
+	}{
+		{
+			name:      "simple claim",
+			claims:    map[string]interface{}{"sub": "user123"},
+			claimPath: "sub",
+			expected:  "user123",
+		},
+		{
+			name: "nested claim",
+			claims: map[string]interface{}{
+				"realm_access": map[string]interface{}{
+					"roles": []interface{}{"admin", "user"},
+				},
+			},
+			claimPath: "realm_access.roles",
+			expected:  "admin,user",
+		},
+		{
+			name:      "missing claim",
+			claims:    map[string]interface{}{"sub": "user123"},
+			claimPath: "nonexistent",
+			expected:  "",
+		},
+		{
+			name: "deeply nested claim",
+			claims: map[string]interface{}{
+				"a": map[string]interface{}{
+					"b": map[string]interface{}{
+						"c": "deep-value",
+					},
+				},
+			},
+			claimPath: "a.b.c",
+			expected:  "deep-value",
+		},
+		{
+			name:      "numeric claim",
+			claims:    map[string]interface{}{"exp": float64(1234567890)},
+			claimPath: "exp",
+			expected:  "1234567890",
+		},
+		{
+			name:      "boolean claim",
+			claims:    map[string]interface{}{"email_verified": true},
+			claimPath: "email_verified",
+			expected:  "true",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getNestedClaim(tt.claims, tt.claimPath)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}

@@ -27,6 +27,17 @@ type MCPRoute struct {
 
 	// Backends is the list of backends that this route can route to.
 	Backends []MCPBackend `json:"backends"`
+
+	// ClaimToHeaders is a list of JWT claims to be extracted and forwarded as HTTP headers to backend MCP servers.
+	ClaimToHeaders []ClaimToHeader `json:"claimToHeaders,omitempty"`
+}
+
+// ClaimToHeader defines a JWT claim to extract and forward as an HTTP header.
+type ClaimToHeader struct {
+	// Claim is the name of the JWT claim to extract.
+	Claim string `json:"claim"`
+	// Header is the HTTP header name to forward the claim value as.
+	Header string `json:"header"`
 }
 
 // MCPBackend is the MCP backend configuration.

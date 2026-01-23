@@ -51,8 +51,9 @@ type (
 	}
 
 	mcpProxyConfigRoute struct {
-		backends      map[filterapi.MCPBackendName]filterapi.MCPBackend
-		toolSelectors map[filterapi.MCPBackendName]*toolSelector
+		backends       map[filterapi.MCPBackendName]filterapi.MCPBackend
+		toolSelectors  map[filterapi.MCPBackendName]*toolSelector
+		claimToHeaders []filterapi.ClaimToHeader
 	}
 
 	// toolSelector filters tools using include patterns with exact matches or regular expressions.
@@ -133,8 +134,9 @@ func (p *ProxyConfig) LoadConfig(_ context.Context, config *filterapi.Config) er
 
 	for _, route := range mcpConfig.Routes {
 		r := &mcpProxyConfigRoute{
-			backends:      make(map[filterapi.MCPBackendName]filterapi.MCPBackend, len(route.Backends)),
-			toolSelectors: make(map[filterapi.MCPBackendName]*toolSelector, len(route.Backends)),
+			backends:       make(map[filterapi.MCPBackendName]filterapi.MCPBackend, len(route.Backends)),
+			toolSelectors:  make(map[filterapi.MCPBackendName]*toolSelector, len(route.Backends)),
+			claimToHeaders: route.ClaimToHeaders,
 		}
 		for _, backend := range route.Backends {
 			r.backends[backend.Name] = backend
@@ -164,7 +166,7 @@ func (p *ProxyConfig) LoadConfig(_ context.Context, config *filterapi.Config) er
 
 // newSession creates a new session for a downstream client.
 // It multiplexes the initialize request to all backends defined in the MCPRoute associated with the downstream request.
-func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, routeName filterapi.MCPRouteName, subject string, span tracing.MCPSpan) (*session, error) {
+func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, routeName filterapi.MCPRouteName, subject string, claimHeaders map[string]string, span tracing.MCPSpan) (*session, error) {
 	m.l.Debug("creating new MCP session")
 
 	var (
@@ -228,7 +230,7 @@ func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, rout
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt session ID: %w", err)
 	}
-	return &session{proxy: m, id: secureClientToGatewaySessionID(encrypted)}, nil
+	return &session{proxy: m, id: secureClientToGatewaySessionID(encrypted), claimHeaders: claimHeaders}, nil
 }
 
 // sessionFromID returns the session with the given ID, or error if not found or invalid.

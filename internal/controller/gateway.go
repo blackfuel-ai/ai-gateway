@@ -406,6 +406,15 @@ func mcpConfig(mcpRoutes []aigv1a1.MCPRoute) *filterapi.MCPConfig {
 			mcpRoute.Backends = append(
 				mcpRoute.Backends, mcpBackend)
 		}
+		// Wire claimToHeaders from OAuth security policy if configured
+		if sp := route.Spec.SecurityPolicy; sp != nil && sp.OAuth != nil {
+			for _, cth := range sp.OAuth.ClaimToHeaders {
+				mcpRoute.ClaimToHeaders = append(mcpRoute.ClaimToHeaders, filterapi.ClaimToHeader{
+					Claim:  cth.Claim,
+					Header: cth.Header,
+				})
+			}
+		}
 		mc.Routes = append(mc.Routes, mcpRoute)
 	}
 	return mc

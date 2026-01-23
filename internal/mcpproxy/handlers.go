@@ -236,7 +236,12 @@ func (m *MCPProxy) servePOST(w http.ResponseWriter, r *http.Request) {
 				onErrorResponse(w, http.StatusInternalServerError, "missing route header")
 				return
 			}
-			err = m.handleInitializeRequest(ctx, w, msg, params.(*mcp.InitializeParams), route, extractSubject(r), span)
+			// Extract claim headers from JWT if configured for this route
+			var claimHeaders map[string]string
+			if routeConfig := m.routes[route]; routeConfig != nil {
+				claimHeaders = extractClaimHeaders(r, routeConfig.claimToHeaders)
+			}
+			err = m.handleInitializeRequest(ctx, w, msg, params.(*mcp.InitializeParams), route, extractSubject(r), claimHeaders, span)
 		case "notifications/initialized":
 			// According to the MCP spec, when the server receives a JSON-RPC response or notification from the client
 			// and accepts it, the server MUST return HTTP 202 Accepted with an empty body.
@@ -371,9 +376,9 @@ func errorType(err error) metrics.MCPErrorType {
 }
 
 // handleInitializeRequest handles the "initialize" JSON-RPC method.
-func (m *MCPProxy) handleInitializeRequest(ctx context.Context, w http.ResponseWriter, req *jsonrpc.Request, p *mcp.InitializeParams, route, subject string, span tracing.MCPSpan) error {
+func (m *MCPProxy) handleInitializeRequest(ctx context.Context, w http.ResponseWriter, req *jsonrpc.Request, p *mcp.InitializeParams, route, subject string, claimHeaders map[string]string, span tracing.MCPSpan) error {
 	m.metrics.RecordClientCapabilities(ctx, p.Capabilities, p)
-	s, err := m.newSession(ctx, p, route, subject, span)
+	s, err := m.newSession(ctx, p, route, subject, claimHeaders, span)
 	if err != nil {
 		m.l.Error("failed to create new session", slog.String("error", err.Error()))
 		onErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to create new session: %v", err))
@@ -1352,4 +1357,90 @@ func (m *MCPProxy) handleNotificationsRootsListChanged(ctx context.Context, s *s
 	// Just wait for all requests to complete and return 202 Accepted. There should be events sent from the backends per the spec.
 	<-eventChan
 	return nil
+}
+
+// extractClaimHeaders extracts JWT claims from the Authorization header and returns them as a map of header names to values.
+func extractClaimHeaders(r *http.Request, claimToHeaders []filterapi.ClaimToHeader) map[string]string {
+	if len(claimToHeaders) == 0 {
+		return nil
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return nil
+	}
+
+	// Extract the token from the Authorization header (expects "Bearer <token>")
+	const bearerPrefix = "Bearer "
+	if !strings.HasPrefix(authHeader, bearerPrefix) {
+		return nil
+	}
+	tokenString := authHeader[len(bearerPrefix):]
+
+	// Parse the JWT without validation (validation is done by the OAuth filter)
+	parser := jwt.NewParser()
+	token, _, err := parser.ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return nil
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil
+	}
+
+	result := make(map[string]string)
+	for _, cth := range claimToHeaders {
+		value := getNestedClaim(claims, cth.Claim)
+		if value != "" {
+			result[cth.Header] = value
+		}
+	}
+
+	return result
+}
+
+// getNestedClaim retrieves a claim value from JWT claims, supporting dot notation for nested claims.
+func getNestedClaim(claims jwt.MapClaims, claimPath string) string {
+	parts := strings.Split(claimPath, ".")
+	var current interface{} = map[string]interface{}(claims)
+
+	for _, part := range parts {
+		switch v := current.(type) {
+		case map[string]interface{}:
+			current = v[part]
+		case jwt.MapClaims:
+			current = v[part]
+		default:
+			return ""
+		}
+		if current == nil {
+			return ""
+		}
+	}
+
+	// Convert the final value to string
+	switch v := current.(type) {
+	case string:
+		return v
+	case []interface{}:
+		// For arrays (like roles), join with comma
+		strs := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				strs = append(strs, s)
+			}
+		}
+		return strings.Join(strs, ",")
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		// For complex types, try JSON encoding
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
+		return ""
+	}
 }

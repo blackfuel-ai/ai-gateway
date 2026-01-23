@@ -220,6 +220,31 @@ type MCPRouteOAuth struct {
 	//
 	// +kubebuilder:validation:Required
 	ProtectedResourceMetadata ProtectedResourceMetadata `json:"protectedResourceMetadata"`
+
+	// ClaimToHeaders is a list of JWT claims to be extracted and forwarded as HTTP headers to backend MCP servers.
+	// This allows backends to access user identity information for authorization, auditing, or personalization.
+	//
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	ClaimToHeaders []ClaimToHeader `json:"claimToHeaders,omitempty"`
+}
+
+// ClaimToHeader defines a JWT claim to extract and forward as an HTTP header to backend MCP servers.
+type ClaimToHeader struct {
+	// Claim is the name of the JWT claim to extract. Supports nested claims using dot notation (e.g., "realm_access.roles").
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Claim string `json:"claim"`
+
+	// Header is the HTTP header name to use when forwarding the claim value to backends.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Header string `json:"header"`
 }
 
 // JWKS defines how to obtain JSON Web Key Sets (JWKS) either from a remote HTTP/HTTPS endpoint or from a local source.
