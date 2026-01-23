@@ -193,7 +193,7 @@ func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, rout
 				m.l.Debug("creating MCP session", slog.String("backend", backend.Name))
 			}
 			startAt := time.Now()
-			initResult, err := m.initializeSession(ctx, routeName, backend, p)
+			initResult, err := m.initializeSession(ctx, routeName, backend, p, claimHeaders)
 			if err != nil {
 				m.l.Error("failed to create MCP session", slog.String("backend", backend.Name), slog.String("error", err.Error()))
 				// If one backend fails, don't fail the overall connection. Create a session to the rest of the backends, as they
@@ -230,11 +230,26 @@ func (m *MCPProxy) newSession(ctx context.Context, p *mcp.InitializeParams, rout
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt session ID: %w", err)
 	}
-	return &session{proxy: m, id: secureClientToGatewaySessionID(encrypted), claimHeaders: claimHeaders}, nil
+
+	// Build perBackendSessions map from finalEntries
+	perBackendSessions := make(map[filterapi.MCPBackendName]*compositeSessionEntry, len(finalEntries))
+	for i := range finalEntries {
+		entry := &finalEntries[i]
+		perBackendSessions[entry.backendName] = entry
+	}
+
+	return &session{
+		proxy:              m,
+		id:                 secureClientToGatewaySessionID(encrypted),
+		route:              routeName,
+		perBackendSessions: perBackendSessions,
+		claimHeaders:       claimHeaders,
+	}, nil
 }
 
 // sessionFromID returns the session with the given ID, or error if not found or invalid.
-func (m *MCPProxy) sessionFromID(id secureClientToGatewaySessionID, lastEvent secureClientToGatewayEventID) (*session, error) {
+// If r is provided, claim headers will be extracted from the request based on the route's claimToHeaders config.
+func (m *MCPProxy) sessionFromID(id secureClientToGatewaySessionID, lastEvent secureClientToGatewayEventID, r *http.Request) (*session, error) {
 	decrypted, err := m.sessionCrypto.Decrypt(string(id))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt session ID: %w", err)
@@ -258,7 +273,15 @@ func (m *MCPProxy) sessionFromID(id secureClientToGatewaySessionID, lastEvent se
 		}
 	}
 
-	return &session{id: id, route: route, proxy: m, perBackendSessions: perBackendSessionIDs}, nil
+	// Extract claim headers from the request if the route has claimToHeaders configured
+	var claimHeaders map[string]string
+	if r != nil {
+		if routeConfig := m.routes[route]; routeConfig != nil {
+			claimHeaders = extractClaimHeaders(r, routeConfig.claimToHeaders)
+		}
+	}
+
+	return &session{id: id, route: route, proxy: m, perBackendSessions: perBackendSessionIDs, claimHeaders: claimHeaders}, nil
 }
 
 type initializeResult struct {
@@ -266,7 +289,7 @@ type initializeResult struct {
 	result    *mcp.InitializeResult
 }
 
-func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, p *mcp.InitializeParams) (*initializeResult, error) {
+func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, p *mcp.InitializeParams, claimHeaders map[string]string) (*initializeResult, error) {
 	// Send the initialize request to the MCP backend listener.
 	reqID := mustJSONRPCRequestID()
 	var (
@@ -280,7 +303,7 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 			return nil, fmt.Errorf("failed to marshal MCP initialize params: %w", err)
 		}
 		mcpReq := &jsonrpc.Request{Method: "initialize", Params: initializeReq, ID: reqID}
-		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, nil, mcpReq)
+		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, nil, mcpReq, claimHeaders)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send MCP initialize request: %w", err)
 		}
@@ -363,7 +386,7 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 		mcpReq := &jsonrpc.Request{Method: "notifications/initialized", Params: json.RawMessage(`{}`)}
 		resp, err := m.invokeJSONRPCRequest(ctx, routeName, backend, &compositeSessionEntry{
 			sessionID: gatewayToMCPServerSessionID(sessionID),
-		}, mcpReq)
+		}, mcpReq, claimHeaders)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send MCP notifications/initialized request: %w", err)
 		}
@@ -384,7 +407,7 @@ func (m *MCPProxy) initializeSession(ctx context.Context, routeName filterapi.MC
 	}, nil
 }
 
-func (m *MCPProxy) invokeJSONRPCRequest(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, cse *compositeSessionEntry, msg jsonrpc.Message) (*http.Response, error) {
+func (m *MCPProxy) invokeJSONRPCRequest(ctx context.Context, routeName filterapi.MCPRouteName, backend filterapi.MCPBackend, cse *compositeSessionEntry, msg jsonrpc.Message, claimHeaders map[string]string) (*http.Response, error) {
 	encoded, err := jsonrpc.EncodeMessage(msg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode MCP message: %w", err)
@@ -404,6 +427,12 @@ func (m *MCPProxy) invokeJSONRPCRequest(ctx context.Context, routeName filterapi
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	// Forward JWT claim headers to backend
+	for header, value := range claimHeaders {
+		req.Header.Set(header, value)
+	}
+
 	client := http.Client{Timeout: 10 * time.Second}
 
 	resp, err := client.Do(req)

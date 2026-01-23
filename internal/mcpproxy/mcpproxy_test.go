@@ -216,7 +216,7 @@ func TestSessionFromID_ValidID(t *testing.T) {
 	// Create a valid session ID.
 	sessionID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
 	eventID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
-	session, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID))
+	session, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID), nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, session)
@@ -228,7 +228,7 @@ func TestSessionFromID_InvalidID(t *testing.T) {
 
 	// Create an invalid session ID.
 	sessionID := secureID(t, proxy, "invalid-session-id")
-	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "")
+	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "", nil)
 
 	require.Error(t, err)
 	require.Nil(t, s)
@@ -254,7 +254,7 @@ func TestInitializeSession_Success(t *testing.T) {
 	proxy := newTestMCPProxy()
 	proxy.backendListenerAddr = backendServer.URL
 
-	res, err := proxy.initializeSession(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/a/b/c"}, &mcp.InitializeParams{})
+	res, err := proxy.initializeSession(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/a/b/c"}, &mcp.InitializeParams{}, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, gatewayToMCPServerSessionID("test-session-123"), res.sessionID)
@@ -272,7 +272,7 @@ func TestInitializeSession_InitializeFailure(t *testing.T) {
 	proxy := newTestMCPProxy()
 	proxy.backendListenerAddr = backendServer.URL
 
-	sessionID, err := proxy.initializeSession(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/a/b/c"}, &mcp.InitializeParams{})
+	sessionID, err := proxy.initializeSession(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/a/b/c"}, &mcp.InitializeParams{}, nil)
 
 	require.Error(t, err)
 	require.Empty(t, sessionID)
@@ -300,7 +300,7 @@ func TestInitializeSession_NotificationsInitializedFailure(t *testing.T) {
 	proxy := newTestMCPProxy()
 	proxy.backendListenerAddr = backendServer.URL
 
-	sessionID, err := proxy.initializeSession(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/aaaaaaaaaaaaaa"}, &mcp.InitializeParams{})
+	sessionID, err := proxy.initializeSession(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/aaaaaaaaaaaaaa"}, &mcp.InitializeParams{}, nil)
 
 	require.Error(t, err)
 	require.Empty(t, sessionID)
@@ -322,7 +322,7 @@ func TestInvokeJSONRPCRequest_Success(t *testing.T) {
 	m.backendListenerAddr = backendServer.URL
 	resp, err := m.invokeJSONRPCRequest(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/aaaaaaaaaaaaaa"}, &compositeSessionEntry{
 		sessionID: "test-session",
-	}, &jsonrpc.Request{})
+	}, &jsonrpc.Request{}, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -345,7 +345,7 @@ func TestInvokeJSONRPCRequest_NoSessionID(t *testing.T) {
 	m.backendListenerAddr = backendServer.URL
 	resp, err := m.invokeJSONRPCRequest(t.Context(), "route1", filterapi.MCPBackend{Name: "test-backend", Path: "/mcp"}, &compositeSessionEntry{
 		sessionID: "",
-	}, &jsonrpc.Request{})
+	}, &jsonrpc.Request{}, nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, resp)

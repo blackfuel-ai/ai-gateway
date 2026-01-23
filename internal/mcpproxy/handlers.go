@@ -48,7 +48,7 @@ func (m *MCPProxy) serveGET(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing session ID", http.StatusBadRequest)
 		return
 	}
-	s, err := m.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(lastEventID))
+	s, err := m.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(lastEventID), r)
 	if err != nil {
 		m.l.Error("invalid session ID in GET request", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
@@ -82,7 +82,7 @@ func (m *MCPProxy) serverDELETE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// we didn't care about last event id in DELETE.
-	s, err := m.sessionFromID(secureClientToGatewaySessionID(sessionID), "")
+	s, err := m.sessionFromID(secureClientToGatewaySessionID(sessionID), "", r)
 	if err != nil {
 		m.l.Error("invalid session ID in DELETE request", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
@@ -133,7 +133,7 @@ func (m *MCPProxy) servePOST(w http.ResponseWriter, r *http.Request) {
 		m.metrics.RecordMethodCount(ctx, requestMethod, params)
 	}()
 	if sessionID := r.Header.Get(sessionIDHeader); sessionID != "" {
-		s, err = m.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(r.Header.Get(lastEventIDHeader)))
+		s, err = m.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(r.Header.Get(lastEventIDHeader)), r)
 		if err != nil {
 			errType = metrics.MCPErrorInvalidSessionID
 			m.l.Error("invalid session ID in POST request", slog.String("session_id", sessionID), slog.String("error", err.Error()))
@@ -505,7 +505,7 @@ func (m *MCPProxy) handleClientToServerResponse(ctx context.Context, s *session,
 		onErrorResponse(w, http.StatusNotFound, fmt.Sprintf("unknown backend %s", backendName))
 		return fmt.Errorf("%w: unknown backend %s", errBackendNotFound, backendName)
 	}
-	resp, err := m.invokeJSONRPCRequest(ctx, s.route, backend, cse, res)
+	resp, err := m.invokeJSONRPCRequest(ctx, s.route, backend, cse, res, s.claimHeaders)
 	if err != nil {
 		onErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to send: %v", err))
 		return err
@@ -1102,7 +1102,7 @@ func (m *MCPProxy) handleClientToServerNotificationsProgress(ctx context.Context
 // invokeAndProxyResponse invokes the given JSON-RPC request to the given backend and proxies the response back to the client
 // via w ResponseWriter.
 func (m *MCPProxy) invokeAndProxyResponse(ctx context.Context, s *session, w http.ResponseWriter, backend filterapi.MCPBackend, sess *compositeSessionEntry, req *jsonrpc.Request) error {
-	resp, err := m.invokeJSONRPCRequest(ctx, s.route, backend, sess, req)
+	resp, err := m.invokeJSONRPCRequest(ctx, s.route, backend, sess, req, s.claimHeaders)
 	if err != nil {
 		onErrorResponse(w, http.StatusInternalServerError, fmt.Sprintf("call to %s failed: %v", backend.Name, err))
 		return err

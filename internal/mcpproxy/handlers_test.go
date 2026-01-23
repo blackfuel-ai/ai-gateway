@@ -20,6 +20,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -774,7 +775,7 @@ data: %s
 	rr := httptest.NewRecorder()
 	sessionID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
 	eventID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
-	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID))
+	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID), nil)
 	require.NoError(t, err)
 
 	proxy.proxyResponseBody(t.Context(), s, rr, httpResp, &jsonrpc.Request{Method: "test", ID: id}, filterapi.MCPBackend{Name: "mybackend"})
@@ -1746,6 +1747,316 @@ func TestGetNestedClaim(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := getNestedClaim(tt.claims, tt.claimPath)
 			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestClaimToHeaders_EndToEnd tests the complete flow of extracting JWT claims
+// and forwarding them as headers to backend MCP servers during initialization
+// and subsequent requests.
+func TestClaimToHeaders_EndToEnd(t *testing.T) {
+	// Create a test JWT token with claims we want to extract
+	// This is an unsigned token - in production, Envoy's OAuth filter validates it
+	createTestJWT := func(claims map[string]interface{}) string {
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+		claimsJSON, _ := json.Marshal(claims)
+		payload := base64.RawURLEncoding.EncodeToString(claimsJSON)
+		return header + "." + payload + "."
+	}
+
+	testClaims := map[string]interface{}{
+		"sub":                "user-123",
+		"email":              "test@example.com",
+		"preferred_username": "testuser",
+		"groups":             []interface{}{"admin", "users"},
+		"jti":                "token-id-456",
+		"nested": map[string]interface{}{
+			"org": "test-org",
+		},
+	}
+	testToken := createTestJWT(testClaims)
+
+	// Track headers received by the backend
+	var receivedHeaders http.Header
+	var receivedHeadersMu sync.Mutex
+	var requestCount int
+
+	// Create a mock MCP backend server that records received headers
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeadersMu.Lock()
+		receivedHeaders = r.Header.Clone()
+		requestCount++
+		currentCount := requestCount
+		receivedHeadersMu.Unlock()
+
+		method := r.Header.Get(internalapi.MCPMetadataHeaderMethod)
+
+		// First request: initialize - return valid response
+		// Second request: notifications/initialized - return 202 Accepted
+		if method == "initialize" || currentCount == 1 {
+			resp := &jsonrpc.Response{
+				Result: json.RawMessage(`{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}`),
+			}
+			if idHeader := r.Header.Get(internalapi.MCPMetadataHeaderRequestID); idHeader != "" {
+				resp.ID, _ = jsonrpc.MakeID(idHeader)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(sessionIDHeader, "backend-session-123")
+			respBytes, _ := jsonrpc.EncodeMessage(resp)
+			w.Write(respBytes)
+		} else {
+			// notifications/initialized - return 202 Accepted
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	t.Cleanup(backendServer.Close)
+
+	// Create MCP proxy with claimToHeaders configuration
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = backendServer.URL
+	proxy.routes = map[filterapi.MCPRouteName]*mcpProxyConfigRoute{
+		"test-route-with-claims": {
+			backends: map[filterapi.MCPBackendName]filterapi.MCPBackend{
+				"test-backend": {Name: "test-backend", Path: "/mcp"},
+			},
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "sub", Header: "X-User-Id"},
+				{Claim: "email", Header: "X-User-Email"},
+				{Claim: "preferred_username", Header: "X-User-Name"},
+				{Claim: "groups", Header: "X-User-Groups"},
+				{Claim: "jti", Header: "X-Token-Id"},
+				{Claim: "nested.org", Header: "X-User-Org"},
+			},
+		},
+	}
+
+	t.Run("initialize request forwards claim headers to backend", func(t *testing.T) {
+		receivedHeadersMu.Lock()
+		receivedHeaders = nil
+		requestCount = 0
+		receivedHeadersMu.Unlock()
+
+		// Create initialize request with JWT in Authorization header
+		initParams := &mcp.InitializeParams{
+			ProtocolVersion: "2025-06-18",
+			ClientInfo:      &mcp.Implementation{Name: "test-client", Version: "1.0"},
+		}
+		paramsJSON, _ := json.Marshal(initParams)
+		reqID, _ := jsonrpc.MakeID("init-1")
+		initReq := &jsonrpc.Request{
+			ID:     reqID,
+			Method: "initialize",
+			Params: paramsJSON,
+		}
+		reqBody, _ := jsonrpc.EncodeMessage(initReq)
+
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(internalapi.MCPRouteHeader, "test-route-with-claims")
+
+		rr := httptest.NewRecorder()
+		proxy.servePOST(rr, req)
+
+		// Verify the request was successful
+		require.Equal(t, http.StatusOK, rr.Code, "Response body: %s", rr.Body.String())
+
+		// Verify the backend received the claim headers
+		receivedHeadersMu.Lock()
+		defer receivedHeadersMu.Unlock()
+
+		require.NotNil(t, receivedHeaders, "Backend should have received headers")
+		require.Equal(t, "user-123", receivedHeaders.Get("X-User-Id"), "X-User-Id header should contain sub claim")
+		require.Equal(t, "test@example.com", receivedHeaders.Get("X-User-Email"), "X-User-Email header should contain email claim")
+		require.Equal(t, "testuser", receivedHeaders.Get("X-User-Name"), "X-User-Name header should contain preferred_username claim")
+		require.Equal(t, "admin,users", receivedHeaders.Get("X-User-Groups"), "X-User-Groups header should contain groups claim as comma-separated")
+		require.Equal(t, "token-id-456", receivedHeaders.Get("X-Token-Id"), "X-Token-Id header should contain jti claim")
+		require.Equal(t, "test-org", receivedHeaders.Get("X-User-Org"), "X-User-Org header should contain nested.org claim")
+	})
+
+	t.Run("missing Authorization header results in no claim headers", func(t *testing.T) {
+		receivedHeadersMu.Lock()
+		receivedHeaders = nil
+		requestCount = 0
+		receivedHeadersMu.Unlock()
+
+		initParams := &mcp.InitializeParams{
+			ProtocolVersion: "2025-06-18",
+			ClientInfo:      &mcp.Implementation{Name: "test-client", Version: "1.0"},
+		}
+		paramsJSON, _ := json.Marshal(initParams)
+		reqID, _ := jsonrpc.MakeID("init-2")
+		initReq := &jsonrpc.Request{
+			ID:     reqID,
+			Method: "initialize",
+			Params: paramsJSON,
+		}
+		reqBody, _ := jsonrpc.EncodeMessage(initReq)
+
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
+		// No Authorization header
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(internalapi.MCPRouteHeader, "test-route-with-claims")
+
+		rr := httptest.NewRecorder()
+		proxy.servePOST(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		receivedHeadersMu.Lock()
+		defer receivedHeadersMu.Unlock()
+
+		// Claim headers should not be present
+		require.Empty(t, receivedHeaders.Get("X-User-Id"))
+		require.Empty(t, receivedHeaders.Get("X-User-Email"))
+	})
+
+	t.Run("route without claimToHeaders config sends no claim headers", func(t *testing.T) {
+		receivedHeadersMu.Lock()
+		receivedHeaders = nil
+		requestCount = 0
+		receivedHeadersMu.Unlock()
+
+		// Add a route without claimToHeaders
+		proxy.routes["route-no-claims"] = &mcpProxyConfigRoute{
+			backends: map[filterapi.MCPBackendName]filterapi.MCPBackend{
+				"test-backend": {Name: "test-backend", Path: "/mcp"},
+			},
+			// No claimToHeaders configured
+		}
+
+		initParams := &mcp.InitializeParams{
+			ProtocolVersion: "2025-06-18",
+			ClientInfo:      &mcp.Implementation{Name: "test-client", Version: "1.0"},
+		}
+		paramsJSON, _ := json.Marshal(initParams)
+		reqID, _ := jsonrpc.MakeID("init-3")
+		initReq := &jsonrpc.Request{
+			ID:     reqID,
+			Method: "initialize",
+			Params: paramsJSON,
+		}
+		reqBody, _ := jsonrpc.EncodeMessage(initReq)
+
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(reqBody))
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(internalapi.MCPRouteHeader, "route-no-claims")
+
+		rr := httptest.NewRecorder()
+		proxy.servePOST(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		receivedHeadersMu.Lock()
+		defer receivedHeadersMu.Unlock()
+
+		// Claim headers should not be present
+		require.Empty(t, receivedHeaders.Get("X-User-Id"))
+		require.Empty(t, receivedHeaders.Get("X-User-Email"))
+	})
+}
+
+// TestExtractClaimHeaders_Comprehensive tests the extractClaimHeaders function with various scenarios.
+func TestExtractClaimHeaders_Comprehensive(t *testing.T) {
+	createTestJWT := func(claims map[string]interface{}) string {
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+		claimsJSON, _ := json.Marshal(claims)
+		payload := base64.RawURLEncoding.EncodeToString(claimsJSON)
+		return header + "." + payload + "."
+	}
+
+	tests := []struct {
+		name           string
+		authHeader     string
+		claimToHeaders []filterapi.ClaimToHeader
+		expected       map[string]string
+	}{
+		{
+			name:       "extracts simple string claims",
+			authHeader: "Bearer " + createTestJWT(map[string]interface{}{"sub": "user-123", "email": "test@example.com"}),
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "sub", Header: "X-User-Id"},
+				{Claim: "email", Header: "X-User-Email"},
+			},
+			expected: map[string]string{
+				"X-User-Id":    "user-123",
+				"X-User-Email": "test@example.com",
+			},
+		},
+		{
+			name:       "extracts array claims as comma-separated",
+			authHeader: "Bearer " + createTestJWT(map[string]interface{}{"groups": []interface{}{"admin", "users", "devs"}}),
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "groups", Header: "X-User-Groups"},
+			},
+			expected: map[string]string{
+				"X-User-Groups": "admin,users,devs",
+			},
+		},
+		{
+			name:       "extracts nested claims",
+			authHeader: "Bearer " + createTestJWT(map[string]interface{}{"org": map[string]interface{}{"id": "org-456", "name": "Test Org"}}),
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "org.id", Header: "X-Org-Id"},
+				{Claim: "org.name", Header: "X-Org-Name"},
+			},
+			expected: map[string]string{
+				"X-Org-Id":   "org-456",
+				"X-Org-Name": "Test Org",
+			},
+		},
+		{
+			name:       "missing claims are not included",
+			authHeader: "Bearer " + createTestJWT(map[string]interface{}{"sub": "user-123"}),
+			claimToHeaders: []filterapi.ClaimToHeader{
+				{Claim: "sub", Header: "X-User-Id"},
+				{Claim: "email", Header: "X-User-Email"}, // not in token
+			},
+			expected: map[string]string{
+				"X-User-Id": "user-123",
+			},
+		},
+		{
+			name:           "empty claimToHeaders returns nil",
+			authHeader:     "Bearer " + createTestJWT(map[string]interface{}{"sub": "user-123"}),
+			claimToHeaders: []filterapi.ClaimToHeader{},
+			expected:       nil,
+		},
+		{
+			name:           "missing Authorization header returns nil",
+			authHeader:     "",
+			claimToHeaders: []filterapi.ClaimToHeader{{Claim: "sub", Header: "X-User-Id"}},
+			expected:       nil,
+		},
+		{
+			name:           "non-Bearer Authorization header returns nil",
+			authHeader:     "Basic dXNlcjpwYXNz",
+			claimToHeaders: []filterapi.ClaimToHeader{{Claim: "sub", Header: "X-User-Id"}},
+			expected:       nil,
+		},
+		{
+			name:           "invalid JWT returns nil",
+			authHeader:     "Bearer invalid-token",
+			claimToHeaders: []filterapi.ClaimToHeader{{Claim: "sub", Header: "X-User-Id"}},
+			expected:       nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+
+			result := extractClaimHeaders(req, tt.claimToHeaders)
+
+			if tt.expected == nil {
+				require.Nil(t, result)
+			} else {
+				require.Equal(t, tt.expected, result)
+			}
 		})
 	}
 }
