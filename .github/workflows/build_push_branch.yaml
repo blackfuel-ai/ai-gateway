@@ -10,6 +10,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/ai-gateway
+  # Base version for blackfuel fork builds (based on upstream v0.4.0)
+  BASE_VERSION: "0.4.0"
 
 jobs:
   docker_builds:
@@ -57,12 +59,8 @@ jobs:
       - name: Extract metadata
         id: meta
         run: |
-          # Use branch name and short SHA as tag
-          BRANCH_NAME=${GITHUB_REF#refs/heads/}
-          SHORT_SHA=${GITHUB_SHA::7}
-          TAG="${BRANCH_NAME}-${SHORT_SHA}"
-          # Sanitize tag (replace / with -)
-          TAG=$(echo "$TAG" | sed 's/\//-/g')
+          # Use semver with blackfuel build number: v0.4.0+bf<run_number>
+          TAG="v${{ env.BASE_VERSION }}+bf${{ github.run_number }}"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Building tag: ${TAG}"
 
@@ -111,16 +109,9 @@ jobs:
       - name: Extract metadata
         id: meta
         run: |
-          # Use branch name and short SHA as version
-          BRANCH_NAME=${GITHUB_REF#refs/heads/}
-          SHORT_SHA=${GITHUB_SHA::7}
-          # Sanitize tag (replace / with -)
-          TAG=$(echo "${BRANCH_NAME}-${SHORT_SHA}" | sed 's/\//-/g')
-          # Create valid semver: 0.0.0-<sanitized-branch>.<sha>
-          # Helm requires valid semver, so we use prerelease format
-          SEMVER_BRANCH=$(echo "${BRANCH_NAME}" | sed 's/\//-/g' | sed 's/[^a-zA-Z0-9-]/-/g')
-          VERSION="0.0.0-${SEMVER_BRANCH}.${SHORT_SHA}"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          # Use semver with blackfuel build number: v0.4.0+bf<run_number>
+          # Note: + is valid in semver but some registries need it URL-encoded
+          VERSION="v${{ env.BASE_VERSION }}+bf${{ github.run_number }}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building helm chart version: ${VERSION}"
 
@@ -128,7 +119,7 @@ jobs:
         run: |
           make helm-push \
             HELM_CHART_VERSION="${{ steps.meta.outputs.version }}" \
-            TAG="${{ steps.meta.outputs.tag }}" \
+            TAG="${{ steps.meta.outputs.version }}" \
             OCI_REGISTRY="${{ env.REGISTRY }}/${{ github.repository_owner }}"
 
       - name: Output helm chart references
