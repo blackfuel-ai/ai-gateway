@@ -202,14 +202,28 @@ data: {"jsonrpc":"2.0","id":"ff3964c5-4c79-4567-96e2-29e905754e58","result":{"ca
 func TestSessionFromID_ValidID(t *testing.T) {
 	proxy := newTestMCPProxy()
 
-	// Create a valid session ID.
-	sessionID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
-	eventID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
+	// Create a valid session ID with a route and backend that exist in the test proxy config.
+	sessionID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
+	eventID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
 	session, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID))
 
 	require.NoError(t, err)
 	require.NotNil(t, session)
 	require.Equal(t, secureClientToGatewaySessionID(sessionID), session.clientGatewaySessionID())
+}
+
+func TestSessionFromID_StaleBackend(t *testing.T) {
+	proxy := newTestMCPProxy()
+
+	// Create a session referencing a backend that no longer exists in the route config
+	// (e.g., after a backend rename). The proxy has "test-route" with "backend1"/"backend2",
+	// but this session references the old "saas-staging" name.
+	sessionID := secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session")))
+	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), "")
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, errStaleSession)
+	require.Nil(t, s)
 }
 
 func TestSessionFromID_InvalidID(t *testing.T) {
