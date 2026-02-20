@@ -304,6 +304,7 @@ func (m *MCPProxy) invokeJSONRPCRequest(ctx context.Context, routeName filterapi
 		return nil, fmt.Errorf("failed to create MCP notifications/initialized request: %w", err)
 	}
 	addMCPHeaders(req, msg, routeName, backend.Name)
+	req.Header.Set(protocolVersionHeader, protocolVersion20250618)
 	if cse != nil {
 		if len(cse.sessionID) > 0 {
 			req.Header.Set(sessionIDHeader, string(cse.sessionID))
