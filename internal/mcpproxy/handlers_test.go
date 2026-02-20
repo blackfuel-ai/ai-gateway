@@ -813,6 +813,7 @@ func TestRecordResponse(t *testing.T) {
 			{method: "sampling/createMessage"},
 			{method: "elicitation/create"},
 			{method: "notifications/tools/list_changed"},
+			{method: "ping"},
 		} {
 			msg := jsonrpc.Request{Method: tc.method}
 			proxy := newTestMCPProxy()
@@ -1393,6 +1394,18 @@ func TestMCPProxy_maybeServerToClientRequestModify(t *testing.T) {
 				// Then check the ID: 1 is encoded as 1__i__backend because of the roundtrip issue of the jsonrpc library in MCP SDK.
 				// https://github.com/modelcontextprotocol/go-sdk/blob/5d64d61974982512270b554afd45d053c6dc2fb7/internal/jsonrpc2/messages.go#L32
 				require.Equal(t, "1__i__backend", modified.ID.Raw().(string))
+			},
+		},
+		{
+			// notifications/resources/updated is a JSON-RPC notification (no ID).
+			// The URI must be rewritten to the downstream form, and no ID-rewriting should happen.
+			// Previously this case fell through to the ID block and returned "missing id in the server->client request".
+			name: "notifications/resources/updated",
+			msg:  &jsonrpc.Request{Method: "notifications/resources/updated", Params: json.RawMessage(`{"uri":"file:///foo"}`)},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				params := &mcp.ResourceUpdatedNotificationParams{}
+				require.NoError(t, json.Unmarshal(modified.Params, params))
+				require.Equal(t, "backend+file:///foo", params.URI)
 			},
 		},
 	} {

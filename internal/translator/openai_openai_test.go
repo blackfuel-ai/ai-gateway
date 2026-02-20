@@ -326,7 +326,8 @@ data: [DONE]
 			hm, bm, tokenUsage, _, err := o.ResponseBody(nil, bytes.NewReader(wholeBody[i:i+1]), false, nil)
 			require.NoError(t, err)
 			require.Nil(t, hm)
-			require.Nil(t, bm)
+			// Single-byte chunks contain no complete lines, so filtered output equals input.
+			require.Equal(t, wholeBody[i:i+1], bm)
 			if outputTokens, ok := tokenUsage.OutputTokens(); ok && outputTokens > 0 {
 				require.Equal(t, uint32(12), outputTokens)
 			}
@@ -462,6 +463,142 @@ func TestResponseModel_OpenAI(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "gpt-4o-2024-08-06", responseModel)
 	require.Equal(t, tokenUsageFrom(10, -1, 5, 15), tokenUsage)
+}
+
+// TestFilterProviderFields verifies that provider-specific fields are stripped from responses.
+func TestFilterProviderFields(t *testing.T) {
+	t.Run("non-streaming strips provider fields", func(t *testing.T) {
+		// Simulate a DeepInfra response with provider-specific fields.
+		responseJSON := `{
+			"id": "chatcmpl-123",
+			"object": "chat.completion",
+			"created": 1234567890,
+			"model": "meta-llama/Llama-3.3-70B-Instruct",
+			"provider": "deepinfra",
+			"choices": [{
+				"index": 0,
+				"message": {"role": "assistant", "content": "Hello"},
+				"finish_reason": "stop"
+			}],
+			"usage": {
+				"prompt_tokens": 10,
+				"completion_tokens": 5,
+				"total_tokens": 15,
+				"cost": 0.000123,
+				"is_byok": false,
+				"cost_details": {"prompt": 0.00008, "completion": 0.000043}
+			}
+		}`
+
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		headers, newBody, tokenUsage, _, err := o.ResponseBody(nil, bytes.NewReader([]byte(responseJSON)), false, nil)
+		require.NoError(t, err)
+		require.NotNil(t, newBody)
+
+		// Provider-specific fields must be absent.
+		require.NotContains(t, string(newBody), `"provider"`)
+		require.NotContains(t, string(newBody), `"cost"`)
+		require.NotContains(t, string(newBody), `"is_byok"`)
+		require.NotContains(t, string(newBody), `"cost_details"`)
+
+		// Standard OpenAI fields must be preserved.
+		require.Contains(t, string(newBody), `"prompt_tokens"`)
+		require.Contains(t, string(newBody), `"completion_tokens"`)
+		require.Contains(t, string(newBody), `"total_tokens"`)
+
+		// Content-Length header must reflect the filtered body size.
+		require.Len(t, headers, 1)
+		require.Equal(t, contentLengthHeaderName, headers[0].Key())
+		require.Equal(t, strconv.Itoa(len(newBody)), headers[0].Value())
+
+		// Token usage must still be extracted correctly.
+		require.Equal(t, tokenUsageFrom(10, -1, 5, 15), tokenUsage)
+	})
+
+	t.Run("non-streaming without provider fields is unchanged", func(t *testing.T) {
+		responseJSON := `{"id":"chatcmpl-abc","object":"chat.completion","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`
+
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		_, newBody, tokenUsage, _, err := o.ResponseBody(nil, bytes.NewReader([]byte(responseJSON)), false, nil)
+		require.NoError(t, err)
+		require.NotNil(t, newBody)
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(newBody, &got))
+		require.Equal(t, "chatcmpl-abc", got["id"])
+		require.Equal(t, tokenUsageFrom(5, -1, 3, 8), tokenUsage)
+	})
+
+	t.Run("streaming strips provider fields from complete data lines", func(t *testing.T) {
+		// Simulate SSE chunks as they arrive from a DeepInfra backend.
+		sseStream := "data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"llama-3\",\"provider\":\"deepinfra\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"llama-3\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"cost\":0.00001,\"is_byok\":false,\"cost_details\":{\"prompt\":0.000006,\"completion\":0.000004}}}\n\ndata: [DONE]\n\n"
+
+		o := &openAIToOpenAITranslatorV1ChatCompletion{stream: true}
+		_, newBody, tokenUsage, _, err := o.ResponseBody(nil, bytes.NewReader([]byte(sseStream)), true, nil)
+		require.NoError(t, err)
+		require.NotNil(t, newBody)
+
+		bodyStr := string(newBody)
+
+		// Provider-specific fields must be absent from all data lines.
+		require.NotContains(t, bodyStr, `"provider"`)
+		require.NotContains(t, bodyStr, `"cost"`)
+		require.NotContains(t, bodyStr, `"is_byok"`)
+		require.NotContains(t, bodyStr, `"cost_details"`)
+
+		// Standard fields must be preserved.
+		require.Contains(t, bodyStr, `"prompt_tokens"`)
+		require.Contains(t, bodyStr, `"completion_tokens"`)
+		require.Contains(t, bodyStr, `"total_tokens"`)
+		require.Contains(t, bodyStr, "data: [DONE]")
+
+		// Token usage must still be extracted correctly.
+		require.Equal(t, tokenUsageFrom(10, -1, 2, 12), tokenUsage)
+	})
+}
+
+// TestFilterSSEChunk verifies SSE chunk filtering directly.
+func TestFilterSSEChunk(t *testing.T) {
+	t.Run("strips provider fields from data line", func(t *testing.T) {
+		input := []byte(`data: {"id":"1","provider":"deepinfra","usage":{"prompt_tokens":5,"cost":0.001,"is_byok":false,"cost_details":{}}}` + "\n")
+		got, err := filterSSEChunk(input)
+		require.NoError(t, err)
+		require.NotContains(t, string(got), `"provider"`)
+		require.NotContains(t, string(got), `"cost"`)
+		require.NotContains(t, string(got), `"is_byok"`)
+		require.NotContains(t, string(got), `"cost_details"`)
+		require.Contains(t, string(got), `"prompt_tokens"`)
+		require.True(t, bytes.HasPrefix(got, []byte("data: ")))
+	})
+
+	t.Run("passes through DONE sentinel unchanged", func(t *testing.T) {
+		input := []byte("data: [DONE]\n")
+		got, err := filterSSEChunk(input)
+		require.NoError(t, err)
+		require.Equal(t, input, got)
+	})
+
+	t.Run("passes through incomplete line unchanged", func(t *testing.T) {
+		input := []byte(`data: {"id":"1"`)
+		got, err := filterSSEChunk(input)
+		require.NoError(t, err)
+		require.Equal(t, input, got)
+	})
+
+	t.Run("passes through blank lines unchanged", func(t *testing.T) {
+		input := []byte("\n\n")
+		got, err := filterSSEChunk(input)
+		require.NoError(t, err)
+		require.Equal(t, input, got)
+	})
+
+	t.Run("handles multiple lines in one chunk", func(t *testing.T) {
+		input := []byte(`data: {"provider":"x","choices":[]}` + "\n\n" + "data: [DONE]\n")
+		got, err := filterSSEChunk(input)
+		require.NoError(t, err)
+		require.NotContains(t, string(got), `"provider"`)
+		require.Contains(t, string(got), "data: [DONE]")
+	})
 }
 
 // TestResponseModel_OpenAIEmbeddings tests OpenAI embeddings (not virtualized but has response field)
