@@ -813,6 +813,7 @@ func TestRecordResponse(t *testing.T) {
 			{method: "sampling/createMessage"},
 			{method: "elicitation/create"},
 			{method: "notifications/tools/list_changed"},
+			{method: "ping"},
 		} {
 			msg := jsonrpc.Request{Method: tc.method}
 			proxy := newTestMCPProxy()
