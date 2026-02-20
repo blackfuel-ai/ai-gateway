@@ -23,6 +23,53 @@ import (
 	tracing "github.com/envoyproxy/ai-gateway/internal/tracing/api"
 )
 
+// providerFieldsToRemove lists external-provider-specific fields that must be stripped
+// from upstream responses before forwarding to clients. These fields are set by providers
+// such as DeepInfra and would leak internal cost/routing information to end users.
+var providerFieldsToRemove = []string{
+	"provider",
+	"usage.cost",
+	"usage.is_byok",
+	"usage.cost_details",
+}
+
+// filterSSEChunk strips providerFieldsToRemove from JSON objects in SSE data lines.
+// It processes complete newline-terminated lines in the chunk and returns filtered bytes.
+// Incomplete trailing content (no newline yet) is passed through unchanged.
+func filterSSEChunk(chunk []byte) ([]byte, error) {
+	result := make([]byte, 0, len(chunk))
+	remaining := chunk
+	for {
+		i := bytes.IndexByte(remaining, '\n')
+		if i == -1 {
+			result = append(result, remaining...)
+			return result, nil
+		}
+		line := remaining[:i]
+		remaining = remaining[i+1:]
+		if bytes.HasPrefix(line, dataPrefix) {
+			data := bytes.TrimPrefix(line, dataPrefix)
+			if len(data) > 0 && data[0] == '{' {
+				filtered := data
+				for _, field := range providerFieldsToRemove {
+					var ferr error
+					filtered, ferr = sjson.DeleteBytes(filtered, field)
+					if ferr != nil {
+						return nil, fmt.Errorf("failed to strip field %s from SSE data: %w", field, ferr)
+					}
+				}
+				result = append(result, dataPrefix...)
+				result = append(result, filtered...)
+			} else {
+				result = append(result, line...)
+			}
+		} else {
+			result = append(result, line...)
+		}
+		result = append(result, '\n')
+	}
+}
+
 // NewChatCompletionOpenAIToOpenAITranslator implements [Factory] for OpenAI to OpenAI translation.
 func NewChatCompletionOpenAIToOpenAITranslator(apiVersion string, modelNameOverride internalapi.ModelNameOverride) OpenAIChatCompletionTranslator {
 	return &openAIToOpenAITranslatorV1ChatCompletion{modelNameOverride: modelNameOverride, path: path.Join("/", apiVersion, "chat/completions")}
@@ -117,7 +164,9 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseHeaders(map[string]st
 // ResponseBody implements [OpenAIChatCompletionTranslator.ResponseBody].
 // OpenAI supports model virtualization through automatic routing and resolution,
 // so we return the actual model from the response body which may differ from the requested model
-// (e.g., request "gpt-4o" → response "gpt-4o-2024-08-06").
+// (e.g., request "gpt-4o" -> response "gpt-4o-2024-08-06").
+// Provider-specific fields (provider, usage.cost, usage.is_byok, usage.cost_details) are stripped
+// from all responses to prevent leaking internal cost/routing information to clients.
 func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracing.ChatCompletionSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
@@ -127,14 +176,23 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]str
 		if err != nil {
 			return nil, nil, tokenUsage, o.requestModel, fmt.Errorf("failed to read body: %w", err)
 		}
+		newBody, err = filterSSEChunk(buf)
+		if err != nil {
+			return nil, nil, tokenUsage, o.requestModel, err
+		}
 		o.buffered = append(o.buffered, buf...)
 		tokenUsage = o.extractUsageFromBufferEvent(span)
 		// Use stored streaming response model, fallback to request model for non-compliant backends
 		responseModel = cmp.Or(o.streamingResponseModel, o.requestModel)
 		return
 	}
+	var rawBody []byte
+	rawBody, err = io.ReadAll(body)
+	if err != nil {
+		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to read body: %w", err)
+	}
 	resp := &openai.ChatCompletionResponse{}
-	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+	if err = json.Unmarshal(rawBody, resp); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to unmarshal body: %w", err)
 	}
 	tokenUsage.SetInputTokens(uint32(resp.Usage.PromptTokens))      //nolint:gosec
@@ -148,6 +206,15 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]str
 	if span != nil {
 		span.RecordResponse(resp)
 	}
+	// Strip provider-specific fields from the response body.
+	newBody = rawBody
+	for _, field := range providerFieldsToRemove {
+		newBody, err = sjson.DeleteBytes(newBody, field)
+		if err != nil {
+			return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to strip field %s: %w", field, err)
+		}
+	}
+	newHeaders = append(newHeaders, internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))})
 	return
 }
 
