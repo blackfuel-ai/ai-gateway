@@ -465,7 +465,6 @@ func TestResponseModel_OpenAI(t *testing.T) {
 	require.Equal(t, tokenUsageFrom(10, -1, 5, 15), tokenUsage)
 }
 
-
 // TestFilterProviderFields verifies that provider-specific fields are stripped from responses.
 func TestFilterProviderFields(t *testing.T) {
 	t.Run("non-streaming strips provider fields", func(t *testing.T) {
