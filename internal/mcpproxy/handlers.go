@@ -774,11 +774,13 @@ func (m *MCPProxy) maybeServerToClientRequestModify(ctx context.Context, msg *js
 		if msg.Params != nil {
 			params := &mcp.ResourceUpdatedNotificationParams{}
 			if err := json.Unmarshal(msg.Params, params); err != nil {
-				return fmt.Errorf("failed to unmarshal elicitation/create params: %w", err)
+				return fmt.Errorf("failed to unmarshal notifications/resources/updated params: %w", err)
 			}
 			params.URI = downstreamResourceURI(params.URI, backend)
 			msg.Params, _ = json.Marshal(params) // Already decoded params, so ignore error.
 		}
+		// Notifications have no ID — no need to rewrite the ID for response routing.
+		return nil
 	default:
 		// Others are not server->client requests that we care about.
 		return nil
