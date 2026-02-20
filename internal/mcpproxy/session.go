@@ -224,17 +224,27 @@ func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter
 					slog.String("prev_event_id", prev),
 					slog.String("event_id", event.id))
 			}
+			var filtered []jsonrpc.Message
 			for _, _msg := range event.messages {
 				// Maybe the server->client request made during the notification handling needs to be modified.
 				if msg, ok := _msg.(*jsonrpc.Request); ok {
+					// Intercept server-initiated pings and respond directly; do not forward to client.
+					if msg.Method == "ping" {
+						s.respondToBackendPing(ctx, event.backend, msg)
+						continue
+					}
 					if err := s.proxy.maybeServerToClientRequestModify(ctx, msg, event.backend); err != nil {
 						s.proxy.l.Error("failed to modify server->client request", slog.String("error", err.Error()))
 						continue
 					}
 				}
 				s.proxy.recordResponse(ctx, _msg)
+				filtered = append(filtered, _msg)
 			}
-			event.writeAndMaybeFlush(w)
+			if len(filtered) > 0 {
+				event.messages = filtered
+				event.writeAndMaybeFlush(w)
+			}
 			// Reset the heartbeat ticker so that the next heartbeat will be sent after the full interval.
 			// This avoids sending heartbeats too frequently when there are events.
 			if heartbeatTicker != nil {
@@ -258,6 +268,24 @@ func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter
 			return ctx.Err()
 		}
 	}
+}
+
+// respondToBackendPing sends a pong response directly to the backend for a server-initiated ping request.
+// Server-initiated pings must be answered or the backend considers the connection dead and drops the session.
+func (s *session) respondToBackendPing(ctx context.Context, backendName filterapi.MCPBackendName, req *jsonrpc.Request) {
+	cse := s.getCompositeSessionEntry(backendName)
+	backend, err := s.proxy.getBackendForRoute(s.route, backendName)
+	if err != nil {
+		s.proxy.l.Error("failed to get backend for pong", slog.String("backend", backendName), slog.String("error", err.Error()))
+		return
+	}
+	pong := &jsonrpc.Response{ID: req.ID, Result: emptyJSONRPCMessage}
+	resp, err := s.proxy.invokeJSONRPCRequest(ctx, s.route, backend, cse, pong)
+	if err != nil {
+		s.proxy.l.Error("failed to send pong to backend", slog.String("backend", backendName), slog.String("error", err.Error()))
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 // heartbeatInterval is computed at startup to avoid the locks in os.Getenv() to be called on the request path.

@@ -843,6 +843,8 @@ func (m *MCPProxy) recordResponse(ctx context.Context, rawMsg jsonrpc.Message) {
 		case "roots/list":
 		case "sampling/createMessage":
 		case "elicitation/create":
+		case "ping":
+			// Server-initiated ping; handled by streamNotifications — pong sent directly to backend.
 		default:
 			knownMethod = false
 			m.metrics.RecordMethodErrorCount(ctx, nil)
