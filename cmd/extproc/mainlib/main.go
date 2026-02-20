@@ -123,8 +123,8 @@ func parseAndValidateFlags(args []string) (extProcFlags, error) {
 		"Optional fallback seed used for MCP session key rotation.")
 	fs.IntVar(&flags.mcpFallbackSessionEncryptionIterations, "mcpFallbackSessionEncryptionIterations", 100_000,
 		"Number of iterations used in the fallback PBKDF2 key derivation for MCP session encryption.")
-	fs.DurationVar(&flags.mcpWriteTimeout, "mcpWriteTimeout", 120*time.Second,
-		"The maximum duration before timing out writes of the MCP response")
+	fs.DurationVar(&flags.mcpWriteTimeout, "mcpWriteTimeout", 0,
+		"The maximum duration before timing out writes of the MCP response. 0 means no timeout (recommended for SSE sessions)")
 
 	if err := fs.Parse(args); err != nil {
 		return extProcFlags{}, fmt.Errorf("failed to parse extProcFlags: %w", err)

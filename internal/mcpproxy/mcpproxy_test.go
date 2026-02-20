@@ -314,8 +314,8 @@ func TestSessionFromID_ValidID(t *testing.T) {
 	proxy := newTestMCPProxy()
 
 	// Create a valid session ID.
-	sessionID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
-	eventID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
+	sessionID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
+	eventID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
 	session, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID), nil)
 
 	require.NoError(t, err)

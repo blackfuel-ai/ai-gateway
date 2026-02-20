@@ -106,10 +106,23 @@ func TestServeGET_InvalidSessionID(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "invalid session ID")
 }
 
+func TestServeGET_StaleSession(t *testing.T) {
+	proxy := newTestMCPProxy()
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	// Session references "saas-staging" which no longer exists in "test-route".
+	req.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session"))))
+	rr := httptest.NewRecorder()
+
+	proxy.serveGET(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "session expired")
+}
+
 func TestServeGET_OK(t *testing.T) {
 	proxy := newTestMCPProxy()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	sessionID := secureID(t, proxy, "@@backend1:dGVzdC1zZXNzaW9u") // "test-session" base64 encoded.
+	sessionID := secureID(t, proxy, "test-route@@backend1:dGVzdC1zZXNzaW9u") // "test-session" base64 encoded.
 	req.Header.Set(sessionIDHeader, sessionID)
 	rr := httptest.NewRecorder()
 
@@ -140,10 +153,23 @@ func TestServerDELETE_InvalidSessionID(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "invalid session ID")
 }
 
+func TestServerDELETE_StaleSession(t *testing.T) {
+	proxy := newTestMCPProxy()
+	req := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+	// Session references "saas-staging" which no longer exists in "test-route".
+	req.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session"))))
+	rr := httptest.NewRecorder()
+
+	proxy.serverDELETE(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "session expired")
+}
+
 func TestServeDELETE_OK(t *testing.T) {
 	proxy := newTestMCPProxy()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	sessionID := secureID(t, proxy, "@@backend1:dGVzdC1zZXNzaW9u") // "test-session" base64 encoded.
+	sessionID := secureID(t, proxy, "test-route@@backend1:dGVzdC1zZXNzaW9u") // "test-session" base64 encoded.
 	req.Header.Set(sessionIDHeader, sessionID)
 	rr := httptest.NewRecorder()
 	proxy.serverDELETE(rr, req)
@@ -170,6 +196,17 @@ func TestServePOST_InvalidSessionID(t *testing.T) {
 	proxy.servePOST(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "invalid session ID")
+}
+
+func TestServePOST_StaleSession(t *testing.T) {
+	proxy := newTestMCPProxy()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"test-tool"},"id":"1"}`))
+	// Session references "saas-staging" which no longer exists in "test-route".
+	req.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session"))))
+	rr := httptest.NewRecorder()
+	proxy.servePOST(rr, req)
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "session expired")
 }
 
 func TestServePOST_MissingSessionID(t *testing.T) {
@@ -558,7 +595,7 @@ func TestServePOST_ToolsCallRequest(t *testing.T) {
 		{name: "backend1", route: "test-route", tool: "backend1__test-tool", wantBackend: "backend1", wantStatus: http.StatusOK},
 		{name: "backend2", route: "test-route", tool: "backend2__test-tool", wantBackend: "backend2", wantStatus: http.StatusOK},
 		{name: "backend3", route: "test-route-another", tool: "backend3__test-tool", wantBackend: "backend3", wantStatus: http.StatusOK},
-		{name: "test-route-another", tool: "unknown__test-tool", wantBackend: "unknown", wantStatus: http.StatusNotFound},
+		{name: "test-route-another", route: "test-route", tool: "unknown__test-tool", wantBackend: "backend1", wantStatus: http.StatusNotFound},
 		{name: "backend1-not-whitelisted", route: "test-route", tool: "backend1__custom-tool", wantBackend: "backend1", wantStatus: http.StatusBadRequest},
 	}
 
@@ -913,8 +950,8 @@ data: %s
 	}
 
 	rr := httptest.NewRecorder()
-	sessionID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
-	eventID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
+	sessionID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
+	eventID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("_1")))
 	s, err := proxy.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(eventID), nil)
 	require.NoError(t, err)
 
@@ -1001,7 +1038,7 @@ func TestServePOST_PromptsGet(t *testing.T) {
 	proxy := newTestMCPProxyWithTracer(tracer)
 
 	// Create a valid session.
-	sessionID := secureID(t, proxy, "@@default-backend:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
+	sessionID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
 
 	// Create prompts/get request.
 	params := &mcp.GetPromptParams{Name: "somebackend__test-prompt"}
@@ -1044,7 +1081,7 @@ func TestServePOST_InvalidToolCallParams(t *testing.T) {
 	httpReq := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
 	// Need to provide a session ID for tools/call requests.
-	sessionID := secureID(t, proxy, "@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
+	sessionID := secureID(t, proxy, "test-route@@backend1:"+base64.StdEncoding.EncodeToString([]byte("test-session")))
 	httpReq.Header.Set(sessionIDHeader, sessionID)
 	rr := httptest.NewRecorder()
 
