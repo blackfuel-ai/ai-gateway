@@ -300,6 +300,60 @@ func TestNotifyToolsChanged(t *testing.T) {
 	})
 }
 
+func TestStreamNotifications_BackendPingInterception(t *testing.T) {
+	// Backend sends a ping and a non-ping event. The ping should be intercepted and a pong
+	// sent back to the backend; only the non-ping event should be forwarded to the client.
+	pingID, _ := jsonrpc.MakeID("backend-ping-1")
+	notifID, _ := jsonrpc.MakeID("notif-1")
+	pingMsg, _ := jsonrpc.EncodeMessage(&jsonrpc.Request{Method: "ping", ID: pingID})
+	notifMsg, _ := jsonrpc.EncodeMessage(&jsonrpc.Request{Method: "notifications/message", ID: notifID})
+	sseBody := "event: msg\ndata: " + string(pingMsg) + "\n\n" +
+		"event: msg\ndata: " + string(notifMsg) + "\n\n"
+
+	var pongReceived atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(sseBody))
+			return
+		}
+		// POST: pong response from the proxy back to the backend.
+		if r.Method == http.MethodPost {
+			pongReceived.Store(true)
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	// Override heartbeat so it never fires during the test.
+	originalHeartbeatInterval := heartbeatInterval
+	heartbeatInterval = 0
+	t.Cleanup(func() { heartbeatInterval = originalHeartbeatInterval })
+
+	proxy := newTestMCPProxy()
+	proxy.backendListenerAddr = srv.URL
+	s := &session{
+		proxy: proxy,
+		route: "test-route",
+		perBackendSessions: map[filterapi.MCPBackendName]*compositeSessionEntry{
+			"backend1": {sessionID: "s1", backendName: "backend1"},
+		},
+	}
+
+	rr := httptest.NewRecorder()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	_ = s.streamNotifications(ctx, rr, proxy.toolChangeSignaler)
+
+	out := rr.Body.String()
+	// The backend ping must NOT appear in the client-facing SSE stream.
+	require.NotContains(t, out, `"id":"backend-ping-1"`, "backend ping should not be forwarded to client")
+	// The non-ping notification must be forwarded.
+	require.Contains(t, out, `"method":"notifications/message"`, "non-ping notification should be forwarded")
+	// A pong should have been sent back to the backend.
+	require.True(t, pongReceived.Load(), "proxy should have sent a pong to the backend")
+}
+
 func TestSendRequestPerBackend_ErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
