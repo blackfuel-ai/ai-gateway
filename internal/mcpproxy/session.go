@@ -274,6 +274,10 @@ func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter
 // Server-initiated pings must be answered or the backend considers the connection dead and drops the session.
 func (s *session) respondToBackendPing(ctx context.Context, backendName filterapi.MCPBackendName, req *jsonrpc.Request) {
 	cse := s.getCompositeSessionEntry(backendName)
+	if cse == nil {
+		s.proxy.l.Warn("no session entry for backend ping, skipping pong", slog.String("backend", backendName))
+		return
+	}
 	backend, err := s.proxy.getBackendForRoute(s.route, backendName)
 	if err != nil {
 		s.proxy.l.Error("failed to get backend for pong", slog.String("backend", backendName), slog.String("error", err.Error()))
@@ -285,7 +289,10 @@ func (s *session) respondToBackendPing(ctx context.Context, backendName filterap
 		s.proxy.l.Error("failed to send pong to backend", slog.String("backend", backendName), slog.String("error", err.Error()))
 		return
 	}
-	_ = resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		s.proxy.l.Warn("unexpected status sending pong to backend", slog.String("backend", backendName), slog.Int("status", resp.StatusCode))
+	}
 }
 
 // heartbeatInterval is computed at startup to avoid the locks in os.Getenv() to be called on the request path.
