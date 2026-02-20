@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - backport/mcp-claim-to-headers-v0.5.0
+      - fix/mcp-stale-session-detection-v0.5.0
 
 env:
   REGISTRY: ghcr.io
