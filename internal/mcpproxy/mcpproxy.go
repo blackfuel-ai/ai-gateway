@@ -154,6 +154,13 @@ func (m *MCPProxy) sessionFromID(id secureClientToGatewaySessionID, lastEvent se
 	if err != nil {
 		return nil, err
 	}
+	// Validate all backends still exist in the route config. If a backend was renamed or removed
+	// after the session was created, return errStaleSession so the client can re-initialize.
+	for backendName := range perBackendSessionIDs {
+		if _, err := m.getBackendForRoute(route, backendName); err != nil {
+			return nil, fmt.Errorf("%w: session references backend %q which no longer exists in route %q", errStaleSession, backendName, route)
+		}
+	}
 	if len(lastEvent) != 0 {
 		decryptedEventID, err := m.sessionCrypto.Decrypt(string(lastEvent))
 		if err != nil {
