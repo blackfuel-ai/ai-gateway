@@ -153,7 +153,7 @@ func TestServerDELETE_InvalidSessionID(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "invalid session ID")
 }
 
-func TestServeDELETE_StaleSession(t *testing.T) {
+func TestServerDELETE_StaleSession(t *testing.T) {
 	proxy := newTestMCPProxy()
 	req := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
 	// Session references "saas-staging" which no longer exists in "test-route".
