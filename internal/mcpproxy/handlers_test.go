@@ -151,6 +151,19 @@ func TestServerDELETE_InvalidSessionID(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "invalid session ID")
 }
 
+func TestServeDELETE_StaleSession(t *testing.T) {
+	proxy := newTestMCPProxy()
+	req := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+	// Session references "saas-staging" which no longer exists in "test-route".
+	req.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session"))))
+	rr := httptest.NewRecorder()
+
+	proxy.serverDELETE(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "session expired")
+}
+
 func TestServeDELETE_OK(t *testing.T) {
 	proxy := newTestMCPProxy()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
