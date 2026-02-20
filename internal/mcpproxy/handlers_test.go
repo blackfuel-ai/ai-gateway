@@ -1396,6 +1396,18 @@ func TestMCPProxy_maybeServerToClientRequestModify(t *testing.T) {
 				require.Equal(t, "1__i__backend", modified.ID.Raw().(string))
 			},
 		},
+		{
+			// notifications/resources/updated is a JSON-RPC notification (no ID).
+			// The URI must be rewritten to the downstream form, and no ID-rewriting should happen.
+			// Previously this case fell through to the ID block and returned "missing id in the server->client request".
+			name: "notifications/resources/updated",
+			msg:  &jsonrpc.Request{Method: "notifications/resources/updated", Params: json.RawMessage(`{"uri":"file:///foo"}`)},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				params := &mcp.ResourceUpdatedNotificationParams{}
+				require.NoError(t, json.Unmarshal(modified.Params, params))
+				require.Equal(t, "backend+file:///foo", params.URI)
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			proxy := newTestMCPProxy()

@@ -230,7 +230,7 @@ func (s *session) streamNotifications(ctx context.Context, w http.ResponseWriter
 				if msg, ok := _msg.(*jsonrpc.Request); ok {
 					// Intercept server-initiated pings and respond directly; do not forward to client.
 					if msg.Method == "ping" {
-						s.respondToBackendPing(ctx, event.backend, msg)
+						go s.respondToBackendPing(ctx, event.backend, msg)
 						continue
 					}
 					if err := s.proxy.maybeServerToClientRequestModify(ctx, msg, event.backend); err != nil {
@@ -286,6 +286,10 @@ func (s *session) respondToBackendPing(ctx context.Context, backendName filterap
 	pong := &jsonrpc.Response{ID: req.ID, Result: emptyJSONRPCMessage}
 	resp, err := s.proxy.invokeJSONRPCRequest(ctx, s.route, backend, cse, pong)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			s.proxy.l.Debug("context done while sending pong to backend (client disconnected)", slog.String("backend", backendName))
+			return
+		}
 		s.proxy.l.Error("failed to send pong to backend", slog.String("backend", backendName), slog.String("error", err.Error()))
 		return
 	}

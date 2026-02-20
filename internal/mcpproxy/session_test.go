@@ -350,8 +350,9 @@ func TestStreamNotifications_BackendPingInterception(t *testing.T) {
 	require.NotContains(t, out, `"id":"backend-ping-1"`, "backend ping should not be forwarded to client")
 	// The non-ping notification must be forwarded.
 	require.Contains(t, out, `"method":"notifications/message"`, "non-ping notification should be forwarded")
-	// A pong should have been sent back to the backend.
-	require.True(t, pongReceived.Load(), "proxy should have sent a pong to the backend")
+	// A pong should have been sent back to the backend (async goroutine, poll with timeout).
+	require.Eventually(t, func() bool { return pongReceived.Load() }, 2*time.Second, 10*time.Millisecond,
+		"proxy should have sent a pong to the backend")
 }
 
 func TestSendRequestPerBackend_ErrorStatus(t *testing.T) {
