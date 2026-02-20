@@ -106,6 +106,19 @@ func TestServeGET_InvalidSessionID(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "invalid session ID")
 }
 
+func TestServeGET_StaleSession(t *testing.T) {
+	proxy := newTestMCPProxy()
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	// Session references "saas-staging" which no longer exists in "test-route".
+	req.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session"))))
+	rr := httptest.NewRecorder()
+
+	proxy.serveGET(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "session expired")
+}
+
 func TestServeGET_OK(t *testing.T) {
 	proxy := newTestMCPProxy()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
@@ -140,6 +153,19 @@ func TestServerDELETE_InvalidSessionID(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "invalid session ID")
 }
 
+func TestServeDELETE_StaleSession(t *testing.T) {
+	proxy := newTestMCPProxy()
+	req := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+	// Session references "saas-staging" which no longer exists in "test-route".
+	req.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session"))))
+	rr := httptest.NewRecorder()
+
+	proxy.serverDELETE(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "session expired")
+}
+
 func TestServeDELETE_OK(t *testing.T) {
 	proxy := newTestMCPProxy()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
@@ -170,6 +196,17 @@ func TestServePOST_InvalidSessionID(t *testing.T) {
 	proxy.servePOST(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "invalid session ID")
+}
+
+func TestServePOST_StaleSession(t *testing.T) {
+	proxy := newTestMCPProxy()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"test-tool"},"id":"1"}`))
+	// Session references "saas-staging" which no longer exists in "test-route".
+	req.Header.Set(sessionIDHeader, secureID(t, proxy, "test-route@@saas-staging:"+base64.StdEncoding.EncodeToString([]byte("old-session"))))
+	rr := httptest.NewRecorder()
+	proxy.servePOST(rr, req)
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "session expired")
 }
 
 func TestServePOST_MissingSessionID(t *testing.T) {

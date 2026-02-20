@@ -39,6 +39,10 @@ var (
 	errBackendNotFound      = errors.New("backend not found")
 	errInvalidToolName      = errors.New("invalid tool name")
 	errBackendResponseError = errors.New("one or more backends returned an error response")
+	// errStaleSession is returned when a session references a backend that no longer exists in the route config.
+	// This happens when backends are renamed or removed after the session was created.
+	// The client must re-initialize to get a fresh session with current backend names.
+	errStaleSession = errors.New("stale session")
 )
 
 // errToolCall represents a tool execution error with structured information
@@ -121,7 +125,11 @@ func (m *mcpRequestContext) serveGET(w http.ResponseWriter, r *http.Request) {
 	s, err := m.sessionFromID(secureClientToGatewaySessionID(sessionID), secureClientToGatewayEventID(lastEventID), r)
 	if err != nil {
 		m.l.Error("invalid session ID in GET request", slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
+		if errors.Is(err, errStaleSession) {
+			http.Error(w, fmt.Sprintf("session expired, please re-initialize: %v", err), http.StatusNotFound)
+		} else {
+			http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
+		}
 		return
 	}
 	if m.l.Enabled(r.Context(), slog.LevelDebug) {
@@ -155,7 +163,11 @@ func (m *mcpRequestContext) serverDELETE(w http.ResponseWriter, r *http.Request)
 	s, err := m.sessionFromID(secureClientToGatewaySessionID(sessionID), "", r)
 	if err != nil {
 		m.l.Error("invalid session ID in DELETE request", slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
+		if errors.Is(err, errStaleSession) {
+			http.Error(w, fmt.Sprintf("session expired, please re-initialize: %v", err), http.StatusNotFound)
+		} else {
+			http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
+		}
 		return
 	}
 	_ = s.Close() // Ignore error as it's not recoverable here. Errors per backend are logged in Close().
@@ -227,7 +239,11 @@ func (m *mcpRequestContext) servePOST(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			errType = metrics.MCPErrorInvalidSessionID
 			m.l.Error("invalid session ID in POST request", slog.String("session_id", sessionID), slog.String("error", err.Error()))
-			http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
+			if errors.Is(err, errStaleSession) {
+				http.Error(w, fmt.Sprintf("session expired, please re-initialize: %v", err), http.StatusNotFound)
+			} else {
+				http.Error(w, fmt.Sprintf("invalid session ID: %v", err), http.StatusBadRequest)
+			}
 			return
 		}
 	}
