@@ -20,6 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/headermutator"
@@ -1024,11 +1025,9 @@ func Test_chatCompletionProcessorUpstreamFilter_ResponseBodyMutation(t *testing.
 				stream: false,
 				config: &filterapi.RuntimeConfig{},
 			},
-			requestHeaders:  map[string]string{},
-			responseHeaders: map[string]string{":status": "200"},
-			responseBodyMutation: &filterapi.HTTPBodyMutation{
-				Remove: []string{"provider"},
-			},
+			requestHeaders:      map[string]string{},
+			responseHeaders:     map[string]string{":status": "200"},
+			responseBodyMutator: bodymutator.NewBodyMutator(&filterapi.HTTPBodyMutation{Remove: []string{"provider"}}, nil),
 		}
 		res, err := p.ProcessResponseBody(t.Context(), inBody)
 		require.NoError(t, err)
@@ -1064,11 +1063,9 @@ func Test_chatCompletionProcessorUpstreamFilter_ResponseBodyMutation(t *testing.
 				stream: true,
 				config: &filterapi.RuntimeConfig{},
 			},
-			requestHeaders:  map[string]string{},
-			responseHeaders: map[string]string{":status": "200"},
-			responseBodyMutation: &filterapi.HTTPBodyMutation{
-				Remove: []string{"provider"},
-			},
+			requestHeaders:      map[string]string{},
+			responseHeaders:     map[string]string{":status": "200"},
+			responseBodyMutator: bodymutator.NewBodyMutator(&filterapi.HTTPBodyMutation{Remove: []string{"provider"}}, nil),
 		}
 		res, err := p.ProcessResponseBody(t.Context(), inBody)
 		require.NoError(t, err)
@@ -1090,9 +1087,9 @@ func Test_chatCompletionProcessorUpstreamFilter_ResponseBodyMutation(t *testing.
 			retBodyMutation: responseBody,
 		}
 		p := &chatCompletionProcessorUpstreamFilter{
-			translator:           mt,
-			metrics:              mm,
-			responseBodyMutation: nil,
+			translator:          mt,
+			metrics:             mm,
+			responseBodyMutator: bodymutator.NewBodyMutator(nil, nil),
 			parent: &chatCompletionProcessorRouterFilter{
 				stream: false,
 				config: &filterapi.RuntimeConfig{},

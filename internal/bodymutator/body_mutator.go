@@ -30,6 +30,11 @@ func NewBodyMutator(bodyMutations *filterapi.HTTPBodyMutation, originalBody []by
 	}
 }
 
+// HasMutations reports whether this mutator has any mutations configured.
+func (b *BodyMutator) HasMutations() bool {
+	return b != nil && b.bodyMutations != nil && len(b.bodyMutations.Remove) > 0
+}
+
 // isJSONValue checks if a string represents a JSON value (not a plain string)
 func isJSONValue(value string) bool {
 	value = strings.TrimSpace(value)
@@ -155,7 +160,7 @@ func (b *BodyMutator) MutateResponseSSE(chunk []byte) ([]byte, error) {
 		if !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
-		data := line[len("data: "):]
+		data := bytes.TrimRight(line[len("data: "):], "\r")
 		if bytes.Equal(data, []byte("[DONE]")) {
 			continue
 		}
