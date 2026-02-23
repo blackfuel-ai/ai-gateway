@@ -3,7 +3,7 @@ name: Build and Push Docker Images (Branch)
 on:
   push:
     branches:
-      - release/v0.5+bf
+      - 'release/v0.5+bf'
   workflow_dispatch:
     inputs:
       tag_suffix:
