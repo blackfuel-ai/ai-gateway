@@ -7,19 +7,49 @@ on:
   workflow_dispatch:
     inputs:
       tag_suffix:
-        description: 'Override bf tag suffix (e.g. "10" produces v0.5.0-bf10). Omit to use run_number.'
+        description: 'Override bf tag suffix (e.g. "10" produces v0.5.0-bf10). Omit to auto-increment from latest tag.'
         required: false
         type: string
 
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/ai-gateway
-  # Base version for blackfuel fork builds (based on upstream v0.5.0)
   BASE_VERSION: "0.5.0"
 
 jobs:
+  resolve_version:
+    name: Resolve Version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      suffix: ${{ steps.version.outputs.suffix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: version
+        run: |
+          if [[ -n "${{ inputs.tag_suffix }}" ]]; then
+            SUFFIX="${{ inputs.tag_suffix }}"
+          else
+            LAST=$(git tag --list "v${{ env.BASE_VERSION }}-bf*" --sort=-v:refname | head -1)
+            if [[ -z "$LAST" ]]; then
+              echo "No existing v${{ env.BASE_VERSION }}-bf* tag found" >&2
+              exit 1
+            fi
+            N=$(echo "$LAST" | sed 's/.*-bf//')
+            SUFFIX=$((N + 1))
+          fi
+          echo "suffix=${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "tag=v${{ env.BASE_VERSION }}-bf${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "Resolved tag: v${{ env.BASE_VERSION }}-bf${SUFFIX}"
+
   docker_builds:
     name: ${{ matrix.command_name }}
+    needs: resolve_version
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,30 +90,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        run: |
-          # Use v0.5.0-bf<run_number> format — built from release/v0.5+bf trunk
-          SUFFIX="${{ inputs.tag_suffix || github.run_number }}"
-          TAG="v${{ env.BASE_VERSION }}-bf${SUFFIX}"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Building tag: ${TAG}"
-
       - name: Build and Push Image
         run: |
           make docker-build.${{ matrix.command_name }} \
             CMD_PATH_PREFIX=${{ matrix.cmd_path_prefix }} \
             ENABLE_MULTI_PLATFORMS=true \
-            TAG="${{ steps.meta.outputs.tag }}" \
+            TAG="${{ needs.resolve_version.outputs.tag }}" \
             OCI_REGISTRY="${{ env.REGISTRY }}/${{ github.repository_owner }}" \
             DOCKER_BUILD_ARGS="--push"
 
       - name: Output image reference
         run: |
-          echo "Image pushed: ${{ env.IMAGE_PREFIX }}-${{ matrix.command_name }}:${{ steps.meta.outputs.tag }}"
+          echo "Image pushed: ${{ env.IMAGE_PREFIX }}-${{ matrix.command_name }}:${{ needs.resolve_version.outputs.tag }}"
 
   helm_charts:
     name: Push Helm Charts
+    needs: resolve_version
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,24 +133,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        run: |
-          # Use v0.5.0-bf<run_number> format — built from release/v0.5+bf trunk
-          SUFFIX="${{ inputs.tag_suffix || github.run_number }}"
-          VERSION="v${{ env.BASE_VERSION }}-bf${SUFFIX}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Building helm chart version: ${VERSION}"
-
       - name: Package and Push Helm Charts
         run: |
           make helm-push \
-            HELM_CHART_VERSION="${{ steps.meta.outputs.version }}" \
-            TAG="${{ steps.meta.outputs.version }}" \
+            HELM_CHART_VERSION="${{ needs.resolve_version.outputs.tag }}" \
+            TAG="${{ needs.resolve_version.outputs.tag }}" \
             OCI_REGISTRY="${{ env.REGISTRY }}/${{ github.repository_owner }}"
 
       - name: Output helm chart references
         run: |
           echo "Helm charts pushed:"
-          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-crds-helm:${{ steps.meta.outputs.version }}"
-          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-helm:${{ steps.meta.outputs.version }}"
+          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-crds-helm:${{ needs.resolve_version.outputs.tag }}"
+          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-helm:${{ needs.resolve_version.outputs.tag }}"
+
+  push_git_tag:
+    name: Push Git Tag
+    needs: [resolve_version, docker_builds, helm_charts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag and push
+        run: |
+          git tag "${{ needs.resolve_version.outputs.tag }}"
+          git push origin "${{ needs.resolve_version.outputs.tag }}"
+          echo "Tagged: ${{ needs.resolve_version.outputs.tag }}"
