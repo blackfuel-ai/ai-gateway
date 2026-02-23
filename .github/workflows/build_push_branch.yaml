@@ -3,11 +3,11 @@ name: Build and Push Docker Images (Branch)
 on:
   push:
     branches:
-      - 'release/v0.5+bf'
+      - release/v0.5-bf
   workflow_dispatch:
     inputs:
       tag_suffix:
-        description: 'Override bf tag suffix (e.g. "10" produces v0.5.0-bf10). Omit to auto-increment from latest tag.'
+        description: 'Override bf tag suffix (e.g. "10" produces v0.5.0+bf10). Omit to auto-increment from latest tag.'
         required: false
         type: string
 
@@ -21,7 +21,8 @@ jobs:
     name: Resolve Version
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
+      git_tag: ${{ steps.version.outputs.git_tag }}
+      oci_tag: ${{ steps.version.outputs.oci_tag }}
       suffix: ${{ steps.version.outputs.suffix }}
     steps:
       - uses: actions/checkout@v4
@@ -35,17 +36,21 @@ jobs:
           if [[ -n "${{ inputs.tag_suffix }}" ]]; then
             SUFFIX="${{ inputs.tag_suffix }}"
           else
-            LAST=$(git tag --list "v${{ env.BASE_VERSION }}-bf*" --sort=-v:refname | head -1)
+            # Find latest v0.5.0+bf* git tag and increment
+            LAST=$(git tag --list "v${{ env.BASE_VERSION }}+bf*" --sort=-v:refname | head -1)
             if [[ -z "$LAST" ]]; then
-              echo "No existing v${{ env.BASE_VERSION }}-bf* tag found" >&2
+              echo "No existing v${{ env.BASE_VERSION }}+bf* tag found" >&2
               exit 1
             fi
-            N=$(echo "$LAST" | sed 's/.*-bf//')
+            N=$(echo "$LAST" | sed 's/.*+bf//')
             SUFFIX=$((N + 1))
           fi
+          # git tag uses + (semver build metadata)
+          # OCI/Docker tag uses - (Docker does not support +)
           echo "suffix=${SUFFIX}" >> $GITHUB_OUTPUT
-          echo "tag=v${{ env.BASE_VERSION }}-bf${SUFFIX}" >> $GITHUB_OUTPUT
-          echo "Resolved tag: v${{ env.BASE_VERSION }}-bf${SUFFIX}"
+          echo "git_tag=v${{ env.BASE_VERSION }}+bf${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "oci_tag=v${{ env.BASE_VERSION }}-bf${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "Resolved: git=v${{ env.BASE_VERSION }}+bf${SUFFIX} oci=v${{ env.BASE_VERSION }}-bf${SUFFIX}"
 
   docker_builds:
     name: ${{ matrix.command_name }}
@@ -95,13 +100,13 @@ jobs:
           make docker-build.${{ matrix.command_name }} \
             CMD_PATH_PREFIX=${{ matrix.cmd_path_prefix }} \
             ENABLE_MULTI_PLATFORMS=true \
-            TAG="${{ needs.resolve_version.outputs.tag }}" \
+            TAG="${{ needs.resolve_version.outputs.oci_tag }}" \
             OCI_REGISTRY="${{ env.REGISTRY }}/${{ github.repository_owner }}" \
             DOCKER_BUILD_ARGS="--push"
 
       - name: Output image reference
         run: |
-          echo "Image pushed: ${{ env.IMAGE_PREFIX }}-${{ matrix.command_name }}:${{ needs.resolve_version.outputs.tag }}"
+          echo "Image pushed: ${{ env.IMAGE_PREFIX }}-${{ matrix.command_name }}:${{ needs.resolve_version.outputs.oci_tag }}"
 
   helm_charts:
     name: Push Helm Charts
@@ -136,15 +141,15 @@ jobs:
       - name: Package and Push Helm Charts
         run: |
           make helm-push \
-            HELM_CHART_VERSION="${{ needs.resolve_version.outputs.tag }}" \
-            TAG="${{ needs.resolve_version.outputs.tag }}" \
+            HELM_CHART_VERSION="${{ needs.resolve_version.outputs.oci_tag }}" \
+            TAG="${{ needs.resolve_version.outputs.oci_tag }}" \
             OCI_REGISTRY="${{ env.REGISTRY }}/${{ github.repository_owner }}"
 
       - name: Output helm chart references
         run: |
           echo "Helm charts pushed:"
-          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-crds-helm:${{ needs.resolve_version.outputs.tag }}"
-          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-helm:${{ needs.resolve_version.outputs.tag }}"
+          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-crds-helm:${{ needs.resolve_version.outputs.oci_tag }}"
+          echo "  - ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-gateway-helm:${{ needs.resolve_version.outputs.oci_tag }}"
 
   push_git_tag:
     name: Push Git Tag
@@ -157,6 +162,6 @@ jobs:
 
       - name: Tag and push
         run: |
-          git tag "${{ needs.resolve_version.outputs.tag }}"
-          git push origin "${{ needs.resolve_version.outputs.tag }}"
-          echo "Tagged: ${{ needs.resolve_version.outputs.tag }}"
+          git tag "${{ needs.resolve_version.outputs.git_tag }}"
+          git push origin "${{ needs.resolve_version.outputs.git_tag }}"
+          echo "Tagged: ${{ needs.resolve_version.outputs.git_tag }}"
