@@ -15,6 +15,8 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
@@ -337,6 +339,13 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		}
 	}()
 
+	// Guard against nil translator - this can happen if SetBackend failed during request processing
+	// (e.g., unsupported API schema). Return an error to abort processing instead of panicking.
+	if u.translator == nil {
+		u.logger.Error("translator is nil - SetBackend likely failed during request processing")
+		return nil, status.Error(codes.Internal, "translator not initialized, cannot process response")
+	}
+
 	u.responseHeaders = headersToMap(headers)
 	if enc := u.responseHeaders["content-encoding"]; enc != "" {
 		u.responseEncoding = enc
@@ -370,6 +379,13 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 			u.metrics.RecordRequestCompletion(ctx, true, u.requestHeaders)
 		}
 	}()
+
+	// Guard against nil translator - this can happen if SetBackend failed during request processing
+	// (e.g., unsupported API schema). Return an error to abort processing instead of panicking.
+	if u.translator == nil {
+		u.logger.Error("translator is nil - SetBackend likely failed during request processing")
+		return nil, status.Error(codes.Internal, "translator not initialized, cannot process response")
+	}
 
 	// Decompress the body if needed using common utility.
 	decodingResult, err := decodeContentIfNeeded(body.Body, u.responseEncoding)
