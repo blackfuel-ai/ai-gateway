@@ -267,6 +267,15 @@ type AIGatewayRouteRule struct {
 	// +optional
 	// +kubebuilder:validation:Format=date-time
 	ModelsCreatedAt *metav1.Time `json:"modelsCreatedAt,omitempty"`
+
+	// Mirrors specifies backends that receive a mirrored copy of every matched request.
+	// Responses from mirror backends are always discarded; only the primary backendRefs
+	// respond to the client. Equivalent to HTTPRoute RequestMirror filters in the Gateway API.
+	// Each entry corresponds to one shadow backend; use Percent to sample a fraction of traffic.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Mirrors []gwapiv1.HTTPRequestMirrorFilter `json:"mirrors,omitempty"`
 }
 
 // AIGatewayRouteRuleBackendRef is a reference to a backend with a weight.
