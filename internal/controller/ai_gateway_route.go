@@ -309,10 +309,19 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				Path:    &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix},
 			})
 		}
+		filters := make([]gwapiv1.HTTPRouteFilter, 0, len(rewriteFilters)+len(rule.Mirrors))
+		filters = append(filters, rewriteFilters...)
+		for j := range rule.Mirrors {
+			m := rule.Mirrors[j]
+			filters = append(filters, gwapiv1.HTTPRouteFilter{
+				Type:          gwapiv1.HTTPRouteFilterRequestMirror,
+				RequestMirror: &m,
+			})
+		}
 		rules = append(rules, gwapiv1.HTTPRouteRule{
 			BackendRefs: backendRefs,
 			Matches:     matches,
-			Filters:     rewriteFilters,
+			Filters:     filters,
 			Timeouts:    rule.GetTimeoutsOrDefault(),
 		})
 	}
