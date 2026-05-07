@@ -1122,3 +1122,78 @@ func TestAIGatewayRouteController_SameNamespaceBackend_NoReferenceGrantNeeded(t 
 	require.Len(t, updatedRoute.Status.Conditions, 1)
 	require.Equal(t, aigv1b1.ConditionTypeAccepted, updatedRoute.Status.Conditions[0].Type)
 }
+
+func Test_newHTTPRoute_Mirrors(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	s := NewAIGatewayRouteController(fakeClient, nil, logr.Discard(), eventCh.Ch, "/")
+
+	// Create the primary backend that the rule's backendRefs point to.
+	backend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: "test-ns"},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "primary-svc", Namespace: ptr.To(gwapiv1.Namespace("test-ns"))},
+		},
+	}
+	err := s.client.Create(t.Context(), backend, &client.CreateOptions{})
+	require.NoError(t, err)
+
+	mirrorPercent := int32(50)
+	aiGatewayRoute := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-route", Namespace: "test-ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+						{Name: "primary", Weight: ptr.To[int32](1)},
+					},
+					Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+						{Headers: []gwapiv1.HTTPHeaderMatch{{Name: "x-test", Value: "mirror-rule"}}},
+					},
+					Mirrors: []gwapiv1.HTTPRequestMirrorFilter{
+						{
+							BackendRef: gwapiv1.BackendObjectReference{
+								Name:      "shadow-svc",
+								Namespace: ptr.To(gwapiv1.Namespace("test-ns")),
+							},
+							Percent: &mirrorPercent,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	httpRoute := &gwapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-route", Namespace: "test-ns"},
+		Spec:       gwapiv1.HTTPRouteSpec{},
+	}
+	err = s.newHTTPRoute(t.Context(), httpRoute, aiGatewayRoute)
+	require.NoError(t, err)
+
+	// Expect 2 rules: the mirror rule + the default route-not-found rule.
+	require.Len(t, httpRoute.Spec.Rules, 2)
+
+	// Check the primary rule's backendRefs are unchanged.
+	require.Len(t, httpRoute.Spec.Rules[0].BackendRefs, 1)
+	require.Equal(t, "primary-svc", string(httpRoute.Spec.Rules[0].BackendRefs[0].Name))
+
+	// Check that filters contain both the rewrite filter and the mirror filter.
+	filters := httpRoute.Spec.Rules[0].Filters
+	require.Len(t, filters, 2)
+
+	// First filter should be the host-rewrite ExtensionRef.
+	require.Equal(t, gwapiv1.HTTPRouteFilterExtensionRef, filters[0].Type)
+
+	// Second filter should be the RequestMirror.
+	require.Equal(t, gwapiv1.HTTPRouteFilterRequestMirror, filters[1].Type)
+	require.NotNil(t, filters[1].RequestMirror)
+	require.Equal(t, "shadow-svc", string(filters[1].RequestMirror.BackendRef.Name))
+	require.Equal(t, "test-ns", string(*filters[1].RequestMirror.BackendRef.Namespace))
+	require.NotNil(t, filters[1].RequestMirror.Percent)
+	require.Equal(t, int32(50), *filters[1].RequestMirror.Percent)
+
+	// Verify default route-not-found rule is still the last rule.
+	require.Equal(t, "route-not-found", string(*httpRoute.Spec.Rules[1].Name))
+	require.Empty(t, httpRoute.Spec.Rules[1].BackendRefs)
+}
