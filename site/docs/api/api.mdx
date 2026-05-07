@@ -3258,6 +3258,11 @@ AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayR
   type="boolean"
   required="false"
   description="ExcludeFromModelsEndpoint prevents models matched by this rule from being returned by the<br />OpenAI-compatible `/models` endpoint. Requests still match this rule and apply its<br />configured transformations, including model name overrides.<br />This is useful for internal or backwards-compatible aliases, as well as duplicate model<br />definitions with different schemas."
+/><ApiField
+  name="mirrors"
+  type="HTTPRequestMirrorFilter array"
+  required="false"
+  description="Mirrors specifies backends that receive a mirrored copy of every matched request.<br />Responses from mirror backends are always discarded; only the primary backendRefs<br />respond to the client. Equivalent to HTTPRoute RequestMirror filters in the Gateway API.<br />Each entry corresponds to one shadow backend; use Percent to sample a fraction of traffic."
 />
 
 
