@@ -6,9 +6,11 @@
 package extensionserver
 
 import (
+	"context"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
@@ -437,4 +439,22 @@ func Test_findListenerRouteConfigs(t *testing.T) {
 	}
 	names := findListenerRouteConfigs(l)
 	require.ElementsMatch(t, []string{"foo", "bar"}, names)
+}
+
+func Test_maybeModifyCluster_skipsMirrorClusters(t *testing.T) {
+	// Envoy Gateway names mirror backend clusters "httproute/<ns>/<name>/rule/<rule_index>-mirror-<mirror_index>".
+	// The extension server must skip these — mirror backends are fire-and-forget copies that
+	// don't participate in the response path and need no ExtProc configuration.
+	mirrorClusterNames := []string{
+		"httproute/envoy-ai-gateway/shadow-traffic-test/rule/0-mirror-1",
+		"httproute/ns/route/rule/0-mirror-0",
+		"httproute/ns/route/rule/1-mirror-3",
+	}
+	s := &Server{log: zap.New()}
+	for _, name := range mirrorClusterNames {
+		t.Run(name, func(t *testing.T) {
+			err := s.maybeModifyCluster(context.Background(), &clusterv3.Cluster{Name: name})
+			require.NoError(t, err, "mirror cluster should be skipped without error")
+		})
+	}
 }

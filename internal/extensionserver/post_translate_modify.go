@@ -300,6 +300,11 @@ func (s *Server) retrieveAndCacheAIGatewayRoute(ctx context.Context, cache map[c
 // The resulting configuration is similar to the envoy.yaml files in tests/data-plane/.
 // Only clusters with names matching the AIGatewayRoute pattern are modified.
 func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Cluster) error {
+	// Mirror backend clusters have a rule segment like "0-mirror-1" — they are fire-and-forget
+	// copies that don't participate in the response path and need no ExtProc configuration.
+	if parts := strings.Split(cluster.Name, "/"); len(parts) >= 5 && strings.Contains(parts[4], "-mirror-") {
+		return nil
+	}
 	clusterName, err := parseAIGatewayClusterName(cluster.Name)
 	if err != nil {
 		s.log.Info("non-ai-gateway cluster name", "cluster_name", cluster.Name, "error", err)
