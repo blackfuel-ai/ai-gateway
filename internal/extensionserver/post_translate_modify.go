@@ -180,6 +180,11 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 	httpRouteNamespace := parts[1]
 	httpRouteName := parts[2]
 	httpRouteRuleIndexStr := parts[4]
+	// Mirror backend clusters have a name like "0-mirror-1" — they are fire-and-forget
+	// copies that don't participate in the response path and need no ExtProc configuration.
+	if strings.Contains(httpRouteRuleIndexStr, "-mirror-") {
+		return nil
+	}
 	httpRouteRuleIndex, err := strconv.Atoi(httpRouteRuleIndexStr)
 	if err != nil {
 		s.log.Error(err, "failed to parse HTTPRoute rule index",
