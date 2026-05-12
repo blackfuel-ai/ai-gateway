@@ -312,9 +312,18 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 	if parts := strings.Split(cluster.Name, "/"); len(parts) >= 5 {
 		if i := strings.Index(parts[4], "-mirror-"); i >= 0 {
 			var convErr error
+			// Envoy Gateway names mirror clusters with 1-based indexing — the
+			// first mirror of rule 0 is "0-mirror-1". Convert to 0-based for
+			// slice access into httpRouteRule.Mirrors.
 			mirrorIndex, convErr = strconv.Atoi(parts[4][i+len("-mirror-"):])
 			if convErr != nil {
 				s.log.Error(convErr, "failed to parse mirror index",
+					"cluster_name", cluster.Name, "rule_index", parts[4])
+				return nil
+			}
+			mirrorIndex--
+			if mirrorIndex < 0 {
+				s.log.Info("mirror index below zero after 1-based conversion",
 					"cluster_name", cluster.Name, "rule_index", parts[4])
 				return nil
 			}
