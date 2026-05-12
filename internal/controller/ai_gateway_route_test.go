@@ -1138,6 +1138,16 @@ func Test_newHTTPRoute_Mirrors(t *testing.T) {
 	err := s.client.Create(t.Context(), backend, &client.CreateOptions{})
 	require.NoError(t, err)
 
+	// Create the shadow backend that the rule's mirror points to.
+	shadowBackend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "shadow", Namespace: "test-ns"},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "shadow-svc", Namespace: ptr.To(gwapiv1.Namespace("test-ns"))},
+		},
+	}
+	err = s.client.Create(t.Context(), shadowBackend, &client.CreateOptions{})
+	require.NoError(t, err)
+
 	mirrorPercent := int32(50)
 	aiGatewayRoute := &aigv1b1.AIGatewayRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "mirror-route", Namespace: "test-ns"},
@@ -1150,11 +1160,11 @@ func Test_newHTTPRoute_Mirrors(t *testing.T) {
 					Matches: []aigv1b1.AIGatewayRouteRuleMatch{
 						{Headers: []gwapiv1.HTTPHeaderMatch{{Name: "x-test", Value: "mirror-rule"}}},
 					},
-					Mirrors: []gwapiv1.HTTPRequestMirrorFilter{
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
 						{
-							BackendRef: gwapiv1.BackendObjectReference{
-								Name:      "shadow-svc",
-								Namespace: ptr.To(gwapiv1.Namespace("test-ns")),
+							BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+								Name:              "shadow",
+								ModelNameOverride: "shadow-overridden",
 							},
 							Percent: &mirrorPercent,
 						},

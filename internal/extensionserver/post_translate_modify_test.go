@@ -6,20 +6,24 @@
 package extensionserver
 
 import (
-	"context"
 	"testing"
 
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
 
@@ -441,20 +445,92 @@ func Test_findListenerRouteConfigs(t *testing.T) {
 	require.ElementsMatch(t, []string{"foo", "bar"}, names)
 }
 
-func Test_maybeModifyCluster_skipsMirrorClusters(t *testing.T) {
-	// Envoy Gateway names mirror backend clusters "httproute/<ns>/<name>/rule/<rule_index>-mirror-<mirror_index>".
-	// The extension server must skip these — mirror backends are fire-and-forget copies that
-	// don't participate in the response path and need no ExtProc configuration.
-	mirrorClusterNames := []string{
-		"httproute/envoy-ai-gateway/shadow-traffic-test/rule/0-mirror-1",
-		"httproute/ns/route/rule/0-mirror-0",
-		"httproute/ns/route/rule/1-mirror-3",
+func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
+	// Envoy Gateway names mirror backend clusters "httproute/<ns>/<name>/rule/<ruleIdx>-mirror-<mirrorIdx>".
+	// The extension server must apply the same upstream ExtProc + header-mutation filters
+	// to mirror clusters as it does to primary clusters so shadow traffic honors
+	// per-backend ModelNameOverride / HeaderMutation / BodyMutation.
+	c := newFakeClient()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+						{Name: "primary"},
+					},
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+						{
+							BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+								Name:              "shadow",
+								ModelNameOverride: "shadow-model",
+							},
+						},
+					},
+				},
+			},
+		},
+	}))
+
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	require.NoError(t, err)
+
+	mirrorCluster := &clusterv3.Cluster{
+		Name: "httproute/ns/myroute/rule/0-mirror-0",
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
+			},
+		},
 	}
-	s := &Server{log: zap.New()}
-	for _, name := range mirrorClusterNames {
+	err = s.maybeModifyCluster(t.Context(), mirrorCluster)
+	require.NoError(t, err)
+
+	// Cluster metadata must contain the mirror backend name and the mirror flag
+	// (used downstream to suppress LLMRequestCost double-emission).
+	require.NotNil(t, mirrorCluster.Metadata)
+	internalMD := mirrorCluster.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+	require.NotNil(t, internalMD)
+	require.Equal(t,
+		internalapi.PerRouteRuleMirrorBackendName("ns", "shadow", "myroute", 0, 0),
+		internalMD.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue())
+	require.True(t, internalMD.Fields[internalapi.InternalMetadataMirrorKey].GetBoolValue())
+
+	// Endpoint metadata must mirror the cluster-level metadata.
+	epMD := mirrorCluster.LoadAssignment.Endpoints[0].LbEndpoints[0].Metadata
+	require.NotNil(t, epMD)
+	epInternal := epMD.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+	require.Equal(t,
+		internalapi.PerRouteRuleMirrorBackendName("ns", "shadow", "myroute", 0, 0),
+		epInternal.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue())
+	require.True(t, epInternal.Fields[internalapi.InternalMetadataMirrorKey].GetBoolValue())
+
+	// TypedExtensionProtocolOptions must include the upstream ExtProc filter and
+	// the header-mutation filter — same chain we install on primary clusters.
+	raw, ok := mirrorCluster.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+	require.True(t, ok, "mirror cluster must carry HttpProtocolOptions with ExtProc filter")
+	var po httpv3.HttpProtocolOptions
+	require.NoError(t, raw.UnmarshalTo(&po))
+	filterNames := make([]string, 0, len(po.HttpFilters))
+	for _, f := range po.HttpFilters {
+		filterNames = append(filterNames, f.Name)
+	}
+	require.Contains(t, filterNames, aiGatewayExtProcName)
+	require.Contains(t, filterNames, "envoy.filters.http.header_mutation")
+}
+
+func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
+	// Malformed mirror suffixes (non-numeric indices) should log and bail without
+	// returning an error so a bad cluster name doesn't tear down the whole xDS push.
+	c := newFakeClient()
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	require.NoError(t, err)
+	for _, name := range []string{
+		"httproute/ns/myroute/rule/abc-mirror-0",
+		"httproute/ns/myroute/rule/0-mirror-xyz",
+	} {
 		t.Run(name, func(t *testing.T) {
-			err := s.maybeModifyCluster(context.Background(), &clusterv3.Cluster{Name: name})
-			require.NoError(t, err, "mirror cluster should be skipped without error")
+			require.NoError(t, s.maybeModifyCluster(t.Context(), &clusterv3.Cluster{Name: name}))
 		})
 	}
 }

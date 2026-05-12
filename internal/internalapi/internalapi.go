@@ -37,6 +37,10 @@ const (
 	// filter to backend auth handlers. The AWS handler derives its SigV4 signing region from this host,
 	// so there is no separate region header.
 	UpstreamHostHeader = EnvoyAIGatewayHeaderPrefix + "upstream-host"
+	// InternalMetadataMirrorKey marks a cluster as a shadow/mirror leg of a
+	// primary request. Set on mirror clusters so the extproc cost emitter can
+	// skip LLMRequestCost emission for shadow traffic and avoid double-billing.
+	InternalMetadataMirrorKey = "mirror"
 	// MCPBackendHeader is the special header key used to specify the target backend name.
 	MCPBackendHeader = EnvoyAIGatewayHeaderPrefix + "mcp-backend"
 	// MCPRouteHeader is the special header key used to identify the mcp route.
@@ -164,6 +168,15 @@ func AWSBedrockRegionFromHost(host string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// PerRouteRuleMirrorBackendName generates a unique backend name for a mirror reference
+// within a per-route rule. Envoy Gateway names mirror clusters
+// "httproute/<ns>/<name>/rule/<ruleIdx>-mirror-<mirrorIdx>", so the corresponding
+// filterapi.Backend must be keyed off the same indices to let extproc resolve the
+// shadow backend's overrides at runtime.
+func PerRouteRuleMirrorBackendName(namespace, name, routeName string, routeRuleIndex, mirrorIndex int) string {
+	return fmt.Sprintf("%s/%s/route/%s/rule/%d/mirror/%d", namespace, name, routeName, routeRuleIndex, mirrorIndex)
 }
 
 const (
