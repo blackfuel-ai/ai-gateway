@@ -410,8 +410,11 @@ func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
 	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
 	require.NoError(t, err)
 
+	// Envoy Gateway names mirror clusters with 1-based indexing — the first
+	// mirror of rule 0 is "0-mirror-1". The extension server must convert that
+	// back to 0-based for slice access into httpRouteRule.Mirrors.
 	mirrorCluster := &clusterv3.Cluster{
-		Name: "httproute/ns/myroute/rule/0-mirror-0",
+		Name: "httproute/ns/myroute/rule/0-mirror-1",
 		LoadAssignment: &endpointv3.ClusterLoadAssignment{
 			Endpoints: []*endpointv3.LocalityLbEndpoints{
 				{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
@@ -452,6 +455,80 @@ func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
 	}
 	require.Contains(t, filterNames, aiGatewayExtProcName)
 	require.Contains(t, filterNames, "envoy.filters.http.header_mutation")
+}
+
+func Test_maybeModifyCluster_mirrorIndexIsOneBased(t *testing.T) {
+	// Envoy Gateway emits mirror cluster names with 1-based mirror indices
+	// (the first mirror of rule 0 is "0-mirror-1", the second is "0-mirror-2").
+	// The extension server must convert that suffix back to 0-based for slice
+	// access into httpRouteRule.Mirrors. Without the conversion, every single-
+	// mirror route silently skips ExtProc injection on the mirror cluster
+	// because mirrors[1] is out of range against a length-1 slice — observed
+	// in the local-dev shadow-traffic e2e against commit 0975e451 before the
+	// fix landed.
+	c := newFakeClient()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+						{Name: "primary"},
+					},
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+						{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "shadow-a"}},
+						{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "shadow-b"}},
+					},
+				},
+			},
+		},
+	}))
+
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	require.NoError(t, err)
+
+	cases := []struct {
+		clusterName        string
+		expectInstalled    bool
+		expectBackend      string
+		expectMirrorIndex0 int // 0-based mirror index after the conversion
+	}{
+		// "0-mirror-1" → mirrors[0] = shadow-a, ExtProc inserted.
+		{"httproute/ns/myroute/rule/0-mirror-1", true, "shadow-a", 0},
+		// "0-mirror-2" → mirrors[1] = shadow-b, ExtProc inserted.
+		{"httproute/ns/myroute/rule/0-mirror-2", true, "shadow-b", 1},
+		// "0-mirror-0" is invalid (mirror indices start at 1) — bail without error.
+		{"httproute/ns/myroute/rule/0-mirror-0", false, "", 0},
+		// "0-mirror-3" exceeds the slice — bail without error.
+		{"httproute/ns/myroute/rule/0-mirror-3", false, "", 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.clusterName, func(t *testing.T) {
+			cluster := &clusterv3.Cluster{
+				Name: tc.clusterName,
+				LoadAssignment: &endpointv3.ClusterLoadAssignment{
+					Endpoints: []*endpointv3.LocalityLbEndpoints{
+						{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
+					},
+				},
+			}
+			require.NoError(t, s.maybeModifyCluster(t.Context(), cluster))
+
+			_, installed := cluster.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+			require.Equal(t, tc.expectInstalled, installed,
+				"ExtProc filter chain installation should match expectation for %q", tc.clusterName)
+
+			if tc.expectInstalled {
+				internalMD := cluster.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+				require.NotNil(t, internalMD)
+				require.Equal(t,
+					internalapi.PerRouteRuleMirrorBackendName("ns", tc.expectBackend, "myroute", 0, tc.expectMirrorIndex0),
+					internalMD.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue(),
+					"cluster metadata must reference the correct 0-based mirror entry for %q", tc.clusterName)
+			}
+		})
+	}
 }
 
 func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
