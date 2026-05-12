@@ -337,15 +337,46 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				Path:    &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix},
 			})
 		}
-		filters := make([]gwapiv1.HTTPRouteFilter, 0, len(rewriteFilters)+len(rule.Mirrors))
-		filters = append(filters, rewriteFilters...)
+		// Envoy Gateway names mirror clusters by the filter's position in the rule, so the mirror
+		// filters are emitted all-or-nothing per rule: skipping only the invalid ones would shift the
+		// indices of the remaining mirrors and make the extension server resolve the wrong backend.
+		var mirrorFilters []gwapiv1.HTTPRouteFilter
 		for j := range rule.Mirrors {
-			m := rule.Mirrors[j]
-			filters = append(filters, gwapiv1.HTTPRouteFilter{
-				Type:          gwapiv1.HTTPRouteFilterRequestMirror,
-				RequestMirror: &m,
+			mirror := &rule.Mirrors[j]
+			mirrorBR := &mirror.BackendRef
+			if mirrorBR.IsInferencePool() {
+				// Mirroring to InferencePool is unsupported because the endpoint picker's
+				// stateful selection is incompatible with fire-and-forget shadow traffic.
+				errs = append(errs, fmt.Errorf("mirror backendRef cannot reference an InferencePool (rule %d, mirror %d)", i, j))
+				mirrorFilters = nil
+				break
+			}
+			mirrorBackend, err := c.validateAndGetBackend(ctx, aiGatewayRoute, mirrorBR)
+			if err != nil {
+				c.logger.Error(err, "skipping mirrors of rule with a mirror backendRef that failed validation",
+					"namespace", aiGatewayRoute.Namespace, "name", aiGatewayRoute.Name, "rule", i, "mirror", j)
+				errs = append(errs, fmt.Errorf("failed to get AIServiceBackend for mirror %s.%s: %w",
+					mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), err))
+				mirrorFilters = nil
+				break
+			}
+			mirrorObjRef := mirrorBackend.Spec.BackendRef
+			if mirrorObjRef.Namespace == nil && mirrorBackend.Namespace != "" && mirrorBackend.Namespace != aiGatewayRoute.Namespace {
+				ns := gwapiv1.Namespace(mirrorBackend.Namespace)
+				mirrorObjRef.Namespace = &ns
+			}
+			mirrorFilters = append(mirrorFilters, gwapiv1.HTTPRouteFilter{
+				Type: gwapiv1.HTTPRouteFilterRequestMirror,
+				RequestMirror: &gwapiv1.HTTPRequestMirrorFilter{
+					BackendRef: mirrorObjRef,
+					Percent:    mirror.Percent,
+					Fraction:   mirror.Fraction,
+				},
 			})
 		}
+		filters := make([]gwapiv1.HTTPRouteFilter, 0, len(rewriteFilters)+len(mirrorFilters))
+		filters = append(filters, rewriteFilters...)
+		filters = append(filters, mirrorFilters...)
 		rules = append(rules, gwapiv1.HTTPRouteRule{
 			Name:        rule.Name,
 			BackendRefs: backendRefs,

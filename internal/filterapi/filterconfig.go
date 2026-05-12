@@ -207,6 +207,11 @@ type Backend struct {
 	// HeaderValueFilters filter individual values out of multi-valued request headers before sending
 	// the request to the backend. Optional.
 	HeaderValueFilters []HTTPHeaderValueFilter `json:"headerValueFilters,omitempty"`
+	// IsMirror is true when this backend entry corresponds to a shadow (mirror) destination.
+	// When set, the upstream processor skips LLMRequestCost dynamic-metadata emission for
+	// the mirror leg so that cost metrics are not double-counted by the access-log /
+	// billing pipeline (the primary leg has already emitted them).
+	IsMirror bool `json:"isMirror,omitempty"`
 }
 
 // BackendAuth corresponds partially to BackendSecurityPolicy in api/v1alpha1/api.go.

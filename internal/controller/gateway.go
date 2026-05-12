@@ -575,6 +575,74 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 					routeBackendNames = append(routeBackendNames, b.Name)
 				}
 			}
+			// Emit a filterapi.Backend entry for each mirror destination so that
+			// extproc, running on the upstream HTTP filter chain of the mirror
+			// cluster, can resolve the shadow backend's ModelNameOverride and
+			// header/body mutations by cluster-metadata backend name lookup.
+			for mirrorIndex := range rule.Mirrors {
+				mirror := &rule.Mirrors[mirrorIndex]
+				mirrorBR := &mirror.BackendRef
+				if mirrorBR.IsInferencePool() {
+					// Validated at the HTTPRoute translation step; defensive guard here.
+					c.logger.Info("skipping InferencePool mirror backend; not supported",
+						"backend_name", mirrorBR.Name, "aigatewayroute", aiGatewayRoute.Name)
+					continue
+				}
+				b := filterapi.Backend{IsMirror: true}
+				b.Name = internalapi.PerRouteRuleMirrorBackendName(aiGatewayRoute.Namespace, mirrorBR.Name, aiGatewayRoute.Name, ruleIndex, mirrorIndex)
+				b.ModelNameOverride = mirrorBR.ModelNameOverride
+
+				backendNamespace := mirrorBR.GetNamespace(aiGatewayRoute.Namespace)
+				if mirrorBR.IsCrossNamespace(aiGatewayRoute.Namespace) {
+					if rgErr := c.referenceGrantValidator.validateAIServiceBackendReference(
+						ctx, aiGatewayRoute.Namespace, backendNamespace, mirrorBR.Name); rgErr != nil {
+						c.logger.Error(rgErr, "cross-namespace mirror backendRef rejected: no valid ReferenceGrant. Skipping this mirror.",
+							"backend_name", mirrorBR.Name, "aigatewayroute", aiGatewayRoute.Name,
+							"namespace", backendNamespace)
+						continue
+					}
+				}
+
+				backendObj, bsp, mirrorErr := c.backendWithMaybeBSP(ctx, backendNamespace, mirrorBR.Name)
+				if mirrorErr != nil {
+					if isCtxErr(mirrorErr) {
+						return false, fmt.Errorf("reconcile interrupted while reading mirror backend %s: %w", mirrorBR.Name, mirrorErr)
+					}
+					c.logger.Error(mirrorErr, "failed to get mirror backend or backend security policy. Skipping this mirror.",
+						"backend_name", mirrorBR.Name, "aigatewayroute", aiGatewayRoute.Name,
+						"namespace", backendNamespace)
+					continue
+				}
+
+				mergedHeaderMutation := mergeHeaderMutations(mirrorBR.HeaderMutation, backendObj.Spec.HeaderMutation)
+				b.HeaderMutation = headerMutationToFilterAPI(mergedHeaderMutation)
+
+				mergedBodyMutation := mergeBodyMutations(mirrorBR.BodyMutation, backendObj.Spec.BodyMutation)
+				b.BodyMutation = bodyMutationToFilterAPI(mergedBodyMutation)
+
+				b.Schema = schemaToFilterAPI(backendObj.Spec.APISchema)
+				b.HeaderValueFilters = headerValueFiltersToFilterAPI(backendObj.Spec.HeaderValueFilters)
+
+				if bsp != nil {
+					b.Auth, err = c.bspToFilterAPIBackendAuth(ctx, bsp)
+					if err != nil {
+						if isCtxErr(err) {
+							return false, fmt.Errorf("reconcile interrupted while reading auth for backend security policy %s: %w", bsp.Name, err)
+						}
+						c.logger.Error(err, "failed to get backend auth from backend security policy. Skipping this mirror.",
+							"backend_name", mirrorBR.Name, "backend_security_policy", bsp.Name,
+							"aigatewayroute", aiGatewayRoute.Name, "namespace", aiGatewayRoute.Namespace)
+						continue
+					}
+					stripCredentialOverrideInputHeaders(&b)
+				}
+
+				ec.Backends = append(ec.Backends, b)
+				if _, exists := routeBackendNamesSet[b.Name]; !exists {
+					routeBackendNamesSet[b.Name] = struct{}{}
+					routeBackendNames = append(routeBackendNames, b.Name)
+				}
+			}
 		}
 		if len(routeBackendNames) > 0 {
 			// Dedup per (metadataKey, routeName): last definition wins.

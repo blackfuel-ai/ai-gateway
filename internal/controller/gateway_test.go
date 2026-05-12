@@ -668,6 +668,54 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		require.NotNil(t, fc.Backends[0].Auth.APIKey)
 		require.Equal(t, "supersecret", fc.Backends[0].Auth.APIKey.Key)
 	})
+
+	newMirrorRoute := func() []aigv1b1.AIGatewayRoute {
+		return []aigv1b1.AIGatewayRoute{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: routeNamespace},
+				Spec: aigv1b1.AIGatewayRouteSpec{
+					Rules: []aigv1b1.AIGatewayRouteRule{
+						{
+							Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+								{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+									Name:      "backend1",
+									Namespace: ptr.To(gwapiv1.Namespace(backendNamespace)),
+								}},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("AIServiceBackend cross-namespace mirror without ReferenceGrant is rejected", func(t *testing.T) {
+		c, kube := setup(t, nil)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute(), nil, "uuid", nil, nil)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Empty(t, fc.Backends, "cross-namespace mirror backend without a ReferenceGrant must not be wired into the filter config")
+	})
+
+	t.Run("AIServiceBackend cross-namespace mirror with ReferenceGrant is allowed", func(t *testing.T) {
+		grant := referenceGrant(aiServiceBackendGroup, aiGatewayRouteKind, aiServiceBackendGroup, aiServiceBackendKind)
+		c, kube := setup(t, grant)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute(), nil, "uuid", nil, nil)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Len(t, fc.Backends, 1)
+		require.True(t, fc.Backends[0].IsMirror)
+		require.Equal(t, internalapi.PerRouteRuleMirrorBackendName(routeNamespace, "backend1", "route1", 0, 0), fc.Backends[0].Name)
+		require.NotNil(t, fc.Backends[0].Auth)
+		require.NotNil(t, fc.Backends[0].Auth.APIKey)
+		require.Equal(t, "supersecret", fc.Backends[0].Auth.APIKey.Key)
+	})
 }
 
 // TestGatewayController_reconcileFilterConfigSecret_HostnameScopedModels verifies that mixing routes
@@ -4623,4 +4671,98 @@ func TestGatewayController_warnUndeclaredMetadataNamespaces(t *testing.T) {
 	logged = nil
 	c.warnUndeclaredMetadataNamespaces(ec, []string{"declared.ns", "missing.ns", "other-missing.ns"}, "gw", "ns")
 	require.Empty(t, logged)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_Mirrors exercises the shadow
+// traffic mirroring backend resolution loop in reconcileFilterConfigSecret: a
+// valid mirror is emitted as a filterapi.Backend with IsMirror set, a mirror
+// referencing a missing backend is skipped, and an InferencePool mirror is
+// skipped (unsupported).
+func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "ns",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	primary := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			APISchema:  aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaOpenAI, Version: ptr.To("v1")},
+			BackendRef: gwapiv1.BackendObjectReference{Name: "primary-svc", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	}
+	mirrorBackend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-backend", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			APISchema:  aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaOpenAI, Version: ptr.To("v1")},
+			BackendRef: gwapiv1.BackendObjectReference{Name: "mirror-svc", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			HeaderMutation: &aigv1b1.HTTPHeaderMutation{
+				Set: []gwapiv1.HTTPHeader{{Name: "x-backend", Value: "mirror"}},
+			},
+			BodyMutation: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "shadow", Value: "true"}},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), primary))
+	require.NoError(t, fakeClient.Create(t.Context(), mirrorBackend))
+
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "primary"}},
+						Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+							{
+								BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+									Name:              "mirror-backend",
+									ModelNameOverride: "shadow-model",
+									HeaderMutation:    &aigv1b1.HTTPHeaderMutation{Set: []gwapiv1.HTTPHeader{{Name: "x-mirror", Value: "1"}}},
+									BodyMutation:      &aigv1b1.HTTPBodyMutation{Set: []aigv1b1.HTTPBodyField{{Path: "mirror_field", Value: `"v"`}}},
+								},
+							},
+							// References a backend that does not exist: must be skipped, not fatal.
+							{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "does-not-exist"}},
+							// InferencePool mirrors are unsupported and must be skipped.
+							{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+								Name:  "some-pool",
+								Group: ptr.To("inference.networking.k8s.io"),
+								Kind:  ptr.To("InferencePool"),
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	const someNamespace = "some-namespace"
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil)
+	require.NoError(t, err)
+
+	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+
+	// The valid mirror is emitted with IsMirror and its overrides.
+	wantName := internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "mirror-backend", "route1", 0, 0)
+	var mirror *filterapi.Backend
+	for i := range fc.Backends {
+		if fc.Backends[i].Name == wantName {
+			mirror = &fc.Backends[i]
+			break
+		}
+	}
+	require.NotNil(t, mirror, "expected mirror backend %q in filter config", wantName)
+	require.True(t, mirror.IsMirror)
+	require.Equal(t, "shadow-model", mirror.ModelNameOverride)
+	require.NotNil(t, mirror.HeaderMutation)
+	require.NotNil(t, mirror.BodyMutation)
+
+	// The missing-backend and InferencePool mirrors must have been skipped.
+	for i := range fc.Backends {
+		require.NotEqual(t, internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "does-not-exist", "route1", 0, 1), fc.Backends[i].Name)
+		require.NotEqual(t, internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "some-pool", "route1", 0, 2), fc.Backends[i].Name)
+	}
 }

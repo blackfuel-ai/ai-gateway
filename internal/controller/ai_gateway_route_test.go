@@ -1224,6 +1224,16 @@ func Test_newHTTPRoute_Mirrors(t *testing.T) {
 	err := s.client.Create(t.Context(), backend, &client.CreateOptions{})
 	require.NoError(t, err)
 
+	// Create the shadow backend that the rule's mirror points to.
+	shadowBackend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "shadow", Namespace: "test-ns"},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "shadow-svc", Namespace: ptr.To(gwapiv1.Namespace("test-ns"))},
+		},
+	}
+	err = s.client.Create(t.Context(), shadowBackend, &client.CreateOptions{})
+	require.NoError(t, err)
+
 	mirrorPercent := int32(50)
 	aiGatewayRoute := &aigv1b1.AIGatewayRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "mirror-route", Namespace: "test-ns"},
@@ -1236,11 +1246,11 @@ func Test_newHTTPRoute_Mirrors(t *testing.T) {
 					Matches: []aigv1b1.AIGatewayRouteRuleMatch{
 						{Headers: []gwapiv1.HTTPHeaderMatch{{Name: "x-test", Value: "mirror-rule"}}},
 					},
-					Mirrors: []gwapiv1.HTTPRequestMirrorFilter{
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
 						{
-							BackendRef: gwapiv1.BackendObjectReference{
-								Name:      "shadow-svc",
-								Namespace: ptr.To(gwapiv1.Namespace("test-ns")),
+							BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+								Name:              "shadow",
+								ModelNameOverride: "shadow-overridden",
 							},
 							Percent: &mirrorPercent,
 						},
@@ -1282,4 +1292,26 @@ func Test_newHTTPRoute_Mirrors(t *testing.T) {
 	// Verify default route-not-found rule is still the last rule.
 	require.Equal(t, "route-not-found", string(*httpRoute.Spec.Rules[1].Name))
 	require.Empty(t, httpRoute.Spec.Rules[1].BackendRefs)
+
+	// A rule with an invalid mirror gets no mirror filters at all: emitting only the valid ones
+	// would shift the index Envoy Gateway names the mirror clusters with. The HTTPRoute is still
+	// built and the error is returned.
+	for _, invalid := range []aigv1b1.AIGatewayRouteRuleBackendRef{
+		{Name: "does-not-exist"},
+		{Name: "some-pool", Group: ptr.To("inference.networking.k8s.io"), Kind: ptr.To("InferencePool")},
+	} {
+		t.Run("invalid mirror "+invalid.Name, func(t *testing.T) {
+			route := aiGatewayRoute.DeepCopy()
+			route.Spec.Rules[0].Mirrors = []aigv1b1.AIGatewayRouteRuleMirror{
+				{BackendRef: invalid},
+				{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "shadow"}},
+			}
+			dst := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "mirror-route", Namespace: "test-ns"}}
+			require.Error(t, s.newHTTPRoute(t.Context(), dst, route))
+			require.Len(t, dst.Spec.Rules, 2)
+			require.Len(t, dst.Spec.Rules[0].BackendRefs, 1)
+			require.Len(t, dst.Spec.Rules[0].Filters, 1)
+			require.Equal(t, gwapiv1.HTTPRouteFilterExtensionRef, dst.Spec.Rules[0].Filters[0].Type)
+		})
+	}
 }

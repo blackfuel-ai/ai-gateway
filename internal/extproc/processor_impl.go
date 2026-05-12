@@ -130,6 +130,9 @@ type (
 		handler            filterapi.BackendAuthHandler
 		// unsupportedBackendErr is set by SetBackend and answered as a 422 in ProcessRequestHeaders.
 		unsupportedBackendErr error
+		// isMirror is true when the resolved backend is a shadow/mirror destination.
+		// Mirror legs skip LLMRequestCost dynamic-metadata emission to avoid double-billing.
+		isMirror bool
 		// cost is the cost of the request that is accumulated during the processing of the response.
 		costs metrics.TokenUsage
 		// metrics tracking.
@@ -648,7 +651,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	// the usage payload), not only at end-of-stream. This ensures the access log still captures usage
 	// even if the downstream client disconnects right after the terminal chunk, before EndOfStream
 	// is observed by the extproc. The EndOfStream write below remains as the final refresh.
-	if (body.EndOfStream || !tokenUsage.IsZero()) && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
+	//
+	// Mirror (shadow) backends must not emit LLMRequestCost dynamic metadata: the primary
+	// leg already emitted it and the downstream access-log / billing pipeline would
+	// otherwise double-count tokens for every mirrored request.
+	if (body.EndOfStream || !tokenUsage.IsZero()) && !u.isMirror && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
 		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build dynamic metadata: %w", err)
@@ -712,6 +719,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	}
 	u.modelNameOverride = backend.Backend.ModelNameOverride
 	u.backendName = backend.Backend.Name
+	u.isMirror = backend.Backend.IsMirror
 	u.routeName = routeName
 	u.handler = backend.Handler
 	u.headerMutator = headermutator.NewHeaderMutator(backend.Backend.HeaderMutation, rp.requestHeaders)
