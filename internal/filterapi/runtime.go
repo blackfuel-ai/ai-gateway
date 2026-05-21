@@ -125,6 +125,6 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		GlobalRequestCosts: globalCosts,
 		RequestCosts:       costs,
 		DeclaredModels:     config.Models,
-    ModelsByHost:   config.ModelsByHost,
+		ModelsByHost:       config.ModelsByHost,
 	}, nil
 }
