@@ -241,7 +241,8 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 
 	// Only process LoadAssignment for non-InferencePool backends.
 	if pool == nil {
-		if isMirror {
+		switch {
+		case isMirror:
 			if mirrorIndex >= len(httpRouteRule.Mirrors) {
 				s.log.Info("mirror index out of range",
 					"cluster_name", cluster.Name, "mirror_index", mirrorIndex,
@@ -289,7 +290,7 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 					}
 				}
 			}
-		} else if cluster.LoadAssignment == nil {
+		case cluster.LoadAssignment == nil:
 			// When LoadAssignment is nil (e.g. EDS-managed endpoints in standalone mode),
 			// set backend name on cluster-level metadata so the upstream ext_proc filter
 			// can resolve the backend via XDSClusterMetadataBackendNamePath fallback.
@@ -298,7 +299,7 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 				backendRef := httpRouteRule.BackendRefs[0]
 				setClusterMetadataBackendName(cluster, aigwRoute.Namespace, backendRef.Name, aigwRoute.Name, httpRouteRuleIndex, 0)
 			}
-		} else {
+		default:
 			// Populate the metadata for each endpoint in the LoadAssignment.
 			var lbEndpointIndex int
 			for i, backendRef := range httpRouteRule.BackendRefs {
