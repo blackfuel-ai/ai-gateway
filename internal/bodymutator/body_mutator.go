@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -107,15 +108,7 @@ func (b *BodyMutator) Mutate(requestBody []byte) ([]byte, error) {
 	if len(b.bodyMutations.Set) > 0 {
 		for _, field := range b.bodyMutations.Set {
 			if field.Path != "" {
-				// Check value type to determine appropriate sjson method
-				// TODO handle JSON value check in configuration load time too.
-				if isJSONValue(field.Value) {
-					// Use SetRawBytes for JSON values (quoted strings, numbers, booleans, objects, arrays)
-					mutatedBody, err = sjson.SetRawBytesOptions(mutatedBody, field.Path, []byte(field.Value), &sjson.Options{ReplaceInPlace: true})
-				} else {
-					// Use SetBytes for plain string values
-					mutatedBody, err = sjson.SetBytesOptions(mutatedBody, field.Path, field.Value, &sjson.Options{ReplaceInPlace: true})
-				}
+				mutatedBody, err = writeField(mutatedBody, field.Path, field.Value)
 				if err != nil {
 					return nil, fmt.Errorf("failed to set field %s: %w", field.Path, err)
 				}
@@ -123,5 +116,36 @@ func (b *BodyMutator) Mutate(requestBody []byte) ([]byte, error) {
 		}
 	}
 
+	// Apply set-defaults last so they only fill paths still absent after
+	// Remove and Set. An explicit Set on the same path therefore always wins.
+	// gjson.Exists returns true for explicit JSON null, matching the
+	// documented "explicit null suppresses the default" semantics.
+	if len(b.bodyMutations.SetDefault) > 0 {
+		for _, field := range b.bodyMutations.SetDefault {
+			if field.Path == "" {
+				continue
+			}
+			if gjson.GetBytes(mutatedBody, field.Path).Exists() {
+				continue
+			}
+			mutatedBody, err = writeField(mutatedBody, field.Path, field.Value)
+			if err != nil {
+				return nil, fmt.Errorf("failed to set default for field %s: %w", field.Path, err)
+			}
+		}
+	}
+
 	return mutatedBody, nil
+}
+
+// writeField writes a value to the given path, choosing between raw JSON and
+// plain-string sjson encoders based on isJSONValue.
+// TODO handle JSON value check in configuration load time too.
+func writeField(body []byte, path, value string) ([]byte, error) {
+	if isJSONValue(value) {
+		// Use SetRawBytes for JSON values (quoted strings, numbers, booleans, objects, arrays)
+		return sjson.SetRawBytesOptions(body, path, []byte(value), &sjson.Options{ReplaceInPlace: true})
+	}
+	// Use SetBytes for plain string values
+	return sjson.SetBytesOptions(body, path, value, &sjson.Options{ReplaceInPlace: true})
 }

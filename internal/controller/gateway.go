@@ -194,6 +194,9 @@ func bodyMutationToFilterAPI(m *aigv1b1.HTTPBodyMutation) *filterapi.HTTPBodyMut
 	for _, field := range m.Set {
 		ret.Set = append(ret.Set, filterapi.HTTPBodyField{Path: field.Path, Value: field.Value})
 	}
+	for _, field := range m.SetDefault {
+		ret.SetDefault = append(ret.SetDefault, filterapi.HTTPBodyField{Path: field.Path, Value: field.Value})
+	}
 	return ret
 }
 
@@ -284,6 +287,20 @@ func mergeBodyMutations(routeLevel, backendLevel *aigv1b1.HTTPBodyMutation) *aig
 
 	for f := range removeMap {
 		result.Remove = append(result.Remove, f)
+	}
+
+	// Merge SetDefault operations (route-level wins conflicts)
+	defaultMap := make(map[string]aigv1b1.HTTPBodyField)
+
+	for _, f := range backendLevel.SetDefault {
+		defaultMap[f.Path] = f
+	}
+	for _, f := range routeLevel.SetDefault {
+		defaultMap[f.Path] = f
+	}
+
+	for _, f := range defaultMap {
+		result.SetDefault = append(result.SetDefault, f)
 	}
 
 	return result
