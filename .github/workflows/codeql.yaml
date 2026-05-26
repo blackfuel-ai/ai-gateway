@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - "main"
+      - "bf/**"
   pull_request:
     branches:
       - "main"
+      - "bf/**"
   schedule:
     - cron: "16 11 * * 5"
 
