@@ -115,6 +115,13 @@ type (
 		responseEncoding   string
 		compressedBuf      []byte // accumulates raw compressed bytes across streaming chunks
 		decompressedOffset int    // tracks decompressed bytes already returned
+		// responseBodyBuf accumulates raw response-body bytes across HttpBody chunks
+		// for non-streaming responses. Envoy can deliver a non-streaming response
+		// across multiple ProcessingRequest_ResponseBody messages (e.g. when chained
+		// behind FULL_DUPLEX_STREAMED ext_proc filters, the final chunk is empty
+		// with EndOfStream=true). Buffering until EndOfStream lets us hand the
+		// translator a single complete body and avoids io.EOF on the empty tail.
+		responseBodyBuf []byte
 		translator         translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
 		modelNameOverride  internalapi.ModelNameOverride
 		headerMutator      *headermutator.HeaderMutator
@@ -449,6 +456,26 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 			u.metrics.RecordRequestCompletion(ctx, true, u.requestHeaders)
 		}
 	}()
+
+	// Non-streaming responses may be delivered across multiple HttpBody chunks
+	// (notably an empty trailing chunk with EndOfStream=true when chained behind
+	// FULL_DUPLEX_STREAMED ext_proc filters). Accumulate raw bytes and only
+	// invoke the translator once the full body is available; otherwise the
+	// non-streaming translators' unconditional json.Decode would surface io.EOF
+	// on the empty chunk and envoy would synthesize a 500.
+	if !u.parent.stream {
+		u.responseBodyBuf = append(u.responseBodyBuf, body.Body...)
+		if !body.EndOfStream {
+			return &extprocv3.ProcessingResponse{
+				Response: &extprocv3.ProcessingResponse_ResponseBody{
+					ResponseBody: &extprocv3.BodyResponse{
+						Response: &extprocv3.CommonResponse{},
+					},
+				},
+			}, nil
+		}
+		body = &extprocv3.HttpBody{Body: u.responseBodyBuf, EndOfStream: true}
+	}
 
 	// Decompress the body if needed.
 	// For streaming responses with content-encoding, use stateful decompression

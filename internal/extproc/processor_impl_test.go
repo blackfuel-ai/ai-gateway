@@ -284,7 +284,7 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 			parent:     &chatCompletionProcessorRouterFilter{},
 		}
 		mt.retErr = errors.New("test error")
-		_, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{})
+		_, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{EndOfStream: true})
 		require.ErrorContains(t, err, "test error")
 		mm.RequireRequestFailure(t)
 		require.Zero(t, mm.inputTokenCount)
