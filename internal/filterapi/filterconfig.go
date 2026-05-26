@@ -295,6 +295,11 @@ type HTTPBodyMutation struct {
 	// Remove the given JSON field(s) from the HTTP request body before sending to the backend.
 	// The value of Remove is a list of top-level field names to remove.
 	Remove []string `json:"remove,omitempty"`
+	// SetDefault sets the given JSON field (name, value) only when the field is
+	// not already defined in the request body. Applied after Set and Remove —
+	// an explicit Set on the same path wins. An explicit null in the request
+	// body is considered "defined" and suppresses the default.
+	SetDefault []HTTPBodyField `json:"setDefault,omitempty"`
 }
 
 // HTTPBodyField represents a JSON field name and value for body mutation

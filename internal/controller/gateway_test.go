@@ -2483,6 +2483,29 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 				Remove: []string{},
 			},
 		},
+		{
+			name: "set, remove, and setDefault together",
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "service_tier", Value: "\"scale\""},
+				},
+				Remove: []string{"internal_flag"},
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "stream", Value: "false"},
+				},
+			},
+			expected: &filterapi.HTTPBodyMutation{
+				Set: []filterapi.HTTPBodyField{
+					{Path: "service_tier", Value: "\"scale\""},
+				},
+				Remove: []string{"internal_flag"},
+				SetDefault: []filterapi.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "stream", Value: "false"},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2789,6 +2812,45 @@ func Test_mergeBodyMutations(t *testing.T) {
 					{Path: "number_field", Value: "42"},
 					{Path: "object_field", Value: "{\"key\": \"value\"}"},
 					{Path: "string_field", Value: "\"string-value\""},
+				},
+			},
+		},
+		{
+			name: "setDefault — route wins on same path, others pass through",
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "route_only", Value: "\"r\""},
+				},
+			},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"low\""},
+					{Path: "backend_only", Value: "\"b\""},
+				},
+			},
+			expected: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "backend_only", Value: "\"b\""},
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "route_only", Value: "\"r\""},
+				},
+			},
+		},
+		{
+			name: "setDefault — only one side defines it, copied through",
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "model", Value: "\"gpt-4\""}},
+			},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+				},
+			},
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "model", Value: "\"gpt-4\""}},
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
 				},
 			},
 		},
