@@ -110,6 +110,23 @@ bodyMutation:
     - "debug_mode"
 ```
 
+### Setting Default Body Fields
+
+The `setDefault` field sets a top-level JSON field **only when the field is not already defined** in the request body. It is useful for injecting a default value without overriding what the client provided. A maximum of 16 entries is allowed.
+
+```yaml
+bodyMutation:
+  setDefault:
+    - path: "reasoning_effort"
+      value: '"none"'
+```
+
+Semantics:
+
+- The presence check is path-existence — an explicit `null` from the client is considered "defined" and suppresses the default.
+- `setDefault` is applied **after** `set` and `remove`, so an explicit `set` on the same path always wins, and a `remove` followed by a `setDefault` on the same path fills the gap with the default.
+- For precedence between route-level and backend-level, the same rule as `set` applies: route-level `setDefault` entries win over backend-level entries for the same path.
+
 ## Complete Examples
 
 ### Example 1: AIServiceBackend with Mutations
