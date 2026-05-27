@@ -469,6 +469,38 @@ type HTTPBodyMutation struct {
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=16
 	Remove []string `json:"remove,omitempty"`
+
+	// SetDefault sets the given JSON field (name, value) only when the field is
+	// not already defined in the request body. Only top-level fields are
+	// currently supported. The presence check is path-existence: an explicit
+	// null from the client is considered "defined" and suppresses the default.
+	//
+	// When the same path is targeted by both Set and SetDefault, Set wins —
+	// SetDefault is applied after Set/Remove and only fills paths that are
+	// still absent at that point. Route-level SetDefault entries override
+	// backend-level entries for the same path.
+	//
+	// Input:
+	//   {
+	//     "model": "gpt-4"
+	//   }
+	//
+	// Config:
+	//   setDefault:
+	//   - path: "reasoning_effort"
+	//     value: "\"none\""
+	//
+	// Output:
+	//   {
+	//     "model": "gpt-4",
+	//     "reasoning_effort": "none"
+	//   }
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=path
+	// +kubebuilder:validation:MaxItems=16
+	SetDefault []HTTPBodyField `json:"setDefault,omitempty"`
 }
 
 // HTTPBodyField represents a JSON field name and value for body mutation

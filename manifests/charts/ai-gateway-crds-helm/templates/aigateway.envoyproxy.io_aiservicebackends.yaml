@@ -223,6 +223,66 @@ spec:
                     x-kubernetes-list-map-keys:
                     - path
                     x-kubernetes-list-type: map
+                  setDefault:
+                    description: |-
+                      SetDefault sets the given JSON field (name, value) only when the field is
+                      not already defined in the request body. Only top-level fields are
+                      currently supported. The presence check is path-existence: an explicit
+                      null from the client is considered "defined" and suppresses the default.
+
+                      When the same path is targeted by both Set and SetDefault, Set wins —
+                      SetDefault is applied after Set/Remove and only fills paths that are
+                      still absent at that point. Route-level SetDefault entries override
+                      backend-level entries for the same path.
+
+                      Input:
+                        {
+                          "model": "gpt-4"
+                        }
+
+                      Config:
+                        setDefault:
+                        - path: "reasoning_effort"
+                          value: "\"none\""
+
+                      Output:
+                        {
+                          "model": "gpt-4",
+                          "reasoning_effort": "none"
+                        }
+                    items:
+                      description: HTTPBodyField represents a JSON field name and
+                        value for body mutation
+                      properties:
+                        path:
+                          description: |-
+                            Path is the top-level field name to set in the request body.
+                            Examples: "service_tier", "max_tokens", "temperature"
+                          minLength: 1
+                          type: string
+                        value:
+                          description: |-
+                            Value is the JSON value to set at the specified field. This can be any valid JSON value:
+                            string, number, boolean, object, array, or null.
+                            The value will be parsed as JSON and inserted at the specified field.
+
+                            Examples:
+                              - "\"scale\"" (string)
+                              - "42" (number)
+                              - "true" (boolean)
+                              - "{\"key\": \"value\"}" (object)
+                              - "[1, 2, 3]" (array)
+                              - "null" (null)
+                          type: string
+                      required:
+                      - path
+                      - value
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - path
+                    x-kubernetes-list-type: map
                 type: object
               headerMutation:
                 description: |-
@@ -593,6 +653,66 @@ spec:
                         {
                           "model": "gpt-4",
                           "service_tier": "scale"
+                        }
+                    items:
+                      description: HTTPBodyField represents a JSON field name and
+                        value for body mutation
+                      properties:
+                        path:
+                          description: |-
+                            Path is the top-level field name to set in the request body.
+                            Examples: "service_tier", "max_tokens", "temperature"
+                          minLength: 1
+                          type: string
+                        value:
+                          description: |-
+                            Value is the JSON value to set at the specified field. This can be any valid JSON value:
+                            string, number, boolean, object, array, or null.
+                            The value will be parsed as JSON and inserted at the specified field.
+
+                            Examples:
+                              - "\"scale\"" (string)
+                              - "42" (number)
+                              - "true" (boolean)
+                              - "{\"key\": \"value\"}" (object)
+                              - "[1, 2, 3]" (array)
+                              - "null" (null)
+                          type: string
+                      required:
+                      - path
+                      - value
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - path
+                    x-kubernetes-list-type: map
+                  setDefault:
+                    description: |-
+                      SetDefault sets the given JSON field (name, value) only when the field is
+                      not already defined in the request body. Only top-level fields are
+                      currently supported. The presence check is path-existence: an explicit
+                      null from the client is considered "defined" and suppresses the default.
+
+                      When the same path is targeted by both Set and SetDefault, Set wins —
+                      SetDefault is applied after Set/Remove and only fills paths that are
+                      still absent at that point. Route-level SetDefault entries override
+                      backend-level entries for the same path.
+
+                      Input:
+                        {
+                          "model": "gpt-4"
+                        }
+
+                      Config:
+                        setDefault:
+                        - path: "reasoning_effort"
+                          value: "\"none\""
+
+                      Output:
+                        {
+                          "model": "gpt-4",
+                          "reasoning_effort": "none"
                         }
                     items:
                       description: HTTPBodyField represents a JSON field name and

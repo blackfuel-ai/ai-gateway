@@ -166,6 +166,124 @@ func TestBodyMutator_Mutate_InvalidJSON(t *testing.T) {
 	require.Contains(t, string(mutatedBody), "premium")
 }
 
+func TestBodyMutator_Mutate_SetDefault(t *testing.T) {
+	t.Run("absent path is set", func(t *testing.T) {
+		mutator := NewBodyMutator(&filterapi.HTTPBodyMutation{
+			SetDefault: []filterapi.HTTPBodyField{
+				{Path: "reasoning_effort", Value: "\"none\""},
+			},
+		}, nil)
+
+		mutated, err := mutator.Mutate([]byte(`{"model": "gpt-4"}`))
+		require.NoError(t, err)
+
+		var result map[string]interface{}
+		require.NoError(t, json.Unmarshal(mutated, &result))
+		require.Equal(t, "none", result["reasoning_effort"])
+		require.Equal(t, "gpt-4", result["model"])
+	})
+
+	t.Run("present path is preserved", func(t *testing.T) {
+		mutator := NewBodyMutator(&filterapi.HTTPBodyMutation{
+			SetDefault: []filterapi.HTTPBodyField{
+				{Path: "reasoning_effort", Value: "\"none\""},
+			},
+		}, nil)
+
+		mutated, err := mutator.Mutate([]byte(`{"model": "gpt-4", "reasoning_effort": "low"}`))
+		require.NoError(t, err)
+
+		var result map[string]interface{}
+		require.NoError(t, json.Unmarshal(mutated, &result))
+		require.Equal(t, "low", result["reasoning_effort"])
+	})
+
+	t.Run("explicit null is considered defined", func(t *testing.T) {
+		mutator := NewBodyMutator(&filterapi.HTTPBodyMutation{
+			SetDefault: []filterapi.HTTPBodyField{
+				{Path: "reasoning_effort", Value: "\"none\""},
+			},
+		}, nil)
+
+		mutated, err := mutator.Mutate([]byte(`{"model": "gpt-4", "reasoning_effort": null}`))
+		require.NoError(t, err)
+
+		var result map[string]interface{}
+		require.NoError(t, json.Unmarshal(mutated, &result))
+		require.Contains(t, result, "reasoning_effort")
+		require.Nil(t, result["reasoning_effort"])
+	})
+
+	t.Run("Set wins over SetDefault on the same path", func(t *testing.T) {
+		mutator := NewBodyMutator(&filterapi.HTTPBodyMutation{
+			Set: []filterapi.HTTPBodyField{
+				{Path: "reasoning_effort", Value: "\"high\""},
+			},
+			SetDefault: []filterapi.HTTPBodyField{
+				{Path: "reasoning_effort", Value: "\"none\""},
+			},
+		}, nil)
+
+		mutated, err := mutator.Mutate([]byte(`{"model": "gpt-4"}`))
+		require.NoError(t, err)
+
+		var result map[string]interface{}
+		require.NoError(t, json.Unmarshal(mutated, &result))
+		require.Equal(t, "high", result["reasoning_effort"])
+	})
+
+	t.Run("Remove then SetDefault fills the gap", func(t *testing.T) {
+		mutator := NewBodyMutator(&filterapi.HTTPBodyMutation{
+			Remove: []string{"reasoning_effort"},
+			SetDefault: []filterapi.HTTPBodyField{
+				{Path: "reasoning_effort", Value: "\"none\""},
+			},
+		}, nil)
+
+		mutated, err := mutator.Mutate([]byte(`{"model": "gpt-4", "reasoning_effort": "low"}`))
+		require.NoError(t, err)
+
+		var result map[string]interface{}
+		require.NoError(t, json.Unmarshal(mutated, &result))
+		require.Equal(t, "none", result["reasoning_effort"])
+	})
+
+	t.Run("typed default values round-trip", func(t *testing.T) {
+		mutator := NewBodyMutator(&filterapi.HTTPBodyMutation{
+			SetDefault: []filterapi.HTTPBodyField{
+				{Path: "max_tokens", Value: "256"},
+				{Path: "stream", Value: "true"},
+				{Path: "metadata", Value: `{"k": "v"}`},
+				{Path: "tags", Value: `[1, 2]`},
+				{Path: "plain", Value: "raw-string"},
+			},
+		}, nil)
+
+		mutated, err := mutator.Mutate([]byte(`{"model": "gpt-4"}`))
+		require.NoError(t, err)
+
+		var result map[string]interface{}
+		require.NoError(t, json.Unmarshal(mutated, &result))
+		require.Equal(t, float64(256), result["max_tokens"])
+		require.Equal(t, true, result["stream"])
+		require.Equal(t, map[string]interface{}{"k": "v"}, result["metadata"])
+		require.Equal(t, []interface{}{float64(1), float64(2)}, result["tags"])
+		require.Equal(t, "raw-string", result["plain"])
+	})
+
+	t.Run("empty path is skipped", func(t *testing.T) {
+		mutator := NewBodyMutator(&filterapi.HTTPBodyMutation{
+			SetDefault: []filterapi.HTTPBodyField{
+				{Path: "", Value: "\"ignored\""},
+			},
+		}, nil)
+
+		mutated, err := mutator.Mutate([]byte(`{"model": "gpt-4"}`))
+		require.NoError(t, err)
+		require.JSONEq(t, `{"model": "gpt-4"}`, string(mutated))
+	})
+}
+
 func TestBodyMutator_Mutate_InvalidJSONValue(t *testing.T) {
 	bodyMutations := &filterapi.HTTPBodyMutation{
 		Set: []filterapi.HTTPBodyField{
