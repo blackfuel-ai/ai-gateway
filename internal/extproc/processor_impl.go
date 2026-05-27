@@ -121,12 +121,12 @@ type (
 		// behind FULL_DUPLEX_STREAMED ext_proc filters, the final chunk is empty
 		// with EndOfStream=true). Buffering until EndOfStream lets us hand the
 		// translator a single complete body and avoids io.EOF on the empty tail.
-		responseBodyBuf []byte
-		translator         translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
-		modelNameOverride  internalapi.ModelNameOverride
-		headerMutator      *headermutator.HeaderMutator
-		bodyMutator        *bodymutator.BodyMutator
-		backendName        string
+		responseBodyBuf   []byte
+		translator        translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
+		modelNameOverride internalapi.ModelNameOverride
+		headerMutator     *headermutator.HeaderMutator
+		bodyMutator       *bodymutator.BodyMutator
+		backendName       string
 		// isMirror is true when the resolved backend is a shadow/mirror destination.
 		// Mirror legs skip LLMRequestCost dynamic-metadata emission to avoid double-billing.
 		isMirror  bool
