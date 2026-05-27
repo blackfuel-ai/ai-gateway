@@ -158,6 +158,8 @@ kind: Service
 metadata:
   name: mirror-primary
   namespace: default
+  labels:
+    app: mirror-primary
 spec:
   selector:
     app: mirror-primary
@@ -203,6 +205,8 @@ kind: Service
 metadata:
   name: mirror-shadow
   namespace: default
+  labels:
+    app: mirror-shadow
 spec:
   selector:
     app: mirror-shadow
