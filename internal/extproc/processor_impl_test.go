@@ -539,6 +539,161 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 	})
 }
 
+// Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody_MultiChunkBuffering
+// verifies that non-streaming (BUFFERED) responses arriving in multiple chunks are
+// accumulated and only decoded at end_of_stream. This prevents io.EOF errors when
+// downstream FULL_DUPLEX_STREAMED ext_proc filters split the response body.
+func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody_MultiChunkBuffering(t *testing.T) {
+	t.Run("single chunk passthrough", func(t *testing.T) {
+		// Non-streaming, single chunk with EndOfStream=true: should process normally.
+		// The buffering code has nothing to accumulate so the first chunk goes through.
+		inBody := &extprocv3.HttpBody{Body: []byte(`{"model":"test","usage":{"prompt_tokens":5,"total_tokens":5}}`), EndOfStream: true}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{
+			t: t, expResponseBody: inBody,
+			retResponseModel: internalapi.ResponseModel("test-model"),
+		}
+		mt.retUsedToken.SetInputTokens(5)
+		mt.retUsedToken.SetTotalTokens(5)
+
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			requestHeaders:  map[string]string{":status": "200"},
+			responseHeaders: map[string]string{":status": "200"},
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+		res, err := p.ProcessResponseBody(t.Context(), inBody)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		mm.RequireRequestSuccess(t)
+		// Buffer should be nil after processing completes.
+		require.Nil(t, p.responseBodyBuf, "responseBodyBuf should be nil after single-chunk EOS processing")
+	})
+
+	t.Run("multi-chunk accumulation", func(t *testing.T) {
+		mm := &mockMetrics{}
+		mt := &mockTranslator{
+			t: t,
+			retResponseModel: internalapi.ResponseModel("test-model"),
+		}
+		mt.retUsedToken.SetInputTokens(10)
+		mt.retUsedToken.SetTotalTokens(10)
+
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			requestHeaders:  map[string]string{":status": "200"},
+			responseHeaders: map[string]string{":status": "200"},
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+
+		// Send three chunks, only the last with EndOfStream=true.
+		chunk1 := &extprocv3.HttpBody{Body: []byte(`{"model":"test","data":[{`), EndOfStream: false}
+		res, err := p.ProcessResponseBody(t.Context(), chunk1)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		// Should get empty passthrough response on intermediate chunks.
+		_, ok := res.Response.(*extprocv3.ProcessingResponse_ResponseBody)
+		require.True(t, ok)
+		mm.RequireRequestNotCompleted(t)
+		require.NotNil(t, p.responseBodyBuf, "responseBodyBuf should be non-nil after first chunk")
+
+		chunk2 := &extprocv3.HttpBody{Body: []byte(`"embedding":[0.1,0.2]}]}`), EndOfStream: false}
+		res, err = p.ProcessResponseBody(t.Context(), chunk2)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		_, ok = res.Response.(*extprocv3.ProcessingResponse_ResponseBody)
+		require.True(t, ok)
+		mm.RequireRequestNotCompleted(t)
+
+		// Verify accumulated buffer contains merged chunks.
+		require.Equal(t, `{"model":"test","data":[{"embedding":[0.1,0.2]}]}`, string(p.responseBodyBuf))
+
+		// Final chunk: EndOfStream=true, but with empty body (already accumulated).
+		// Set the expected body for the mock translator to verify the full accumulated body.
+		expectedAccumulated := &extprocv3.HttpBody{Body: p.responseBodyBuf, EndOfStream: true}
+		mt.expResponseBody = expectedAccumulated
+
+		final := &extprocv3.HttpBody{Body: nil, EndOfStream: true}
+		res, err = p.ProcessResponseBody(t.Context(), final)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		mm.RequireRequestSuccess(t)
+
+		// Buffer should be cleared after processing completes.
+		require.Nil(t, p.responseBodyBuf, "responseBodyBuf should be nil after final chunk processing")
+	})
+
+	t.Run("streaming unaffected", func(t *testing.T) {
+		// Streaming responses must NOT be affected by the buffering code.
+		inBody := &extprocv3.HttpBody{Body: []byte("chunk-data"), EndOfStream: false}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{
+			t: t, expResponseBody: inBody,
+		}
+		mt.retUsedToken.SetOutputTokens(5)
+
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			requestHeaders:  map[string]string{":status": "200"},
+			responseHeaders: map[string]string{":status": "200"},
+			parent: &chatCompletionProcessorRouterFilter{
+				stream: true,
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+		// Streaming non-final chunk should NOT be intercepted.
+		res, err := p.ProcessResponseBody(t.Context(), inBody)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		// Streaming chunks always go through to the translator, which will get the mock response.
+		mm.RequireRequestNotCompleted(t)
+	})
+
+	t.Run("error response with buffered chunks", func(t *testing.T) {
+		// When buffered chunks accumulate and the final chunk has a non-2xx status,
+		// the error path should be triggered correctly.
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t}
+		mt.retBodyMutation = []byte(`{"error":"upstream error"}`)
+
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			requestHeaders:  map[string]string{":status": "500"},
+			responseHeaders: map[string]string{":status": "500"},
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+
+		// First chunk: intermediate
+		res, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte(`{"error":`), EndOfStream: false})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		mm.RequireRequestNotCompleted(t)
+		require.Equal(t, []byte(`{"error":`), p.responseBodyBuf)
+
+		// Final chunk: error response with EndOfStream=true
+		expectedAccumulated := &extprocv3.HttpBody{Body: []byte(`{"error":"upstream error"}`), EndOfStream: true}
+		mt.expResponseBody = expectedAccumulated
+
+		res, err = p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte(`"upstream error"}`), EndOfStream: true})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		commonRes := res.Response.(*extprocv3.ProcessingResponse_ResponseBody).ResponseBody.Response
+		require.Equal(t, []byte(`{"error":"upstream error"}`), commonRes.BodyMutation.GetBody())
+		mm.RequireRequestFailure(t)
+		require.Nil(t, p.responseBodyBuf, "responseBodyBuf should be cleared after error processing")
+	})
+}
+
 func bodyFromModel(t *testing.T, model string, stream bool, streamOptions *openai.StreamOptions) []byte {
 	openAIReq := &openai.ChatCompletionRequest{}
 	openAIReq.Model = model
@@ -1011,7 +1166,7 @@ func TestChatCompletionsProcessorRouterFilter_ProcessResponseHeaders_ProcessResp
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 
-		resp, err = p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("some body")})
+		resp, err = p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("some body"), EndOfStream: true})
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 		re, ok := resp.Response.(*extprocv3.ProcessingResponse_ResponseBody)
