@@ -129,6 +129,11 @@ type (
 		costs metrics.TokenUsage
 		// metrics tracking.
 		metrics metrics.Metrics
+		// responseBodyBuf accumulates response body chunks for non-streaming (BUFFERED) responses.
+		// When downstream FULL_DUPLEX_STREAMED ext_proc filters split the response body across
+		// multiple ProcessResponseBody calls, we buffer all chunks until EndOfStream=true.
+		// This prevents json.Decode from hitting io.EOF on partial/empty chunks.
+		responseBodyBuf []byte
 	}
 )
 
@@ -449,6 +454,25 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 			u.metrics.RecordRequestCompletion(ctx, true, u.requestHeaders)
 		}
 	}()
+
+	// For non-streaming (BUFFERED) responses, the body may arrive in multiple chunks
+	// when downstream FULL_DUPLEX_STREAMED ext_proc filters split the response stream.
+	// Accumulate all chunks and only decode at end_of_stream.
+	// This prevents json.Decode from hitting io.EOF on partial/empty chunks.
+	if !u.parent.stream && (len(body.Body) > 0 || len(u.responseBodyBuf) > 0) {
+		u.responseBodyBuf = append(u.responseBodyBuf, body.Body...)
+		if !body.EndOfStream {
+			// Intermediate chunk: passthrough, no processing.
+			// The deferred metrics handler does nothing for non-final chunks.
+			return &extprocv3.ProcessingResponse{
+				Response: &extprocv3.ProcessingResponse_ResponseBody{},
+			}, nil
+		}
+		// Final chunk: replace body with the full accumulated buffer.
+		body.Body = u.responseBodyBuf
+		// Reset the buffer on completion so it doesn't leak across streams.
+		defer func() { u.responseBodyBuf = nil }()
+	}
 
 	// Decompress the body if needed.
 	// For streaming responses with content-encoding, use stateful decompression
