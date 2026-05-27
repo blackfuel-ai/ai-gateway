@@ -307,6 +307,21 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 				if backendRef.Weight != nil && *backendRef.Weight == 0 {
 					continue
 				}
+				if lbEndpointIndex >= len(cluster.LoadAssignment.Endpoints) {
+					// envoy-gateway emitted fewer endpoint sets than the route rule has
+					// active backendRefs — this is an upstream translation mismatch.
+					// Skip gracefully so the controller does not panic; the discrepancy
+					// will surface in envoy's CDS state and the warning log below.
+					s.log.Info("lbEndpointIndex out of range, skipping backendRef",
+						"cluster_name", cluster.Name,
+						"endpoints_len", len(cluster.LoadAssignment.Endpoints),
+						"lbEndpointIndex", lbEndpointIndex,
+						"backendRef_index", i,
+						"route_namespace", aigwRoute.Namespace,
+						"route_name", aigwRoute.Name,
+					)
+					break
+				}
 				endpoints := cluster.LoadAssignment.Endpoints[lbEndpointIndex]
 				lbEndpointIndex++
 				name := backendRef.Name

@@ -546,3 +546,48 @@ func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
 		})
 	}
 }
+
+func Test_maybeModifyCluster_boundsGuard_fewerEndpointsThanBackendRefs(t *testing.T) {
+	// Regression test for a panic introduced in bf4: when envoy-gateway emits a
+	// LoadAssignment with fewer endpoint sets than the HTTPRoute rule has active
+	// backendRefs, the old code indexed Endpoints[lbEndpointIndex] without a
+	// bounds check, causing "index out of range [1] with length 1" on the standby
+	// controller replica (observed 2026-05-19, IRM IXT2GILEX6JBZ).
+	//
+	// This test constructs a 2-backendRef route rule against a LoadAssignment that
+	// has only 1 Endpoints entry and asserts that maybeModifyCluster returns
+	// without panicking and without returning an error.
+	c := newFakeClient()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+						{Name: "backend-a"},
+						{Name: "backend-b"},
+					},
+				},
+			},
+		},
+	}))
+
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	require.NoError(t, err)
+
+	// LoadAssignment has only 1 endpoint set, but the rule has 2 active backendRefs.
+	// Prior to the fix this panicked with "index out of range [1] with length 1".
+	cluster := &clusterv3.Cluster{
+		Name: "httproute/ns/myroute/rule/0",
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
+			},
+		},
+	}
+
+	require.NotPanics(t, func() {
+		err = s.maybeModifyCluster(t.Context(), cluster)
+	}, "maybeModifyCluster must not panic when LoadAssignment has fewer endpoint sets than active backendRefs")
+	require.NoError(t, err)
+}
