@@ -41,6 +41,9 @@ type RuntimeConfig struct {
 	ModelsByHost map[string][]Model
 	// Backends is the map of backends by name.
 	Backends map[string]*RuntimeBackend
+	// EmitErrorMetadata mirrors filterapi.Config.EmitErrorMetadata: when true, the
+	// filter emits error dynamic metadata for non-2xx upstream responses.
+	EmitErrorMetadata bool
 }
 
 // RuntimeBackend is a filter backend with its auth handler that is derived from the filterapi.Backend configuration.
@@ -126,5 +129,6 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		RequestCosts:       costs,
 		DeclaredModels:     config.Models,
 		ModelsByHost:       config.ModelsByHost,
+		EmitErrorMetadata:  config.EmitErrorMetadata,
 	}, nil
 }

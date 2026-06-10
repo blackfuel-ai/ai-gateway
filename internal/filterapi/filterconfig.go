@@ -46,6 +46,10 @@ type Config struct {
 	ModelsByHost map[string][]Model `json:"modelsByHost,omitempty"`
 	// MCPConfig is the configuration for the MCPRoute implementations.
 	MCPConfig *MCPConfig `json:"mcpConfig,omitempty"`
+	// EmitErrorMetadata, when true, makes the filter emit dynamic metadata describing
+	// upstream error responses (llm_error_type, llm_error_code, backend_name, route_name,
+	// model_name_override) under the "io.envoy.ai_gateway" namespace for non-2xx responses.
+	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
 }
 
 // Model corresponds to the OpenAI model object in the OpenAI-compatible APIs

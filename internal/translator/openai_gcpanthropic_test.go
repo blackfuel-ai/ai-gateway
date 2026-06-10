@@ -1193,7 +1193,7 @@ func TestOpenAIToGCPAnthropicTranslatorV1ChatCompletion_ResponseError(t *testing
 			}
 
 			o := &openAIToGCPAnthropicTranslatorV1ChatCompletion{}
-			hm, body, err := o.ResponseError(tt.responseHeaders, reader)
+			hm, body, _, err := o.ResponseError(tt.responseHeaders, reader)
 
 			require.NoError(t, err)
 			require.NotNil(t, body)

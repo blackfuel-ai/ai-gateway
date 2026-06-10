@@ -74,6 +74,10 @@ spec:
               gen_ai.usage.total_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_total_token)%"
               gen_ai.usage.input_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_input_token)%"
               gen_ai.usage.output_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_output_token)%"
+              # Error fields, populated only for non-2xx upstream responses when
+              # GatewayConfig.spec.emitErrorMetadata is enabled (see below).
+              error.type: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%"
+              error.code: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_code)%"
               # Common fields
               start_time: "%START_TIME%"
               method: "%REQ(:METHOD)%"
@@ -170,6 +174,34 @@ You can deploy the example to quickly try the access log configuration against a
 </CodeBlock>
 
 Once everything is applied you can send requests to the gateway and see the access logs in the gateway pod logs.
+
+## Error Metadata in Access Logs
+
+By default the AI Gateway only emits dynamic metadata for successful (2xx) responses. To also capture
+information about upstream LLM provider errors, enable `emitErrorMetadata` on the `GatewayConfig`:
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: GatewayConfig
+metadata:
+  name: envoy-ai-gateway
+  namespace: default
+spec:
+  emitErrorMetadata: true
+```
+
+When enabled, non-2xx upstream responses populate the following keys under the `io.envoy.ai_gateway`
+metadata namespace, which you can reference from your access log configuration:
+
+- `llm_error_type` — the provider error type (e.g. `rate_limit_error`, `ThrottledException`). Falls back to
+  a generic `upstream_error` when the provider does not report a type.
+- `llm_error_code` — the provider error code (e.g. `context_length_exceeded`). Falls back to the HTTP status
+  code when the provider does not report a code.
+- `backend_name`, `route_name`, `model_name_override` — the same routing-context fields emitted on success,
+  so errors can be attributed to a backend/route.
+
+This applies only to errors returned by the upstream LLM provider. Errors generated before backend selection
+(for example, an unknown model) do not carry this metadata; use the standard `%RESPONSE_CODE%` field for those.
 
 ## MCP Metadata in Access Logs
 
