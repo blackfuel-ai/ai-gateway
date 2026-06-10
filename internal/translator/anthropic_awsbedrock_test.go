@@ -564,7 +564,7 @@ func TestAnthropicToAWSBedrockTranslator_ResponseError(t *testing.T) {
 	t.Run("JSON error body", func(t *testing.T) {
 		translator := NewAnthropicToAWSBedrockTranslator("")
 		errorBody := `{"message":"Model not found"}`
-		headers, body, err := translator.ResponseError(
+		headers, body, _, err := translator.ResponseError(
 			map[string]string{
 				statusHeaderName:      "404",
 				contentTypeHeaderName: "application/json",
@@ -585,7 +585,7 @@ func TestAnthropicToAWSBedrockTranslator_ResponseError(t *testing.T) {
 
 	t.Run("non-JSON error body", func(t *testing.T) {
 		translator := NewAnthropicToAWSBedrockTranslator("")
-		headers, body, err := translator.ResponseError(
+		headers, body, _, err := translator.ResponseError(
 			map[string]string{
 				statusHeaderName:      "503",
 				contentTypeHeaderName: "text/plain",
@@ -620,7 +620,7 @@ func TestAnthropicToAWSBedrockTranslator_ResponseError(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.status, func(t *testing.T) {
 				translator := NewAnthropicToAWSBedrockTranslator("")
-				_, body, err := translator.ResponseError(
+				_, body, _, err := translator.ResponseError(
 					map[string]string{
 						statusHeaderName:      tt.status,
 						contentTypeHeaderName: "text/plain",

@@ -268,7 +268,7 @@ func TestAnthropicToAnthropic_ResponseError(t *testing.T) {
 	t.Run("json error", func(t *testing.T) {
 		translator := NewAnthropicToAnthropicTranslator("", "")
 		require.NotNil(t, translator)
-		hdrs, body, err := translator.ResponseError(map[string]string{
+		hdrs, body, _, err := translator.ResponseError(map[string]string{
 			"content-type": "application/json",
 		}, strings.NewReader(`{"error":{"code":"invalid_request_error","message":"The model 'claude-unknown' does not exist."}}`))
 		require.Nil(t, hdrs)
@@ -290,7 +290,7 @@ func TestAnthropicToAnthropic_ResponseError(t *testing.T) {
 		t.Run("non-json error "+strconv.Itoa(tc.statusCode), func(t *testing.T) {
 			translator := NewAnthropicToAnthropicTranslator("", "")
 			require.NotNil(t, translator)
-			hdrs, body, err := translator.ResponseError(map[string]string{
+			hdrs, body, _, err := translator.ResponseError(map[string]string{
 				"content-type": "text/plain",
 				":status":      strconv.Itoa(tc.statusCode),
 			}, strings.NewReader("Some error occurred"))

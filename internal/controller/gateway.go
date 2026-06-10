@@ -138,8 +138,10 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	var defaultLLMCosts []aigv1b1.LLMRequestCost
+	var emitErrorMetadata bool
 	if gwConfig != nil {
 		defaultLLMCosts = gwConfig.Spec.GlobalLLMRequestCosts
+		emitErrorMetadata = gwConfig.Spec.EmitErrorMetadata
 	}
 
 	// Envoy Gateway watches Gateways, not GatewayConfigs, so a config edit reaches the data plane
@@ -155,7 +157,7 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if gwConfig != nil && gwConfig.Spec.ExtProc != nil {
 		declaredMetadataNamespaces = gwConfig.Spec.ExtProc.MetadataForwardingNamespaces
 	}
-	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, declaredMetadataNamespaces)
+	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, declaredMetadataNamespaces, emitErrorMetadata)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -419,9 +421,10 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 	uuid string,
 	defaultLLMCosts []aigv1b1.LLMRequestCost,
 	declaredMetadataNamespaces []string,
+	emitErrorMetadata bool,
 ) (hasEffectiveRoute bool, _ error) {
 	// Precondition: aiGatewayRoutes is not empty as we early return if it is empty.
-	ec := &filterapi.Config{UUID: uuid, Version: version.Parse()}
+	ec := &filterapi.Config{UUID: uuid, Version: version.Parse(), EmitErrorMetadata: emitErrorMetadata}
 	var err error
 
 	// Process global LLM request costs from GatewayConfig.

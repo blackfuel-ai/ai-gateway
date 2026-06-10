@@ -109,13 +109,15 @@ func (t *cohereToCohereTranslatorV2Rerank) ResponseBody(_ map[string]string, bod
 
 // ResponseError implements [CohereRerankTranslator.ResponseError].
 // If connection fails or a non-JSON error is returned, wrap it into a JSON error body.
+// Cohere error bodies only carry a "message" with no type/code, so errInfo is
+// left as the zero value and the caller falls back to the HTTP status code.
 func (t *cohereToCohereTranslatorV2Rerank) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	if v, ok := respHeaders[contentTypeHeaderName]; ok && !strings.Contains(v, jsonContentType) {
 		buf, err := io.ReadAll(body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
 		message := string(buf)
 		// Wrap as a minimal Cohere v2 error JSON for consistency.
@@ -124,7 +126,7 @@ func (t *cohereToCohereTranslatorV2Rerank) ResponseError(respHeaders map[string]
 		}
 		newBody, err = json.Marshal(cohereErr)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 		}
 		newHeaders = append(newHeaders,
 			internalapi.Header{contentTypeHeaderName, jsonContentType},

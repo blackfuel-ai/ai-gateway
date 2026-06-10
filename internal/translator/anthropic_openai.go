@@ -187,6 +187,7 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders map[string]string, r io.Reader) (
 	newHeaders []internalapi.Header,
 	mutatedBody []byte,
+	errInfo LLMErrorInfo,
 	err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
@@ -194,9 +195,15 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders 
 
 	if strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
 		// OpenAI backend returned a structured JSON error; translate to Anthropic error format.
+		// Read the raw body so we can tolerate "code" being a string or number.
+		var buf []byte
+		buf, err = io.ReadAll(r)
+		if err != nil {
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
+		}
 		var openaiErr openai.Error
-		if err = json.NewDecoder(r).Decode(&openaiErr); err != nil {
-			return nil, nil, fmt.Errorf("failed to unmarshal OpenAI error body: %w", err)
+		if err = json.Unmarshal(buf, &openaiErr); err != nil {
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to unmarshal OpenAI error body: %w", err)
 		}
 		anthropicError = anthropic.ErrorResponse{
 			Type: "error",
@@ -205,11 +212,12 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders 
 				Message: openaiErr.Error.Message,
 			},
 		}
+		errInfo = extractOpenAIErrorInfo(buf)
 	} else {
 		var buf []byte
 		buf, err = io.ReadAll(r)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
 		var typ string
 		switch statusCode {
@@ -238,11 +246,12 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders 
 			Type:  "error", // Always "error" at the top level.
 			Error: anthropic.ErrorResponseMessage{Type: typ, Message: string(buf)},
 		}
+		errInfo = LLMErrorInfo{Type: typ}
 	}
 
 	mutatedBody, err = json.Marshal(anthropicError)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 	}
 	newHeaders = append(newHeaders,
 		internalapi.Header{contentTypeHeaderName, jsonContentType},

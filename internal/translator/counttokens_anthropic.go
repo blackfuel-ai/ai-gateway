@@ -74,8 +74,8 @@ func (t *countTokensToAnthropicTranslator) ResponseBody(_ map[string]string, bod
 
 // ResponseError implements [AnthropicCountTokensTranslator.ResponseError].
 func (t *countTokensToAnthropicTranslator) ResponseError(_ map[string]string, _ io.Reader) (
-	newHeaders []internalapi.Header, mutatedBody []byte, err error,
+	newHeaders []internalapi.Header, mutatedBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	// Passthrough — Anthropic error format is already correct.
-	return nil, nil, nil
+	return nil, nil, LLMErrorInfo{}, nil
 }

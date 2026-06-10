@@ -218,6 +218,7 @@ func TestOpenAIToOpenAITranslator_ResponseError(t *testing.T) {
 		input           io.Reader
 		contentType     string
 		output          openai.Error
+		expErrInfo      LLMErrorInfo
 	}{
 		{
 			name:        "test unhealthy upstream",
@@ -235,6 +236,7 @@ func TestOpenAIToOpenAITranslator_ResponseError(t *testing.T) {
 					Message: "service not available",
 				},
 			},
+			expErrInfo: LLMErrorInfo{Type: openAIBackendError},
 		},
 		{
 			name: "test OpenAI missing required field error",
@@ -251,21 +253,29 @@ func TestOpenAIToOpenAITranslator_ResponseError(t *testing.T) {
 					Message: "missing required field",
 				},
 			},
+			expErrInfo: LLMErrorInfo{Type: "BadRequestError", Code: "400"},
+		},
+		{
+			name: "test OpenAI-compatible backend with numeric code",
+			responseHeaders: map[string]string{
+				":status":      "400",
+				"content-type": "application/json",
+			},
+			contentType: "application/json",
+			input:       bytes.NewBuffer([]byte(`{"error": {"message": "bad", "type": "invalid_request_error", "code": 400}}`)),
+			// Body is passed through unchanged; we only assert the extracted classification.
+			expErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := &openAIToOpenAITranslatorV1ChatCompletion{}
-			hm, newBody, err := o.ResponseError(tt.responseHeaders, tt.input)
+			hm, newBody, errInfo, err := o.ResponseError(tt.responseHeaders, tt.input)
 			require.NoError(t, err)
+			require.Equal(t, tt.expErrInfo, errInfo)
 			if tt.contentType == jsonContentType {
 				require.Nil(t, hm)
 				require.Nil(t, newBody)
-				var openAIError openai.Error
-				require.NoError(t, json.Unmarshal(tt.input.(*bytes.Buffer).Bytes(), &openAIError))
-				if !cmp.Equal(openAIError, tt.output) {
-					t.Errorf("ConvertOpenAIErrorResp(), diff(got, expected) = %s\n", cmp.Diff(openAIError, tt.output))
-				}
 				return
 			}
 

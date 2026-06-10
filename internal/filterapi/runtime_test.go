@@ -20,6 +20,7 @@ func TestServer_LoadConfig(t *testing.T) {
 
 	t.Run("ok", func(t *testing.T) {
 		config := &Config{
+			EmitErrorMetadata: true,
 			LLMRequestCosts: []LLMRequestCost{
 				{MetadataKey: "key", RouteName: "ns/test-route", Type: LLMRequestCostTypeOutputToken},
 				{MetadataKey: "cel_key", RouteName: "ns/test-route", Type: LLMRequestCostTypeCEL, CEL: "1 + 1"},
@@ -63,6 +64,7 @@ func TestServer_LoadConfig(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, uint64(2), val)
 		require.Equal(t, config.Models, rc.DeclaredModels)
+		require.True(t, rc.EmitErrorMetadata)
 	})
 
 	t.Run("with global costs", func(t *testing.T) {

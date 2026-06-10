@@ -82,6 +82,7 @@ type mockTranslator struct {
 	retBodyMutation             []byte
 	retUsedToken                metrics.TokenUsage
 	retResponseModel            internalapi.ResponseModel
+	retLLMErrorInfo             translator.LLMErrorInfo
 	retErr                      error
 	expForceRequestBodyMutation bool
 }
@@ -100,13 +101,13 @@ func (m *mockTranslator) ResponseHeaders(headers map[string]string) (newHeaders 
 }
 
 // ResponseError implements [translator.OpenAIChatCompletionTranslator].
-func (m *mockTranslator) ResponseError(_ map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, err error) {
+func (m *mockTranslator) ResponseError(_ map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, errInfo translator.LLMErrorInfo, err error) {
 	if m.expResponseBody != nil {
 		buf, err := io.ReadAll(body)
 		require.NoError(m.t, err)
 		require.Equal(m.t, m.expResponseBody.Body, buf)
 	}
-	return m.retHeaderMutation, m.retBodyMutation, m.retErr
+	return m.retHeaderMutation, m.retBodyMutation, m.retLLMErrorInfo, m.retErr
 }
 
 // ResponseBody implements [translator.OpenAIChatCompletionTranslator].

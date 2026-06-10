@@ -445,7 +445,7 @@ func TestToAWSAnthropicV1Tokenize_ResponseError(t *testing.T) {
 		}
 		errorBody := `{"message": "The provided model doesn't support counting tokens"}`
 
-		headers, body, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headers, body, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.NotNil(t, body)
 		require.Len(t, headers, 2)
@@ -462,7 +462,7 @@ func TestToAWSAnthropicV1Tokenize_ResponseError(t *testing.T) {
 			contentTypeHeaderName: "text/plain",
 		}
 
-		headers, body, err := translator.ResponseError(respHeaders, strings.NewReader("Internal Server Error"))
+		headers, body, _, err := translator.ResponseError(respHeaders, strings.NewReader("Internal Server Error"))
 		require.NoError(t, err)
 		require.NotNil(t, body)
 		require.Len(t, headers, 2)
@@ -479,7 +479,7 @@ func TestToAWSAnthropicV1Tokenize_ResponseError(t *testing.T) {
 			contentTypeHeaderName: "text/plain",
 		}
 
-		_, _, err := translator.ResponseError(respHeaders, &errorReader{})
+		_, _, _, err := translator.ResponseError(respHeaders, &errorReader{})
 		require.Error(t, err)
 	})
 }
