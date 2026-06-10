@@ -35,9 +35,11 @@ import (
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	"sigs.k8s.io/yaml"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller"
+	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
 	testsinternal "github.com/envoyproxy/ai-gateway/tests/internal"
@@ -832,4 +834,127 @@ func TestSecretController(t *testing.T) {
 
 func defaultLogger() logr.Logger {
 	return logr.FromSlogHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
+}
+
+// TestGatewayConfigAnnotationChangePropagation verifies that adding the
+// aigateway.envoyproxy.io/gateway-config annotation to an ALREADY-EXISTING
+// Gateway causes the per-gateway filter-config Secret to be regenerated with the
+// referenced GatewayConfig's settings (here: EmitErrorMetadata).
+//
+// This is a regression guard for gatewayReconcilePredicate. A plain
+// predicate.GenerationChangedPredicate (as installed by
+// controller.TypedControllerBuilderForCRD) would drop the annotation-only Update
+// event, because an annotation lives in metadata and does not bump
+// metadata.generation, leaving the data-plane filter config stale until some
+// unrelated event forced a gateway reconcile.
+func TestGatewayConfigAnnotationChangePropagation(t *testing.T) {
+	c, cfg, kube := testsinternal.NewEnvTest(t)
+	opts := controller.Options{
+		ExtProcImage:           "envoyproxy/ai-gateway-extproc:foo",
+		EnableLeaderElection:   false,
+		DisableMutatingWebhook: true,
+		ExtProcMaxRecvMsgSize:  512 * 1024 * 1024,
+	}
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: controller.Scheme,
+		// Controller names are validated process-globally; TestStartControllers
+		// already registered them in this process, so skip the check here.
+		Controller:     config.Controller{SkipNameValidation: ptr.To(true)},
+		LeaderElection: false,
+	})
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	go func() {
+		require.NoError(t, controller.StartControllers(ctx, mgr, cfg, defaultLogger(), &opts))
+	}()
+
+	const (
+		ns      = "default"
+		gwName  = "gw-annot"
+		cfgName = "gwcfg-annot"
+	)
+
+	// A backing Pod carrying the Envoy Gateway owning-gateway labels, so that the
+	// gateway reconcile gets past the "no pods/deployments/daemonsets yet" requeue
+	// and writes the filter-config Secret into the Pod's namespace. We use a Pod
+	// (not a Deployment) on purpose: envtest runs no kube-controller-manager, so a
+	// Deployment would have ObservedGeneration < Generation forever and look like a
+	// perpetual rollout, triggering a 5s requeue that would mask the bug.
+	require.NoError(t, c.Create(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gwName + "-pod",
+			Namespace: ns,
+			Labels: map[string]string{
+				"gateway.envoyproxy.io/owning-gateway-name":      gwName,
+				"gateway.envoyproxy.io/owning-gateway-namespace": ns,
+			},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy", Image: "envoyproxy/envoy:distroless-dev"}}},
+	}))
+
+	// A GatewayConfig with EmitErrorMetadata enabled. No Gateway references it yet.
+	require.NoError(t, c.Create(ctx, &aigv1b1.GatewayConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: ns},
+		Spec:       aigv1b1.GatewayConfigSpec{EmitErrorMetadata: true},
+	}))
+
+	// Create the Gateway WITHOUT the annotation. The Create event triggers the
+	// initial reconcile, producing a filter-config Secret with EmitErrorMetadata=false.
+	require.NoError(t, c.Create(ctx, &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: gwName, Namespace: ns},
+		Spec: gwapiv1.GatewaySpec{
+			GatewayClassName: "envoy-ai-gateway",
+			Listeners: []gwapiv1.Listener{{
+				Name:     "http",
+				Protocol: gwapiv1.HTTPProtocolType,
+				Port:     80,
+			}},
+		},
+	}))
+
+	secretName := controller.FilterConfigSecretPerGatewayName(gwName, ns)
+	readEmit := func() (found, emit bool) {
+		s, getErr := kube.CoreV1().Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
+		if getErr != nil {
+			return false, false
+		}
+		var fc filterapi.Config
+		// On a real apiserver, StringData is write-only; read back from Data.
+		if uErr := yaml.Unmarshal(s.Data[controller.FilterConfigKeyInSecret], &fc); uErr != nil {
+			return false, false
+		}
+		return true, fc.EmitErrorMetadata
+	}
+
+	// Initial state: the Secret exists and EmitErrorMetadata is false (no annotation yet).
+	require.Eventually(t, func() bool {
+		found, emit := readEmit()
+		return found && !emit
+	}, 60*time.Second, 200*time.Millisecond,
+		"initial filter-config secret with EmitErrorMetadata=false never appeared")
+
+	// Add the gateway-config annotation to the EXISTING Gateway. This is an
+	// annotation-only (metadata) update; it does NOT bump metadata.generation.
+	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var gw gwapiv1.Gateway
+		if getErr := c.Get(ctx, client.ObjectKey{Name: gwName, Namespace: ns}, &gw); getErr != nil {
+			return getErr
+		}
+		if gw.Annotations == nil {
+			gw.Annotations = map[string]string{}
+		}
+		gw.Annotations[controller.GatewayConfigAnnotationKey] = cfgName
+		return c.Update(ctx, &gw)
+	}))
+
+	// The controller reconciles the Gateway and rewrites the Secret with
+	// EmitErrorMetadata=true. Without gatewayReconcilePredicate this would time
+	// out, because the annotation-only update is dropped by GenerationChangedPredicate.
+	require.Eventually(t, func() bool {
+		_, emit := readEmit()
+		return emit
+	}, 30*time.Second, 200*time.Millisecond,
+		"filter-config secret was NOT regenerated with EmitErrorMetadata=true after the "+
+			"gateway-config annotation was added to the existing Gateway")
 }
