@@ -22,6 +22,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
@@ -2757,4 +2758,90 @@ func Test_mergeBodyMutations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGatewayReconcilePredicate(t *testing.T) {
+	p := gatewayReconcilePredicate()
+
+	gw := func(generation int64, annotations map[string]string) *gwapiv1.Gateway {
+		return &gwapiv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "gw",
+				Namespace:   "default",
+				Generation:  generation,
+				Annotations: annotations,
+			},
+		}
+	}
+	const key = GatewayConfigAnnotationKey
+
+	t.Run("update", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			oldGw, newGw *gwapiv1.Gateway
+			want         bool
+		}{
+			{
+				name:  "generation changed",
+				oldGw: gw(1, nil), newGw: gw(2, nil),
+				want: true,
+			},
+			{
+				name:  "annotation added",
+				oldGw: gw(1, nil), newGw: gw(1, map[string]string{key: "cfg"}),
+				want: true,
+			},
+			{
+				name:  "annotation set from empty",
+				oldGw: gw(1, map[string]string{key: ""}), newGw: gw(1, map[string]string{key: "cfg"}),
+				want: true,
+			},
+			{
+				name:  "annotation changed",
+				oldGw: gw(1, map[string]string{key: "cfgA"}), newGw: gw(1, map[string]string{key: "cfgB"}),
+				want: true,
+			},
+			{
+				name:  "annotation emptied (set to empty string)",
+				oldGw: gw(1, map[string]string{key: "cfg"}), newGw: gw(1, map[string]string{key: ""}),
+				want: true,
+			},
+			{
+				name:  "annotation removed",
+				oldGw: gw(1, map[string]string{key: "cfg"}), newGw: gw(1, nil),
+				want: true,
+			},
+			{
+				name:  "absent vs empty string (both mean no config)",
+				oldGw: gw(1, nil), newGw: gw(1, map[string]string{key: ""}),
+				want: false,
+			},
+			{
+				name:  "no-op (same generation and annotation)",
+				oldGw: gw(1, map[string]string{key: "cfg"}), newGw: gw(1, map[string]string{key: "cfg"}),
+				want: false,
+			},
+			{
+				name:  "unrelated annotation changed only",
+				oldGw: gw(1, map[string]string{"other": "a"}), newGw: gw(1, map[string]string{"other": "b"}),
+				want: false,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got := p.Update(event.UpdateEvent{ObjectOld: tc.oldGw, ObjectNew: tc.newGw})
+				require.Equal(t, tc.want, got)
+			})
+		}
+	})
+
+	t.Run("nil objects are dropped", func(t *testing.T) {
+		require.False(t, p.Update(event.UpdateEvent{ObjectOld: nil, ObjectNew: gw(1, nil)}))
+		require.False(t, p.Update(event.UpdateEvent{ObjectOld: gw(1, nil), ObjectNew: nil}))
+	})
+
+	t.Run("create, delete, generic default to true", func(t *testing.T) {
+		require.True(t, p.Create(event.CreateEvent{Object: gw(1, nil)}))
+		require.True(t, p.Delete(event.DeleteEvent{Object: gw(1, nil)}))
+		require.True(t, p.Generic(event.GenericEvent{Object: gw(1, nil)}))
+	})
 }
