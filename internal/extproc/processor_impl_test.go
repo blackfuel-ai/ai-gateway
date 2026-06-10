@@ -35,6 +35,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/testing/testotel"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
+	"github.com/envoyproxy/ai-gateway/internal/translator"
 )
 
 func TestNewFactory(t *testing.T) {
@@ -431,6 +432,68 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		require.Len(t, commonRes.HeaderMutation.SetHeaders, 1)
 		require.Equal(t, "foo", commonRes.HeaderMutation.SetHeaders[0].Header.Key)
 		require.Equal(t, []byte("bar"), commonRes.HeaderMutation.SetHeaders[0].Header.RawValue)
+		// With no config (and thus EmitErrorMetadata disabled), error responses carry no dynamic metadata.
+		require.Nil(t, res.DynamicMetadata)
+		mm.RequireRequestFailure(t)
+	})
+
+	// Verify error metadata is emitted for non-2xx responses when EmitErrorMetadata is enabled.
+	t.Run("non-2xx status with error metadata", func(t *testing.T) {
+		inBody := &extprocv3.HttpBody{Body: []byte("error-body"), EndOfStream: true}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{
+			t:               t,
+			expResponseBody: inBody,
+			retLLMErrorInfo: translator.LLMErrorInfo{Type: "rate_limit_error", Code: "context_length_exceeded"},
+		}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "429"},
+			requestHeaders:  map[string]string{internalapi.ModelNameHeaderKeyDefault: "ai_gateway_llm"},
+			backendName:     "some_backend",
+			routeName:       "some_route",
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{EmitErrorMetadata: true},
+			},
+		}
+		res, err := p.ProcessResponseBody(t.Context(), inBody)
+		require.NoError(t, err)
+		require.NotNil(t, res.DynamicMetadata)
+		fields := res.DynamicMetadata.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
+		require.Equal(t, "rate_limit_error", fields["llm_error_type"].GetStringValue())
+		require.Equal(t, "context_length_exceeded", fields["llm_error_code"].GetStringValue())
+		require.Equal(t, "ai_gateway_llm", fields["model_name_override"].GetStringValue())
+		require.Equal(t, "some_backend", fields["backend_name"].GetStringValue())
+		require.Equal(t, "some_route", fields["route_name"].GetStringValue())
+		mm.RequireRequestFailure(t)
+	})
+
+	// Verify error metadata falls back to a generic type and the HTTP status code when the
+	// translator reports no structured error info.
+	t.Run("non-2xx status with error metadata fallback", func(t *testing.T) {
+		inBody := &extprocv3.HttpBody{Body: []byte("error-body"), EndOfStream: true}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t, expResponseBody: inBody}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "500"},
+			requestHeaders:  map[string]string{internalapi.ModelNameHeaderKeyDefault: "ai_gateway_llm"},
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{EmitErrorMetadata: true},
+			},
+		}
+		res, err := p.ProcessResponseBody(t.Context(), inBody)
+		require.NoError(t, err)
+		require.NotNil(t, res.DynamicMetadata)
+		fields := res.DynamicMetadata.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
+		require.Equal(t, "upstream_error", fields["llm_error_type"].GetStringValue())
+		require.Equal(t, "500", fields["llm_error_code"].GetStringValue())
+		// backend_name/route_name are omitted when empty; model_name_override is always set.
+		require.Equal(t, "ai_gateway_llm", fields["model_name_override"].GetStringValue())
+		require.NotContains(t, fields, "backend_name")
+		require.NotContains(t, fields, "route_name")
 		mm.RequireRequestFailure(t)
 	})
 
@@ -1847,6 +1910,65 @@ func Test_transcriptionProcessorUpstreamFilter_SetBackend_ContentTypeSetter(t *t
 	require.NoError(t, err)
 	require.NotNil(t, p.translator)
 	require.NotNil(t, r.upstreamFilter)
+}
+
+func TestBuildErrorDynamicMetadata(t *testing.T) {
+	hdr := map[string]string{internalapi.ModelNameHeaderKeyDefault: "m"}
+
+	tests := []struct {
+		name        string
+		errInfo     translator.LLMErrorInfo
+		statusCode  int
+		backendName string
+		routeName   string
+		wantType    string
+		wantCode    string
+		wantAbsent  []string
+		wantPresent map[string]string
+	}{
+		{
+			name:        "structured type and code",
+			errInfo:     translator.LLMErrorInfo{Type: "rate_limit_error", Code: "context_length_exceeded"},
+			statusCode:  429,
+			backendName: "be",
+			routeName:   "ns/route",
+			wantType:    "rate_limit_error",
+			wantCode:    "context_length_exceeded",
+			wantPresent: map[string]string{"backend_name": "be", "route_name": "ns/route", "model_name_override": "m"},
+		},
+		{
+			name:       "fallback type and code",
+			errInfo:    translator.LLMErrorInfo{},
+			statusCode: 500,
+			wantType:   "upstream_error",
+			wantCode:   "500",
+			wantAbsent: []string{"backend_name", "route_name"},
+		},
+		{
+			name:       "type present code falls back to status",
+			errInfo:    translator.LLMErrorInfo{Type: "ThrottlingException"},
+			statusCode: 503,
+			wantType:   "ThrottlingException",
+			wantCode:   "503",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			md := buildErrorDynamicMetadata(tt.errInfo, tt.statusCode, hdr, tt.backendName, tt.routeName)
+			require.NotNil(t, md)
+			ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
+			require.Equal(t, tt.wantType, ns["llm_error_type"].GetStringValue())
+			require.Equal(t, tt.wantCode, ns["llm_error_code"].GetStringValue())
+			for k, want := range tt.wantPresent {
+				require.Equal(t, want, ns[k].GetStringValue(), "key %q", k)
+			}
+			for _, k := range tt.wantAbsent {
+				_, exists := ns[k]
+				require.False(t, exists, "key %q should be absent", k)
+			}
+		})
+	}
 }
 
 func TestBuildDynamicMetadata_routeScoped(t *testing.T) {

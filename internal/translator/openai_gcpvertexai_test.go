@@ -2434,7 +2434,7 @@ Details: [
 
 			body := strings.NewReader(tt.body)
 
-			headerMutation, bodyBytes, err := translator.ResponseError(tt.headers, body)
+			headerMutation, bodyBytes, _, err := translator.ResponseError(tt.headers, body)
 
 			if tt.expectedErrMsg != "" {
 				require.Error(t, err)

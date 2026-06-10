@@ -86,36 +86,41 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) RequestBody(original []byte, 
 // ResponseError implements [OpenAIChatCompletionTranslator.ResponseError]
 // For OpenAI based backend we return the OpenAI error type as is.
 // If connection fails the error body is translated to OpenAI error type for events such as HTTP 503 or 504.
-func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, error) {
+func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, LLMErrorInfo, error) {
 	return convertErrorOpenAIToOpenAIError(respHeaders, body)
 }
 
 // convertErrorOpenAIToOpenAIError implements ResponseError conversion logic for OpenAI to OpenAI translation.
-func convertErrorOpenAIToOpenAIError(respHeaders map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, err error) {
-	if !strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
-		var openaiError openai.Error
-		buf, err := io.ReadAll(body)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
-		}
-		statusCode := respHeaders[statusHeaderName]
-		openaiError = openai.Error{
-			Type: "error",
-			Error: openai.ErrorType{
-				Type:    openAIBackendError,
-				Message: string(buf),
-				Code:    &statusCode,
-			},
-		}
-		newBody, err = json.Marshal(openaiError)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
-		}
-		newHeaders = append(newHeaders,
-			internalapi.Header{contentTypeHeaderName, jsonContentType},
-			internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))},
-		)
+func convertErrorOpenAIToOpenAIError(respHeaders map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error) {
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 	}
+	if strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
+		// OpenAI-style JSON error: pass the upstream body through unchanged (nil
+		// newBody), but best-effort extract the classification for error metadata.
+		return nil, nil, extractOpenAIErrorInfo(buf), nil
+	}
+	// Non-JSON error (e.g. HTTP 503/504 from the connection layer): synthesize an
+	// OpenAI error envelope.
+	statusCode := respHeaders[statusHeaderName]
+	openaiError := openai.Error{
+		Type: "error",
+		Error: openai.ErrorType{
+			Type:    openAIBackendError,
+			Message: string(buf),
+			Code:    &statusCode,
+		},
+	}
+	newBody, err = json.Marshal(openaiError)
+	if err != nil {
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
+	}
+	newHeaders = append(newHeaders,
+		internalapi.Header{contentTypeHeaderName, jsonContentType},
+		internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))},
+	)
+	errInfo = LLMErrorInfo{Type: openAIBackendError}
 	return
 }
 

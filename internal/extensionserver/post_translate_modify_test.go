@@ -8,8 +8,8 @@ package extensionserver
 import (
 	"testing"
 
-	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -407,7 +407,7 @@ func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "", 0, false)
 	require.NoError(t, err)
 
 	// Envoy Gateway names mirror clusters with 1-based indexing — the first
@@ -484,7 +484,7 @@ func Test_maybeModifyCluster_mirrorIndexIsOneBased(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "", 0, false)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -535,7 +535,7 @@ func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
 	// Malformed mirror suffixes (non-numeric indices) should log and bail without
 	// returning an error so a bad cluster name doesn't tear down the whole xDS push.
 	c := newFakeClient()
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "", 0, false)
 	require.NoError(t, err)
 	for _, name := range []string{
 		"httproute/ns/myroute/rule/abc-mirror-0",

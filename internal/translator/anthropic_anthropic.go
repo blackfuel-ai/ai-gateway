@@ -217,13 +217,14 @@ func (a *anthropicToAnthropicTranslator) updateTotalTokens() {
 func (a *anthropicToAnthropicTranslator) ResponseError(respHeaders map[string]string, r io.Reader) (
 	newHeaders []internalapi.Header,
 	mutatedBody []byte,
+	errInfo LLMErrorInfo,
 	err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
 	if !strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
 		buf, err := io.ReadAll(r)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
 		var typ string
 		switch statusCode {
@@ -254,12 +255,23 @@ func (a *anthropicToAnthropicTranslator) ResponseError(respHeaders map[string]st
 		}
 		mutatedBody, err = json.Marshal(anthropicError)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 		}
 		newHeaders = append(newHeaders,
 			internalapi.Header{contentTypeHeaderName, jsonContentType},
 			internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(mutatedBody))},
 		)
+		return newHeaders, mutatedBody, LLMErrorInfo{Type: typ}, nil
+	}
+	// JSON error: pass the upstream Anthropic error through unchanged, best-effort
+	// extracting its type for error metadata.
+	buf, readErr := io.ReadAll(r)
+	if readErr != nil {
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", readErr)
+	}
+	var anthropicError anthropic.ErrorResponse
+	if json.Unmarshal(buf, &anthropicError) == nil {
+		errInfo = LLMErrorInfo{Type: anthropicError.Error.Type}
 	}
 	return
 }

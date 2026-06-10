@@ -693,7 +693,7 @@ func TestMaybeModifyCluster_LoadAssignmentEndpointsShorterThanBackendRefs(t *tes
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "", 0, false)
 	require.NoError(t, err)
 
 	cluster := &clusterv3.Cluster{

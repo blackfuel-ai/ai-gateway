@@ -93,7 +93,7 @@ func (o *openAIToOpenAITranslatorV1Translation) ResponseBody(_ map[string]string
 }
 
 // ResponseError implements [OpenAIAudioTranslationTranslator.ResponseError].
-func (o *openAIToOpenAITranslatorV1Translation) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, error) {
+func (o *openAIToOpenAITranslatorV1Translation) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, LLMErrorInfo, error) {
 	return convertErrorOpenAIToOpenAIError(respHeaders, body)
 }
 

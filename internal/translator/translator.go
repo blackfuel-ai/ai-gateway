@@ -68,9 +68,14 @@ type Translator[ReqT any, SpanT any] interface {
 	)
 
 	// ResponseError translates the response error (non-2xx status codes).
+	//     - `errInfo` reports the upstream provider error classification extracted
+	//       while translating, used to populate error dynamic metadata. The zero
+	//       value means no structured info was available; the caller then falls
+	//       back to the HTTP status code and a generic type.
 	ResponseError(respHeaders map[string]string, body io.Reader) (
 		newHeaders []internalapi.Header,
 		mutatedBody []byte,
+		errInfo LLMErrorInfo,
 		err error,
 	)
 }
@@ -87,6 +92,19 @@ type ContentTypeSetter interface {
 // request headers to translate provider-specific request fields.
 type RequestHeadersSetter interface {
 	SetRequestHeaders(headers map[string]string)
+}
+
+// LLMErrorInfo describes the upstream provider error extracted during error
+// translation (see [Translator.ResponseError]). The zero value means no
+// structured info was available, in which case the consumer falls back to the
+// HTTP status code and a generic type.
+type LLMErrorInfo struct {
+	// Type is the provider error type, e.g. "rate_limit_error" or
+	// "ThrottlingException".
+	Type string
+	// Code is the provider error code, e.g. "context_length_exceeded". This is
+	// often empty for providers that do not expose a distinct code.
+	Code string
 }
 
 // ResponseRedactor is an optional interface that translators can implement

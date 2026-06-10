@@ -152,7 +152,7 @@ func (o *openAIToOpenAITranslatorV1Transcription) recordTranscriptionStreamChunk
 }
 
 // ResponseError implements [OpenAIAudioTranscriptionTranslator.ResponseError].
-func (o *openAIToOpenAITranslatorV1Transcription) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, error) {
+func (o *openAIToOpenAITranslatorV1Transcription) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, LLMErrorInfo, error) {
 	return convertErrorOpenAIToOpenAIError(respHeaders, body)
 }
 

@@ -131,19 +131,19 @@ func (o *openAIToAWSBedrockTranslatorV1Embedding) ResponseBody(_ map[string]stri
 func (o *openAIToAWSBedrockTranslatorV1Embedding) ResponseError(
 	respHeaders map[string]string,
 	body io.Reader,
-) ([]internalapi.Header, []byte, error) {
+) ([]internalapi.Header, []byte, LLMErrorInfo, error) {
 	statusCode := respHeaders[statusHeaderName]
 	contentType := respHeaders[contentTypeHeaderName]
 	awsErrorType := respHeaders[awsErrorTypeHeaderName]
 
 	rawBody, err := io.ReadAll(body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("read error body: %w", err)
 	}
 
 	// Already OpenAI-style error — return nil headers to preserve original response headers.
 	if isJSON(contentType) && awsErrorType == "" {
-		return nil, rawBody, nil
+		return nil, rawBody, extractOpenAIErrorInfo(rawBody), nil
 	}
 
 	var openaiErr openai.Error
@@ -151,7 +151,7 @@ func (o *openAIToAWSBedrockTranslatorV1Embedding) ResponseError(
 	if isJSON(contentType) {
 		openaiErr, err = translateBedrockJSONError(rawBody, awsErrorType, statusCode)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, LLMErrorInfo{}, err
 		}
 	} else {
 		openaiErr = buildGenericError(string(rawBody), statusCode)
@@ -159,10 +159,10 @@ func (o *openAIToAWSBedrockTranslatorV1Embedding) ResponseError(
 
 	mutatedBody, err := json.Marshal(openaiErr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("marshal error body: %w", err)
 	}
 
-	return buildHeaders(mutatedBody), mutatedBody, nil
+	return buildHeaders(mutatedBody), mutatedBody, LLMErrorInfo{Type: openaiErr.Error.Type}, nil
 }
 
 func isJSON(contentType string) bool {

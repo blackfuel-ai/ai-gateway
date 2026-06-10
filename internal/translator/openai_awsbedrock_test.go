@@ -1502,7 +1502,7 @@ func TestOpenAIToAWSBedrockTranslator_ResponseError(t *testing.T) {
 			require.NoError(t, err)
 
 			o := &openAIToAWSBedrockTranslatorV1ChatCompletion{}
-			hm, newBody, err := o.ResponseError(tt.responseHeaders, tt.input)
+			hm, newBody, _, err := o.ResponseError(tt.responseHeaders, tt.input)
 			require.NoError(t, err)
 			require.NotNil(t, newBody)
 			require.NotNil(t, hm)
