@@ -1063,7 +1063,7 @@ func TestResponsesOpenAIToOpenAITranslator_ResponseError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			translator := NewResponsesOpenAIToOpenAITranslator("v1", "")
 
-			headers, body, err := translator.ResponseError(tt.responseHeaders, tt.input)
+			headers, body, _, err := translator.ResponseError(tt.responseHeaders, tt.input)
 			require.NoError(t, err)
 
 			if tt.expectHeaders > 0 {

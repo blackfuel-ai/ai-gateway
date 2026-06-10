@@ -77,7 +77,7 @@ func (t *responsesInputTokensToOpenAITranslator) ResponseBody(_ map[string]strin
 
 // ResponseError implements [OpenAIResponsesInputTokensTranslator.ResponseError].
 func (t *responsesInputTokensToOpenAITranslator) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, mutatedBody []byte, err error,
+	newHeaders []internalapi.Header, mutatedBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	return convertErrorOpenAIToOpenAIError(respHeaders, body)
 }

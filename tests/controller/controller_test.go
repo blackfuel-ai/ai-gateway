@@ -913,7 +913,7 @@ func TestGatewayConfigAnnotationChangePropagation(t *testing.T) {
 		},
 	}))
 
-	secretName := controller.FilterConfigSecretPerGatewayName(gwName, ns)
+	secretName := controller.FilterConfigBundleIndexSecretName(gwName, ns)
 	readEmit := func() (found, emit bool) {
 		s, getErr := kube.CoreV1().Secrets(ns).Get(ctx, secretName, metav1.GetOptions{})
 		if getErr != nil {

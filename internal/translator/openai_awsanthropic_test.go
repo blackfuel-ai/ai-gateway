@@ -490,7 +490,7 @@ func TestOpenAIToAWSAnthropicTranslator_ResponseError(t *testing.T) {
 			}
 
 			o := &openAIToAWSAnthropicTranslatorV1ChatCompletion{}
-			hm, body, err := o.ResponseError(tt.responseHeaders, reader)
+			hm, body, _, err := o.ResponseError(tt.responseHeaders, reader)
 
 			require.NoError(t, err)
 			require.NotNil(t, body)

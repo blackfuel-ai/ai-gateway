@@ -409,7 +409,7 @@ func TestToGCPVertexAIV1Tokenize_ResponseError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			headers, newBody, err := translator.ResponseError(tt.responseHeaders, strings.NewReader(tt.input))
+			headers, newBody, _, err := translator.ResponseError(tt.responseHeaders, strings.NewReader(tt.input))
 
 			require.NoError(t, err)
 			require.NotNil(t, headers)
@@ -435,7 +435,7 @@ func TestToGCPVertexAIV1Tokenize_ResponseError(t *testing.T) {
 		pr, pw := io.Pipe()
 		_ = pw.CloseWithError(fmt.Errorf("simulated read error"))
 
-		_, _, err := translator.ResponseError(map[string]string{":status": "500"}, pr)
+		_, _, _, err := translator.ResponseError(map[string]string{":status": "500"}, pr)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "failed to read error body")
 	})
@@ -446,7 +446,7 @@ func TestToGCPVertexAIV1Tokenize_ResponseError(t *testing.T) {
 		headers := map[string]string{":status": "400"}
 		input := "test error"
 
-		newHeaders, newBody, err := translator.ResponseError(headers, strings.NewReader(input))
+		newHeaders, newBody, _, err := translator.ResponseError(headers, strings.NewReader(input))
 		require.NoError(t, err)
 		require.NotNil(t, newHeaders)
 		require.NotNil(t, newBody)
@@ -602,7 +602,7 @@ func TestToGCPVertexAIV1Tokenize_IntegrationScenarios(t *testing.T) {
 			}
 		}`
 
-		_, respBody, err := translator.ResponseError(headers, strings.NewReader(errorBody))
+		_, respBody, _, err := translator.ResponseError(headers, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.NotNil(t, respBody)
 

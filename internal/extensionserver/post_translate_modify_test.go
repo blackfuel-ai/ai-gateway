@@ -472,7 +472,7 @@ func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
 	require.NoError(t, err)
 
 	// Envoy Gateway names mirror clusters with 1-based indexing — the first
@@ -549,7 +549,7 @@ func Test_maybeModifyCluster_mirrorIndexIsOneBased(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -600,7 +600,7 @@ func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
 	// Malformed mirror suffixes (non-numeric indices) should log and bail without
 	// returning an error so a bad cluster name doesn't tear down the whole xDS push.
 	c := newFakeClient()
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
 	require.NoError(t, err)
 	for _, name := range []string{
 		"httproute/ns/myroute/rule/abc-mirror-0",

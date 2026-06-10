@@ -100,7 +100,7 @@ func TestCountTokensToAnthropic_ResponseError(t *testing.T) {
 	require.NotNil(t, translator)
 
 	// Passthrough — no error translation.
-	hdrs, body, err := translator.ResponseError(nil, nil)
+	hdrs, body, _, err := translator.ResponseError(nil, nil)
 	require.NoError(t, err)
 	require.Nil(t, hdrs)
 	require.Nil(t, body)

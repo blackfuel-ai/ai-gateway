@@ -53,6 +53,8 @@ func TestWithTestUpstream(t *testing.T) {
 
 	config := &filterapi.Config{
 		Version: version.Parse(),
+		// Emit error dynamic metadata for non-2xx upstream responses.
+		EmitErrorMetadata: true,
 		// Dataplane Envoy does not set per-route xDS route_name metadata; use gateway defaults so costs still emit.
 		GlobalLLMRequestCosts: []filterapi.GlobalLLMRequestCost{
 			{MetadataKey: "used_token", Type: filterapi.LLMRequestCostTypeInputToken},
@@ -1571,6 +1573,31 @@ data: {"type":"message_stop"}`,
 			}
 		})
 	}
+
+	// The error subtests above (e.g. the aws-bedrock 429) should have caused the filter to emit
+	// llm_error_type/llm_error_code dynamic metadata, which envoy.yaml logs in the access log.
+	t.Run("check-error-metadata-access-log", func(t *testing.T) {
+		require.Eventually(t, func() bool {
+			accessLog := env.EnvoyStdout()
+			type lineFormat struct {
+				LLMErrorType string `json:"llm_error_type,omitempty"`
+				LLMErrorCode string `json:"llm_error_code,omitempty"`
+			}
+			for _, line := range strings.Split(accessLog, "\n") {
+				if line == "" {
+					continue
+				}
+				var l lineFormat
+				if err := json.Unmarshal([]byte(line), &l); err != nil {
+					continue
+				}
+				if l.LLMErrorType == "ThrottledException" && l.LLMErrorCode == "429" {
+					return true
+				}
+			}
+			return false
+		}, eventuallyTimeout, eventuallyInterval)
+	})
 
 	t.Run("stream non blocking", func(t *testing.T) {
 		if was5xx {

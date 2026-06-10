@@ -21,6 +21,7 @@ func TestUnmarshalConfigYaml(t *testing.T) {
 	config := `
 schema:
   name: OpenAI
+emitErrorMetadata: true
 llmRequestCosts:
 - metadataKey: token_usage_key
   routeName: ns/my-route
@@ -31,6 +32,7 @@ llmRequestCosts:
 	require.NoError(t, err)
 
 	expectedCfg := &filterapi.Config{
+		EmitErrorMetadata: true,
 		LLMRequestCosts: []filterapi.LLMRequestCost{
 			{
 				MetadataKey: "token_usage_key",

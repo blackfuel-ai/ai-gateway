@@ -1550,6 +1550,11 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   type="[GatewayConfigForwardProxy](#github-com-envoyproxy-ai-gateway-api-v1alpha1-gatewayconfigforwardproxy)"
   required="false"
   description="ForwardProxy routes all upstream AI/LLM traffic from Gateways referencing this<br />GatewayConfig through an HTTP CONNECT forward proxy. This is intended for data planes<br />in locked-down networks where direct egress to providers is not permitted and all<br />outbound traffic must traverse a proxy."
+/><ApiField
+  name="emitErrorMetadata"
+  type="boolean"
+  required="false"
+  description="EmitErrorMetadata enables emission of Envoy dynamic metadata describing upstream<br />LLM error responses (non-2xx). When enabled, the AI Gateway filter sets<br />`llm_error_type` and `llm_error_code` (falling back to the HTTP status code when the<br />provider reports no code), along with `backend_name`, `route_name`, and<br />`model_name_override`, under the `io.envoy.ai_gateway` metadata namespace.<br />These can be referenced in access logs via<br />%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.<br />This applies only to errors returned by the upstream LLM provider. Errors generated<br />before backend selection (e.g. an unknown model) do not carry this metadata.<br />Defaults to false."
 />
 
 
@@ -4216,6 +4221,11 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   type="[GatewayConfigForwardProxy](#github-com-envoyproxy-ai-gateway-api-v1beta1-gatewayconfigforwardproxy)"
   required="false"
   description="ForwardProxy routes all upstream AI/LLM traffic from Gateways referencing this<br />GatewayConfig through an HTTP CONNECT forward proxy. This is intended for data planes<br />in locked-down networks where direct egress to providers is not permitted and all<br />outbound traffic must traverse a proxy."
+/><ApiField
+  name="emitErrorMetadata"
+  type="boolean"
+  required="false"
+  description="EmitErrorMetadata enables emission of Envoy dynamic metadata describing upstream<br />LLM error responses (non-2xx). When enabled, the AI Gateway filter sets<br />`llm_error_type` and `llm_error_code` (falling back to the HTTP status code when the<br />provider reports no code), along with `backend_name`, `route_name`, and<br />`model_name_override`, under the `io.envoy.ai_gateway` metadata namespace.<br />These can be referenced in access logs via<br />%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.<br />This applies only to errors returned by the upstream LLM provider. Errors generated<br />before backend selection (e.g. an unknown model) do not carry this metadata.<br />Defaults to false."
 />
 
 

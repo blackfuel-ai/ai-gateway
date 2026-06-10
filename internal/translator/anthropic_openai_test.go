@@ -422,6 +422,7 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 		body        string
 		wantErrType string
 		wantErrMsg  string
+		wantErrInfo LLMErrorInfo
 	}{
 		{
 			name:        "JSON error from OpenAI backend",
@@ -429,6 +430,23 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}`,
 			wantErrType: "invalid_request_error",
 			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error"},
+		},
+		{
+			name:        "JSON error from OpenAI-compatible backend with numeric code",
+			headers:     map[string]string{contentTypeHeaderName: "application/json"},
+			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","code":400}}`,
+			wantErrType: "invalid_request_error",
+			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
+		},
+		{
+			name:        "JSON error from OpenAI backend with string code",
+			headers:     map[string]string{contentTypeHeaderName: "application/json"},
+			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","code":"context_length_exceeded"}}`,
+			wantErrType: "invalid_request_error",
+			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "context_length_exceeded"},
 		},
 		{
 			name:        "JSON error with numeric code from OpenAI-compatible backend",
@@ -436,6 +454,7 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","param":null,"code":400}}`,
 			wantErrType: "invalid_request_error",
 			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
 		},
 		{
 			name:        "non-JSON 400 error",
@@ -512,9 +531,14 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
-			headers, mutatedBody, err := translator.ResponseError(tt.headers, strings.NewReader(tt.body))
+			headers, mutatedBody, errInfo, err := translator.ResponseError(tt.headers, strings.NewReader(tt.body))
 			require.NoError(t, err)
 			require.NotNil(t, mutatedBody)
+
+			// errInfo.Type tracks the OpenAI/status-derived error type; Code is only
+			// populated for JSON OpenAI errors that carry one.
+			assert.Equal(t, tt.wantErrType, errInfo.Type)
+			assert.Equal(t, tt.wantErrInfo.Code, errInfo.Code)
 
 			// Verify content-type and content-length headers are set.
 			require.Len(t, headers, 2)

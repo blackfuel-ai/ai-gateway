@@ -285,7 +285,7 @@ func TestTokenizeTranslator_ResponseError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			translator := &ToOpenAITokenize{}
-			headers, newBody, err := translator.ResponseError(tt.responseHeaders, tt.input)
+			headers, newBody, _, err := translator.ResponseError(tt.responseHeaders, tt.input)
 			require.NoError(t, err)
 
 			if tt.contentType == jsonContentType {

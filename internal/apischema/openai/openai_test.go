@@ -14195,3 +14195,56 @@ func TestResponseContentPartDoneEventPartUnionUnmarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestErrorTypeUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantCode *string
+		wantType string
+		wantErr  bool
+	}{
+		{
+			name:     "string code",
+			input:    `{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}`,
+			wantType: "invalid_request_error",
+			wantCode: ptr.To("context_length_exceeded"),
+		},
+		{
+			name:     "numeric code",
+			input:    `{"type":"invalid_request_error","code":400,"message":"bad"}`,
+			wantType: "invalid_request_error",
+			wantCode: ptr.To("400"),
+		},
+		{
+			name:     "null code",
+			input:    `{"type":"server_error","code":null,"message":"oops"}`,
+			wantType: "server_error",
+			wantCode: nil,
+		},
+		{
+			name:     "absent code",
+			input:    `{"type":"server_error","message":"oops"}`,
+			wantType: "server_error",
+			wantCode: nil,
+		},
+		{
+			name:    "object code is rejected",
+			input:   `{"type":"server_error","code":{"nested":true}}`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var e ErrorType
+			err := json.Unmarshal([]byte(tc.input), &e)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantType, e.Type)
+			require.Equal(t, tc.wantCode, e.Code)
+		})
+	}
+}

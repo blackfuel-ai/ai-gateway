@@ -332,7 +332,7 @@ func TestTranscriptionTranslator_ResponseBody_Whisper1WithStreamTrue(t *testing.
 func TestTranscriptionTranslator_ResponseError(t *testing.T) {
 	tr := NewTranscriptionOpenAIToOpenAITranslator("v1", "")
 	headers := map[string]string{contentTypeHeaderName: "text/plain", statusHeaderName: "400"}
-	hm, bm, err := tr.ResponseError(headers, bytes.NewReader([]byte("error")))
+	hm, bm, _, err := tr.ResponseError(headers, bytes.NewReader([]byte("error")))
 	require.NoError(t, err)
 	require.NotNil(t, hm)
 	require.NotNil(t, bm)

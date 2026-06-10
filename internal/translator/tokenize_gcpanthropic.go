@@ -131,7 +131,7 @@ func (o *ToGCPAnthropicV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.R
 // ResponseError implements [TokenizeTranslator.ResponseError] for GCP Anthropic.
 // Translate GCP Anthropic exceptions to OpenAI error type.
 func (o *ToGCPAnthropicV1Tokenize) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	return translateGCPAnthropicErrorToOpenAI(respHeaders, body)
 }
@@ -177,7 +177,7 @@ func (o *ToGCPAnthropicV1Tokenize) ResponseBody(_ map[string]string, body io.Rea
 // translateGCPAnthropicErrorToOpenAI translates GCP Anthropic error responses to OpenAI error format.
 // GCP error responses typically contain JSON with error details or plain text error messages.
 func translateGCPAnthropicErrorToOpenAI(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
 	var openaiError openai.Error
@@ -188,7 +188,7 @@ func translateGCPAnthropicErrorToOpenAI(respHeaders map[string]string, body io.R
 		var gcpError anthropic.ErrorResponse
 		if decodeErr = json.NewDecoder(body).Decode(&gcpError); decodeErr != nil {
 			// If we expect JSON but fail to decode, it's an internal translator error.
-			return nil, nil, fmt.Errorf("failed to unmarshal JSON error body: %w", decodeErr)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to unmarshal JSON error body: %w", decodeErr)
 		}
 		openaiError = openai.Error{
 			Type: "error",
@@ -203,7 +203,7 @@ func translateGCPAnthropicErrorToOpenAI(respHeaders map[string]string, body io.R
 		var buf []byte
 		buf, decodeErr = io.ReadAll(body)
 		if decodeErr != nil {
-			return nil, nil, fmt.Errorf("failed to read raw error body: %w", decodeErr)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read raw error body: %w", decodeErr)
 		}
 		openaiError = openai.Error{
 			Type: "error",
@@ -219,11 +219,12 @@ func translateGCPAnthropicErrorToOpenAI(respHeaders map[string]string, body io.R
 	newBody, err = json.Marshal(openaiError)
 	if err != nil {
 		// This is an internal failure to create the response.
-		return nil, nil, fmt.Errorf("failed to marshal OpenAI error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal OpenAI error body: %w", err)
 	}
 	newHeaders = []internalapi.Header{
 		{contentTypeHeaderName, jsonContentType},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
 	}
+	errInfo = LLMErrorInfo{Type: openaiError.Error.Type}
 	return
 }

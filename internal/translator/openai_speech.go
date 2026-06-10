@@ -170,6 +170,6 @@ func (o *openAIToOpenAITranslatorV1Speech) recordSSEChunksToSpan(span tracingapi
 }
 
 // ResponseError implements [OpenAISpeechTranslator.ResponseError].
-func (o *openAIToOpenAITranslatorV1Speech) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, error) {
+func (o *openAIToOpenAITranslatorV1Speech) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, LLMErrorInfo, error) {
 	return convertErrorOpenAIToOpenAIError(respHeaders, body)
 }

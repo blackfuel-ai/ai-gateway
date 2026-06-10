@@ -570,7 +570,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	if code, _ := strconv.Atoi(u.responseHeaders[":status"]); !isGoodStatusCode(code) {
 		var newHeaders []internalapi.Header
 		var newBody []byte
-		newHeaders, newBody, err = u.translator.ResponseError(u.responseHeaders, decodingResult.reader)
+		var errInfo translator.LLMErrorInfo
+		newHeaders, newBody, errInfo, err = u.translator.ResponseError(u.responseHeaders, decodingResult.reader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to transform response error: %w", err)
 		}
@@ -586,7 +587,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		}
 		// Mark so the deferred handler records failure.
 		recordRequestCompletionErr = true
-		return &extprocv3.ProcessingResponse{
+		resp := &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
@@ -595,7 +596,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 					},
 				},
 			},
-		}, nil
+		}
+		if body.EndOfStream && u.parent.config != nil && u.parent.config.EmitErrorMetadata {
+			resp.DynamicMetadata = buildErrorDynamicMetadata(errInfo, code, u.requestHeaders, u.backendName, u.routeName)
+		}
+		return resp, nil
 	}
 
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
@@ -985,26 +990,7 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
 	}
 
-	metadata["model_name_override"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: actualModel}}
-
-	if backendName != "" {
-		// backend_name itself is emitted by buildBackendDynamicMetadata in the request
-		// headers phase, so it is already on the stream by the time this runs.
-		//
-		// ai_service_backend_name stores the short "namespace/name" format extracted
-		// from the full PerRouteRuleRefBackendName ("{namespace}/{name}/route/...").
-		// This is used by the quota rate limit descriptor actions to match the
-		// rate limit service config which keys on "namespace/backendName".
-		parts := strings.SplitN(backendName, "/", 3)
-		shortName := backendName
-		if len(parts) >= 2 {
-			shortName = parts[0] + "/" + parts[1]
-		}
-		metadata["ai_service_backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: shortName}}
-	}
-	if routeName != "" {
-		metadata["route_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: routeName}}
-	}
+	setRoutingContextMetadata(metadata, requestHeaders, backendName, routeName, false)
 
 	// responseModel is the actual model that served the request.
 	if responseModel != "" {
@@ -1024,4 +1010,72 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 			},
 		},
 	}, nil
+}
+
+// setRoutingContextMetadata populates the routing-context dynamic metadata fields
+// (model_name_override, backend_name, route_name) shared between the success and
+// error metadata builders. backend_name/route_name are omitted when empty;
+// model_name_override is always set to the final request model.
+//
+// includeBackendName controls whether the raw backend_name field is set. On the
+// success path it is already emitted in the request-headers phase by
+// buildBackendDynamicMetadata, so setting it again here would be redundant; the
+// error path has no such earlier emission, so it opts in via includeBackendName.
+// ai_service_backend_name is always set when a backend is known: it is the
+// short "namespace/name" form the quota rate limit descriptor actions key on,
+// independent of the request-headers-phase backend_name.
+func setRoutingContextMetadata(metadata map[string]*structpb.Value, requestHeaders map[string]string, backendName, routeName string, includeBackendName bool) {
+	// Add the actual request model that was used (after any backend overrides were applied).
+	// At this point, the header contains the final model that was sent to the upstream.
+	actualModel := requestHeaders[internalapi.ModelNameHeaderKeyDefault]
+	metadata["model_name_override"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: actualModel}}
+
+	if backendName != "" {
+		if includeBackendName {
+			metadata["backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: backendName}}
+		}
+		// ai_service_backend_name stores the short "namespace/name" format extracted
+		// from the full PerRouteRuleRefBackendName ("{namespace}/{name}/route/...").
+		// This is used by the quota rate limit descriptor actions to match the
+		// rate limit service config which keys on "namespace/backendName".
+		parts := strings.SplitN(backendName, "/", 3)
+		shortName := backendName
+		if len(parts) >= 2 {
+			shortName = parts[0] + "/" + parts[1]
+		}
+		metadata["ai_service_backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: shortName}}
+	}
+	if routeName != "" {
+		metadata["route_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: routeName}}
+	}
+}
+
+// buildErrorDynamicMetadata creates dynamic metadata for non-2xx upstream responses.
+// It emits llm_error_type and llm_error_code (falling back to a generic type and the
+// HTTP status code respectively when the translator could not extract them), plus the
+// shared routing-context fields. This is gated behind the EmitErrorMetadata config flag.
+func buildErrorDynamicMetadata(errInfo translator.LLMErrorInfo, statusCode int, requestHeaders map[string]string, backendName, routeName string) *structpb.Struct {
+	errorType := errInfo.Type
+	if errorType == "" {
+		errorType = "upstream_error"
+	}
+	errorCode := errInfo.Code
+	if errorCode == "" {
+		errorCode = strconv.Itoa(statusCode)
+	}
+	metadata := map[string]*structpb.Value{
+		"llm_error_type": {Kind: &structpb.Value_StringValue{StringValue: errorType}},
+		"llm_error_code": {Kind: &structpb.Value_StringValue{StringValue: errorCode}},
+	}
+	setRoutingContextMetadata(metadata, requestHeaders, backendName, routeName, true)
+
+	return &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: {
+				Kind: &structpb.Value_StructValue{
+					StructValue: &structpb.Struct{Fields: metadata},
+				},
+			},
+		},
+	}
 }
