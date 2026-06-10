@@ -80,6 +80,22 @@ type GatewayConfigSpec struct {
 	// +listType=map
 	// +listMapKey=metadataKey
 	GlobalLLMRequestCosts []LLMRequestCost `json:"globalLLMRequestCosts,omitempty"`
+
+	// EmitErrorMetadata enables emission of Envoy dynamic metadata describing upstream
+	// LLM error responses (non-2xx). When enabled, the AI Gateway filter sets
+	// "llm_error_type" and "llm_error_code" (falling back to the HTTP status code when the
+	// provider reports no code), along with "backend_name", "route_name", and
+	// "model_name_override", under the "io.envoy.ai_gateway" metadata namespace.
+	// These can be referenced in access logs via
+	// %DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.
+	//
+	// This applies only to errors returned by the upstream LLM provider. Errors generated
+	// before backend selection (e.g. an unknown model) do not carry this metadata.
+	//
+	// Defaults to false.
+	//
+	// +optional
+	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
 }
 
 // GatewayConfigExtProc holds runtime-specific configuration for the external processor.

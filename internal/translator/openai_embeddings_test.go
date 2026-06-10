@@ -226,7 +226,7 @@ func TestOpenAIToOpenAITranslatorV1EmbeddingResponseError(t *testing.T) {
 		}
 		errorBody := "Service Unavailable"
 
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.NotNil(t, headerMutation)
 		require.NotNil(t, bodyMutation)
@@ -247,7 +247,7 @@ func TestOpenAIToOpenAITranslatorV1EmbeddingResponseError(t *testing.T) {
 		}
 		errorBody := `{"error": {"message": "Invalid input", "type": "BadRequestError"}}`
 
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.Nil(t, headerMutation)
 		require.Nil(t, bodyMutation)

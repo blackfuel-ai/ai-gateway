@@ -213,7 +213,7 @@ func TestOpenAIToOpenAISpeechTranslator_ResponseBody_RecordsSpan_Streaming(t *te
 func TestOpenAIToOpenAISpeechTranslator_ResponseError_NonJSON(t *testing.T) {
 	tr := NewSpeechOpenAIToOpenAITranslator("v1", "")
 	headers := map[string]string{contentTypeHeaderName: "text/plain", statusHeaderName: "503"}
-	hm, bm, err := tr.ResponseError(headers, bytes.NewReader([]byte("backend error")))
+	hm, bm, _, err := tr.ResponseError(headers, bytes.NewReader([]byte("backend error")))
 	require.NoError(t, err)
 	require.NotNil(t, hm)
 	require.NotNil(t, bm)
@@ -230,7 +230,7 @@ func TestOpenAIToOpenAISpeechTranslator_ResponseError_JSONPassthrough(t *testing
 	tr := NewSpeechOpenAIToOpenAITranslator("v1", "")
 	headers := map[string]string{contentTypeHeaderName: jsonContentType, statusHeaderName: "500"}
 	// Already JSON — should be passed through (no mutation)
-	hm, bm, err := tr.ResponseError(headers, bytes.NewReader([]byte(`{"error":"msg"}`)))
+	hm, bm, _, err := tr.ResponseError(headers, bytes.NewReader([]byte(`{"error":"msg"}`)))
 	require.NoError(t, err)
 	require.Nil(t, hm)
 	require.Nil(t, bm)

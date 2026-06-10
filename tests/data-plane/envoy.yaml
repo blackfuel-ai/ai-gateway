@@ -31,6 +31,8 @@ static_resources:
                         json_format:
                           used_token: "%DYNAMIC_METADATA(io.envoy.ai_gateway:used_token)%"
                           some_cel: "%DYNAMIC_METADATA(io.envoy.ai_gateway:some_cel)%"
+                          llm_error_type: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%"
+                          llm_error_code: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_code)%"
                   - name: default
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StderrAccessLog

@@ -275,7 +275,7 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 	for range 2 { // Reconcile twice to make sure the secret update path is working.
 		const someNamespace = "some-namespace"
 		configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-		effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil)
+		effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil, false)
 		require.NoError(t, err)
 		require.True(t, effective, "expected filter config to be effective")
 
@@ -379,7 +379,7 @@ func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostA
 
 	const someNamespace = "some-namespace"
 	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil, false)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -455,7 +455,7 @@ func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostA
 
 	const someNamespace = "some-namespace"
 	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil, false)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -512,7 +512,7 @@ func TestGatewayController_reconcileFilterConfigSecret_InvalidCELExpression(t *t
 
 	const someNamespace = "some-namespace"
 	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-	_, err = c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil)
+	_, err = c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid CEL expression")
 }
@@ -606,7 +606,7 @@ func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *tes
 	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
 
 	// Reconcile filter config secret.
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "foouuid", nil, false)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -1983,10 +1983,10 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 	const someNamespace = "some-namespace"
 	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
 
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, nil, nil, "mcp-uuid", nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, nil, nil, "mcp-uuid", nil, false)
 	require.NoError(t, err)
 	require.False(t, effective) // No MCP routes, so not effective.
-	effective, err = c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, nil, mcpRoutes, "mcp-uuid", nil)
+	effective, err = c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, nil, mcpRoutes, "mcp-uuid", nil, false)
 	require.NoError(t, err)
 	require.True(t, effective)
 
@@ -2477,7 +2477,7 @@ func TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults(t *testing
 
 			const someNamespace = "some-namespace"
 			configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-			effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, tt.routes, nil, "test-uuid", tt.globalCosts)
+			effective, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, tt.routes, nil, "test-uuid", tt.globalCosts, false)
 			require.NoError(t, err)
 			require.True(t, effective)
 
@@ -2499,6 +2499,52 @@ func TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults(t *testing
 
 			// Compare route-scoped costs (order-agnostic)
 			requireLLMRequestCostsEqual(t, tt.expectedRouteScopedCosts, fc.LLMRequestCosts)
+		})
+	}
+}
+
+func TestGatewayController_reconcileFilterConfigSecret_EmitErrorMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		emit bool
+	}{{"enabled", true}, {"disabled", false}} {
+		emit := tc.emit
+		t.Run(tc.name, func(t *testing.T) {
+			fakeClient := requireNewFakeClientWithIndexes(t)
+			kube := fake2.NewClientset()
+			c := NewGatewayController(fakeClient, kube, ctrl.Log,
+				"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+			const gwNamespace = "ns"
+			backend := &aigv1b1.AIServiceBackend{
+				ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: gwNamespace},
+				Spec: aigv1b1.AIServiceBackendSpec{
+					BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+				},
+			}
+			require.NoError(t, fakeClient.Create(t.Context(), backend))
+
+			routes := []aigv1b1.AIGatewayRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+					Spec: aigv1b1.AIGatewayRouteSpec{
+						Rules: []aigv1b1.AIGatewayRouteRule{
+							{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+						},
+					},
+				},
+			}
+
+			const someNamespace = "some-namespace"
+			configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
+			_, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "test-uuid", nil, emit)
+			require.NoError(t, err)
+
+			secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
+			require.NoError(t, err)
+			var fc filterapi.Config
+			require.NoError(t, yaml.Unmarshal([]byte(secret.StringData[FilterConfigKeyInSecret]), &fc))
+			require.Equal(t, emit, fc.EmitErrorMetadata)
 		})
 	}
 }

@@ -277,7 +277,7 @@ func (o *openAIToGCPVertexAITranslatorV1Embedding) ResponseBody(_ map[string]str
 // Translate GCP Vertex AI exceptions to OpenAI error type.
 // GCP error responses typically contain JSON with error details or plain text error messages.
 func (o *openAIToGCPVertexAITranslatorV1Embedding) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	return convertGCPVertexAIErrorToOpenAI(respHeaders, body)
 }

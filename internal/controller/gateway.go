@@ -137,14 +137,16 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	var defaultLLMCosts []aigv1b1.LLMRequestCost
+	var emitErrorMetadata bool
 	if gwConfig != nil {
 		defaultLLMCosts = gwConfig.Spec.GlobalLLMRequestCosts
+		emitErrorMetadata = gwConfig.Spec.EmitErrorMetadata
 	}
 
 	// We need to create the filter config in Envoy Gateway system namespace because the sidecar extproc need
 	// to access it.
 	var hasEffectiveRoutes bool // indicates whether the filter config is effective (i.e., there is at least one active route).
-	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, FilterConfigSecretPerGatewayName(gw.Name, gw.Namespace), namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts)
+	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, FilterConfigSecretPerGatewayName(gw.Name, gw.Namespace), namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, emitErrorMetadata)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -367,9 +369,10 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 	mcpRoutes []aigv1b1.MCPRoute,
 	uuid string,
 	defaultLLMCosts []aigv1b1.LLMRequestCost,
+	emitErrorMetadata bool,
 ) (hasEffectiveRoute bool, _ error) {
 	// Precondition: aiGatewayRoutes is not empty as we early return if it is empty.
-	ec := &filterapi.Config{UUID: uuid, Version: version.Parse()}
+	ec := &filterapi.Config{UUID: uuid, Version: version.Parse(), EmitErrorMetadata: emitErrorMetadata}
 	var err error
 
 	// Process global LLM request costs from GatewayConfig.

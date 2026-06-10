@@ -1580,6 +1580,37 @@ type ErrorType struct {
 	EventID *string `json:"event_id,omitempty"`
 }
 
+// UnmarshalJSON tolerates the "code" field being provided as a JSON string,
+// number, or null. OpenAI itself returns a string (or null), but many
+// OpenAI-compatible backends return a numeric code; without this the whole error
+// body would fail to decode. The value is normalized to a string.
+func (e *ErrorType) UnmarshalJSON(data []byte) error {
+	type alias ErrorType
+	aux := struct {
+		*alias
+		Code json.RawMessage `json:"code"`
+	}{alias: (*alias)(e)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	e.Code = nil
+	if len(aux.Code) == 0 || string(aux.Code) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(aux.Code, &s); err == nil {
+		e.Code = &s
+		return nil
+	}
+	// Numeric (or other scalar) code: use the raw JSON literal as the string.
+	raw := strings.TrimSpace(string(aux.Code))
+	if _, err := strconv.ParseFloat(raw, 64); err == nil {
+		e.Code = &raw
+		return nil
+	}
+	return fmt.Errorf("error.code must be a string or number, got %q", string(aux.Code))
+}
+
 // ModelList is described in the OpenAI API documentation
 // https://platform.openai.com/docs/api-reference/models/list
 type ModelList struct {

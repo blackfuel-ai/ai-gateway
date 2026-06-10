@@ -191,7 +191,7 @@ func TestEmbeddingOpenAIToAWSBedrockTranslator_ResponseBody_MarshalError(t *test
 func TestEmbeddingOpenAIToAWSBedrockTranslator_ResponseError_ReadError(t *testing.T) {
 	translator := NewEmbeddingOpenAIToAWSBedrockTranslator("").(*openAIToAWSBedrockTranslatorV1Embedding)
 
-	_, _, err := translator.ResponseError(
+	_, _, _, err := translator.ResponseError(
 		map[string]string{statusHeaderName: "500"},
 		iotest.ErrReader(errors.New("injected read error")),
 	)
@@ -206,7 +206,7 @@ func TestEmbeddingOpenAIToAWSBedrockTranslator_ResponseError_MarshalError(t *tes
 	translator := NewEmbeddingOpenAIToAWSBedrockTranslator("").(*openAIToAWSBedrockTranslatorV1Embedding)
 
 	// non-JSON body with no content-type → buildGenericError → json.Marshal fails
-	_, _, err := translator.ResponseError(
+	_, _, _, err := translator.ResponseError(
 		map[string]string{statusHeaderName: "503"},
 		strings.NewReader("Service Unavailable"),
 	)
@@ -517,7 +517,7 @@ func TestEmbeddingOpenAIToAWSBedrockTranslator_ResponseError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			translator := NewEmbeddingOpenAIToAWSBedrockTranslator("").(*openAIToAWSBedrockTranslatorV1Embedding)
 
-			headers, body, err := translator.ResponseError(tc.headers, strings.NewReader(tc.body))
+			headers, body, _, err := translator.ResponseError(tc.headers, strings.NewReader(tc.body))
 
 			if tc.wantErr {
 				require.Error(t, err)
