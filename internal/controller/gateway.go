@@ -27,6 +27,8 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
@@ -82,6 +84,38 @@ type GatewayController struct {
 	// extProcBuilder is shared with the mutating webhook so the template hash
 	// computed here matches the extproc container injected by the webhook.
 	*extProcBuilder
+}
+
+// gatewayReconcilePredicate enqueues a Gateway reconcile on spec/generation
+// changes (like predicate.GenerationChangedPredicate) AND on changes to the
+// gateway-config annotation.
+//
+// The annotation lives in metadata and does not bump metadata.generation, so a
+// plain GenerationChangedPredicate drops the Update event when the annotation is
+// added, changed, or removed on an already-existing Gateway. That would leave the
+// per-gateway filter-config Secret (e.g. EmitErrorMetadata) stale until some
+// unrelated event forced a reconcile. Keying narrowly on GatewayConfigAnnotationKey
+// avoids reconcile storms from unrelated metadata churn.
+//
+// This predicate is scoped to the Gateway For source (via builder.WithPredicates);
+// the gatewayEventChan raw source is registered with WatchesRawSource, which does
+// not run For-source predicates, so channel-driven reconciles are unaffected.
+// CreateFunc/DeleteFunc/GenericFunc are intentionally left unset so they default
+// to true, matching GenerationChangedPredicate (Gateway create/delete still
+// reconcile).
+func gatewayReconcilePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+				return true
+			}
+			return e.ObjectOld.GetAnnotations()[GatewayConfigAnnotationKey] !=
+				e.ObjectNew.GetAnnotations()[GatewayConfigAnnotationKey]
+		},
+	}
 }
 
 // Reconcile implements the reconcile.Reconciler for gwapiv1.Gateway.

@@ -25,6 +25,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -139,7 +140,13 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 	gatewayC := NewGatewayController(c, kubernetes.NewForConfigOrDie(config),
 		logger.WithName("gateway"), options.EnvoyGatewayNamespace,
 		false, uuid.NewString, options, isKubernetes133OrLater(versionInfo, logger))
-	if err = TypedControllerBuilderForCRD(mgr, &gwapiv1.Gateway{}).
+	// Unlike other CRDs, the Gateway watch must also react to changes of the
+	// gateway-config annotation, which does not bump metadata.generation. Hence we
+	// scope a custom predicate to the Gateway source instead of using the shared
+	// GenerationChangedPredicate from TypedControllerBuilderForCRD. See
+	// gatewayReconcilePredicate.
+	if err = ctrl.NewControllerManagedBy(mgr).
+		For(&gwapiv1.Gateway{}, builder.WithPredicates(gatewayReconcilePredicate())).
 		WatchesRawSource(source.Channel(
 			gatewayEventChan,
 			&handler.EnqueueRequestForObject{},
