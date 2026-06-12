@@ -3949,7 +3949,7 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 	}
 	require.NotNil(t, mirror, "expected mirror backend %q in filter config", wantName)
 	require.True(t, mirror.IsMirror)
-	require.Equal(t, "shadow-model", string(mirror.ModelNameOverride))
+	require.Equal(t, "shadow-model", mirror.ModelNameOverride)
 	require.NotNil(t, mirror.HeaderMutation)
 	require.NotNil(t, mirror.BodyMutation)
 
