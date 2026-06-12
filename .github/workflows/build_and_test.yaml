@@ -386,6 +386,9 @@ jobs:
 
   compute_version:
     # Runs on PRs too, so GitVersion's output shows up in checks before it can affect main; docker_push/helm_push below stay push-only, so nothing publishes here.
+    # Only feeds the upstream DockerHub docker_push/helm_push jobs, and exits 1 on PRs when GitVersion yields
+    # nothing; skip on the Blackfuel fork (a skipped job does not fail ci-required).
+    if: github.repository == 'envoyproxy/ai-gateway'
     name: Compute dev version
     runs-on: ubuntu-latest
     outputs:
@@ -430,7 +433,9 @@ jobs:
 
   docker_push:
     # Docker builds are verified in test_e2e job, so we only need to push the images when the event is a push event.
-    if: github.event_name == 'push'
+    # Pushes to DockerHub with upstream credentials; skip on the Blackfuel fork, which publishes to GHCR
+    # via build_push_branch.yaml instead.
+    if: github.event_name == 'push' && github.repository == 'envoyproxy/ai-gateway'
     name: Push Docker Images
     needs: [ci-required, compute_version]
     uses: ./.github/workflows/docker_build_job.yaml
@@ -441,7 +446,8 @@ jobs:
   helm_push:
     name: Push Helm chart
     # Only push the Helm chart to the GHR when merged into the main branch.
-    if: github.event_name == 'push'
+    # Uses upstream DockerHub credentials; skip on the Blackfuel fork (publishes via build_push_branch.yaml).
+    if: github.event_name == 'push' && github.repository == 'envoyproxy/ai-gateway'
     needs: [docker_push, compute_version]
     runs-on: ubuntu-latest
     steps:
