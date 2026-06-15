@@ -1064,6 +1064,54 @@ func TestMaybeModifyListenerAndRoutes(t *testing.T) {
 		require.NoError(t, err)
 		// Should handle gracefully when referenced route config is not found.
 	})
+
+	t.Run("same inference pool referenced by multiple route rules yields one filter", func(t *testing.T) {
+		// One AIGatewayRoute commonly renders several rules that all carry the same
+		// InferencePool backendRef (the inference chart emits version / deploymentId /
+		// servedName-catch-all rules). The endpoint picker is a listener-level HTTP
+		// filter, so exactly one per pool must be emitted. Emitting one per referencing
+		// rule produces byte-identical duplicate FULL_DUPLEX_STREAMED ext_proc filters,
+		// whose chaining trips an Envoy race (envoyproxy/envoy#43983) that surfaces as
+		// client-facing 500s on /v1/embeddings (BLA-1607).
+		listener := createListener("dedup-listener", "dedup-route-config")
+		routes := []*routev3.RouteConfiguration{
+			{
+				Name: "dedup-route-config",
+				VirtualHosts: []*routev3.VirtualHost{
+					{
+						Name: "dedup-vh",
+						Routes: []*routev3.Route{
+							createRouteWithInferencePool("version-rule"),
+							createRouteWithInferencePool("deployment-id-rule"),
+							createRouteWithInferencePool("catch-all-rule"),
+						},
+					},
+				},
+			},
+		}
+
+		err := s.maybeModifyListenerAndRoutes([]*listenerv3.Listener{listener}, routes)
+		require.NoError(t, err)
+
+		hcm := &httpconnectionmanagerv3.HttpConnectionManager{}
+		require.NoError(t, listener.DefaultFilterChain.Filters[0].GetTypedConfig().UnmarshalTo(hcm))
+
+		// createRouteWithInferencePool encodes pool "test-ns/test-pool"; its endpoint
+		// picker filter name is keyed by pool (not route), so all duplicates collide on
+		// this exact name.
+		wantName := httpFilterNameForInferencePool(&gwaiev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "test-ns"},
+		})
+		eppFilters := 0
+		for _, f := range hcm.HttpFilters {
+			if f.Name == wantName {
+				eppFilters++
+			}
+		}
+		require.Equal(t, 1, eppFilters,
+			"exactly one endpoint-picker ext_proc filter must be emitted per InferencePool, "+
+				"regardless of how many AIGatewayRoute rules reference it")
+	})
 }
 
 // TestPatchListenerWithInferencePoolFilters tests the patchListenerWithInferencePoolFilters function.
