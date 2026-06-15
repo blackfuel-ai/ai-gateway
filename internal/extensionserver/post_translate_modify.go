@@ -528,7 +528,20 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 	}
 
 	// listenerToInferencePools builds a matrix of listeners and the inference pools they use.
+	//
+	// A single InferencePool is commonly referenced by several AIGatewayRoute rules on the
+	// same listener — e.g. the version / deploymentId / servedName-catch-all rules the
+	// inference chart renders all carry the same InferencePool backendRef. The endpoint
+	// picker is a listener-level HTTP filter, so one per distinct pool is sufficient.
+	// Appending the pool once per referencing rule yields byte-identical duplicate
+	// endpoint-picker filters (their name is keyed by pool, not route), and chaining those
+	// duplicate FULL_DUPLEX_STREAMED ext_proc filters exposes an Envoy race
+	// (envoyproxy/envoy#43983) that delivers a premature empty end-of-stream body to a
+	// downstream BUFFERED ext_proc filter — surfacing as client-facing 500s on
+	// /v1/embeddings. Dedupe by pool identity (namespace/name) so exactly one endpoint
+	// picker filter is emitted per pool per listener.
 	listenerToInferencePools := make(map[string][]*gwaiev1.InferencePool)
+	listenerSeenPools := make(map[string]map[string]struct{})
 	for listener, routeCfgNames := range listenerNameToRouteNames {
 		for _, name := range routeCfgNames {
 			if routeNameToRoute[name] == nil {
@@ -540,7 +553,13 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 			for _, pool := range routeNameToVHRouteNameToInferencePool[name] {
 				if listenerToInferencePools[listener] == nil {
 					listenerToInferencePools[listener] = make([]*gwaiev1.InferencePool, 0)
+					listenerSeenPools[listener] = make(map[string]struct{})
 				}
+				poolKey := pool.GetNamespace() + "/" + pool.GetName()
+				if _, seen := listenerSeenPools[listener][poolKey]; seen {
+					continue
+				}
+				listenerSeenPools[listener][poolKey] = struct{}{}
 				listenerToInferencePools[listener] = append(listenerToInferencePools[listener], pool)
 			}
 		}
