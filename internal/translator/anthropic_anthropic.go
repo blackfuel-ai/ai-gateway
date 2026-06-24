@@ -177,43 +177,62 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 		}
 	case eventUnion.MessageDelta != nil:
 		u := eventUnion.MessageDelta.Usage
-		// message_delta carries the final counts. Standard Anthropic only reports output_tokens
-		// here, but some Anthropic-compatible backends report the final input/cache counts on
-		// message_delta instead of message_start. See https://github.com/envoyproxy/ai-gateway/issues/2290.
+		// message_delta carries the FINAL cumulative usage per Anthropic docs:
+		// https://docs.claude.com/en/docs/build-with-claude/streaming
+		// (see also the "// This is cumulative per documentation." comment on
+		// MessagesStreamChunkMessageDelta in our local schema).
 		//
-		// output_tokens is always the final value on message_delta, so take it unconditionally.
+		// Always update output_tokens — the primary purpose of message_delta.
 		if u.OutputTokens >= 0 {
 			a.streamingTokenUsage.SetOutputTokens(uint32(u.OutputTokens)) //nolint:gosec
 		}
-		// Merge the input/cache counts per field rather than replacing the whole usage snapshot:
-		// a delta may report only the fields that apply (the rest arrive as zero), so overwriting
-		// every field would clobber values already set on message_start. We can only treat a field
-		// as "present" when it is non-zero, since the upstream usage fields are not pointers.
-		if u.InputTokens > 0 || u.CacheReadInputTokens > 0 || u.CacheCreationInputTokens > 0 {
-			// The unified input_tokens is the sum of raw input + cache-read + cache-creation, so
-			// recover the latest known value of each component and overwrite only the ones present
-			// on this delta before recomputing the sum.
-			cacheRead, _ := a.streamingTokenUsage.CachedInputTokens()
-			cacheCreation, _ := a.streamingTokenUsage.CacheCreationInputTokens()
-			unifiedInput, _ := a.streamingTokenUsage.InputTokens()
-			var rawInput uint32
-			if unifiedInput >= cacheRead+cacheCreation {
-				rawInput = unifiedInput - cacheRead - cacheCreation
-			}
 
-			if u.InputTokens > 0 {
-				rawInput = uint32(u.InputTokens) //nolint:gosec
-			}
-			if u.CacheReadInputTokens > 0 {
-				cacheRead = uint32(u.CacheReadInputTokens) //nolint:gosec
-			}
+		// For Anthropic Sonnet "establish-cache" streaming requests (cache
+		// being WRITTEN during processing), message_start.usage often reports
+		// cache_creation_input_tokens=0 because the cache write hasn't been
+		// finalized yet — and the actual final cumulative count only appears
+		// in message_delta. If we ignore message_delta's cache fields we
+		// silently under-report cache_creation_input_tokens (and the
+		// corresponding "input gross") for those requests, which is exactly
+		// what we observed in production: ~37% under-counting on Sonnet
+		// cache_creation while the smaller "establish-cache" requests went
+		// missing from the histogram.
+		//
+		// Defensive: only absorb fields whose value is > 0. Anthropic's spec
+		// says "Optional fields will not be set when their value is None"
+		// (Python SDK: MessageDeltaUsage), but Go's float64 schema cannot
+		// distinguish "explicitly 0" from "not reported". Treating 0 as
+		// "not reported" preserves the message_start values and avoids
+		// resetting a valid cache count to 0.
+		if u.CacheCreationInputTokens > 0 || u.CacheReadInputTokens > 0 || u.InputTokens > 0 {
+			currentCacheCreate, _ := a.streamingTokenUsage.CacheCreationInputTokens()
+			currentCacheRead, _ := a.streamingTokenUsage.CachedInputTokens()
+			currentGross, currentGrossSet := a.streamingTokenUsage.InputTokens()
+
+			newCacheCreate := currentCacheCreate
 			if u.CacheCreationInputTokens > 0 {
-				cacheCreation = uint32(u.CacheCreationInputTokens) //nolint:gosec
+				newCacheCreate = uint32(u.CacheCreationInputTokens) //nolint:gosec
+			}
+			newCacheRead := currentCacheRead
+			if u.CacheReadInputTokens > 0 {
+				newCacheRead = uint32(u.CacheReadInputTokens) //nolint:gosec
 			}
 
-			a.streamingTokenUsage.SetCachedInputTokens(cacheRead)
-			a.streamingTokenUsage.SetCacheCreationInputTokens(cacheCreation)
-			a.streamingTokenUsage.SetInputTokens(rawInput + cacheRead + cacheCreation)
+			// Determine the new "regular" input (i.e. non-cache input):
+			// - If message_delta reports input_tokens > 0, prefer it.
+			// - Otherwise recover from the prior cumulative gross by
+			//   subtracting the prior cache values (NOT the new cache values).
+			var newRegular uint32
+			switch {
+			case u.InputTokens > 0:
+				newRegular = uint32(u.InputTokens) //nolint:gosec
+			case currentGrossSet && currentGross >= currentCacheRead+currentCacheCreate:
+				newRegular = currentGross - currentCacheRead - currentCacheCreate
+			}
+
+			a.streamingTokenUsage.SetInputTokens(newRegular + newCacheRead + newCacheCreate)
+			a.streamingTokenUsage.SetCachedInputTokens(newCacheRead)
+			a.streamingTokenUsage.SetCacheCreationInputTokens(newCacheCreate)
 		}
 	}
 }
