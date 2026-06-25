@@ -25,9 +25,12 @@ const (
 )
 
 var (
-	sseDataPrefix   = []byte("data: ")
-	sseDoneMessage  = []byte("[DONE]")
-	sseDoneFullLine = append(append(sseDataPrefix, sseDoneMessage...), '\n')
+	sseDataPrefix = []byte("data: ")
+	// sseDataPrefixNoSpace matches the compact "data:" form (the space after the
+	// colon is optional per the SSE spec); used as a fallback when parsing events.
+	sseDataPrefixNoSpace = []byte("data:")
+	sseDoneMessage       = []byte("[DONE]")
+	sseDoneFullLine      = append(append(sseDataPrefix, sseDoneMessage...), '\n')
 )
 
 // regDataURI follows the web uri regex definition.
