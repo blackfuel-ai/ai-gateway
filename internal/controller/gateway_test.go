@@ -3870,7 +3870,7 @@ func TestGatewayController_reconcileFilterConfigSecret_EmitErrorMetadata(t *test
 func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexes(t)
 	kube := fake2.NewClientset()
-	c := NewGatewayController(fakeClient, kube, ctrl.Log,
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "ns",
 		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
 
 	const gwNamespace = "ns"
@@ -3929,14 +3929,10 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 	}
 
 	const someNamespace = "some-namespace"
-	configName := FilterConfigSecretPerGatewayName("gw", gwNamespace)
-	_, err := c.reconcileFilterConfigSecret(t.Context(), configName, someNamespace, routes, nil, "test-uuid", nil, false)
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false)
 	require.NoError(t, err)
 
-	secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
-	require.NoError(t, err)
-	var fc filterapi.Config
-	require.NoError(t, yaml.Unmarshal([]byte(secret.StringData[FilterConfigKeyInSecret]), &fc))
+	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
 
 	// The valid mirror is emitted with IsMirror and its overrides.
 	wantName := internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "mirror-backend", "route1", 0, 0)
