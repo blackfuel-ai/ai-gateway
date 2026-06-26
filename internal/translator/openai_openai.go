@@ -216,19 +216,9 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(e
 			// Store the response model for future batches
 			o.streamingResponseModel = event.Model
 		}
-		if usage := event.Usage; usage != nil {
-			tokenUsage.SetInputTokens(uint32(usage.PromptTokens))      //nolint:gosec
-			tokenUsage.SetOutputTokens(uint32(usage.CompletionTokens)) //nolint:gosec
-			tokenUsage.SetTotalTokens(uint32(usage.TotalTokens))       //nolint:gosec
-			if usage.PromptTokensDetails != nil {
-				tokenUsage.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))               //nolint:gosec
-				tokenUsage.SetCacheCreationInputTokens(uint32(usage.PromptTokensDetails.CacheCreationTokens)) //nolint:gosec
-			}
-			if usage.CompletionTokensDetails != nil {
-				tokenUsage.SetReasoningTokens(uint32(usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
-			}
-			// Do not mark buffering done; keep scanning to return the latest usage in this batch.
-		}
+		// Capture usage from any chunk that carries it; keep scanning so the latest
+		// usage in this batch wins (do not mark buffering done).
+		setOpenAIStreamUsage(&tokenUsage, event.Usage)
 	}
 }
 
