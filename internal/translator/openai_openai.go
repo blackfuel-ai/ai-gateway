@@ -131,7 +131,7 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseHeaders(map[string]st
 // OpenAI supports model virtualization through automatic routing and resolution,
 // so we return the actual model from the response body which may differ from the requested model
 // (e.g., request "gpt-4o" → response "gpt-4o-2024-08-06").
-func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]string, body io.Reader, endOfStream bool, span tracingapi.ChatCompletionSpan) (
+func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracingapi.ChatCompletionSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if o.stream {
@@ -141,7 +141,7 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]str
 			return nil, nil, tokenUsage, o.requestModel, fmt.Errorf("failed to read body: %w", err)
 		}
 		o.buffered = append(o.buffered, buf...)
-		tokenUsage = o.extractUsageFromBufferEvent(endOfStream, span)
+		tokenUsage = o.extractUsageFromBufferEvent(span)
 		// Use stored streaming response model, fallback to request model for non-compliant backends
 		responseModel = cmp.Or(o.streamingResponseModel, o.requestModel)
 		return
@@ -186,21 +186,15 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]str
 }
 
 // extractUsageFromBufferEvent extracts the token usage from the buffered event.
-// It scans complete lines and returns the latest usage found in this batch. At
-// endOfStream the final line is flushed even without a trailing newline, because a
-// provider may close the stream immediately after the usage chunk.
-func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(endOfStream bool, span tracingapi.ChatCompletionSpan) (tokenUsage metrics.TokenUsage) {
+// It scans complete lines and returns the latest usage found in this batch.
+func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(span tracingapi.ChatCompletionSpan) (tokenUsage metrics.TokenUsage) {
 	for {
-		var line []byte
-		if i := bytes.IndexByte(o.buffered, '\n'); i >= 0 {
-			line = o.buffered[:i]
-			o.buffered = o.buffered[i+1:]
-		} else if endOfStream && len(o.buffered) > 0 {
-			line = o.buffered
-			o.buffered = nil
-		} else {
+		i := bytes.IndexByte(o.buffered, '\n')
+		if i == -1 {
 			return
 		}
+		line := o.buffered[:i]
+		o.buffered = o.buffered[i+1:]
 		data, ok := cutSSEDataPrefix(line)
 		if !ok {
 			continue
