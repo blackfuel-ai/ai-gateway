@@ -697,7 +697,13 @@ func (s *openAIStreamToAnthropicState) processBuffer(out *[]byte, endOfStream bo
 func (s *openAIStreamToAnthropicState) processEventBlock(block []byte, out *[]byte) error {
 	var eventData []byte
 	for line := range bytes.SplitSeq(block, []byte("\n")) {
-		if after, ok := bytes.CutPrefix(line, sseDataPrefix); ok {
+		// The space after "data:" is optional per the SSE spec (a single leading
+		// space is stripped if present), so accept both "data: {…}" and "data:{…}".
+		after, ok := bytes.CutPrefix(line, sseDataPrefix)
+		if !ok {
+			after, ok = bytes.CutPrefix(line, sseDataPrefixNoSpace)
+		}
+		if ok {
 			data := bytes.TrimSpace(after)
 			if len(data) > 0 {
 				eventData = data
