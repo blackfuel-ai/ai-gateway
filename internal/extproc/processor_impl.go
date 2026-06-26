@@ -636,19 +636,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		out, _ := u.costs.OutputTokens()
 		u.metrics.RecordTokenLatency(ctx, out, body.EndOfStream, u.requestHeaders)
 		// Emit usage once at end-of-stream using final totals.
-		//
-		// Detach the request context with context.WithoutCancel before recording:
-		// on long-running streams the downstream client can cancel ctx between the
-		// last data delivery and the EndOfStream chunk, which causes some OTEL
-		// readers/exporters to silently drop the gen_ai.client.token.usage
-		// observation even though EndOfStream did fire (upstream envoyproxy/
-		// ai-gateway#2115). The access-log / dynamic-metadata billing path is
-		// emitted synchronously in this ProcessingResponse and is unaffected.
 		if body.EndOfStream {
-			u.metrics.RecordTokenUsage(context.WithoutCancel(ctx), u.costs, u.requestHeaders)
+			u.metrics.RecordTokenUsage(ctx, u.costs, u.requestHeaders)
 		}
 	} else {
-		u.metrics.RecordTokenUsage(context.WithoutCancel(ctx), u.costs, u.requestHeaders)
+		u.metrics.RecordTokenUsage(ctx, u.costs, u.requestHeaders)
 	}
 
 	// Mirror (shadow) backends must not emit LLMRequestCost dynamic metadata: the primary

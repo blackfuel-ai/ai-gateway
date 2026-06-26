@@ -183,12 +183,6 @@ type mockMetrics struct {
 	cachedInputTokenCount        int
 	cacheCreationInputTokenCount int
 	outputTokenCount             int
-	// recordTokenUsageCallCount tracks how many times RecordTokenUsage was invoked.
-	// Useful for asserting idempotent / single emission for streaming responses.
-	recordTokenUsageCallCount int
-	// recordTokenUsageCtxErrs captures ctx.Err() observed at each RecordTokenUsage
-	// invocation so tests can verify the context was detached from cancellation.
-	recordTokenUsageCtxErrs []error
 	// streamingOutputTokens tracks the cumulative output tokens recorded via RecordTokenLatency.
 	streamingOutputTokens int
 	timeToFirstToken      float64
@@ -219,9 +213,7 @@ func (m *mockMetrics) SetResponseModel(responseModel internalapi.ResponseModel) 
 func (m *mockMetrics) SetBackend(backend *filterapi.Backend) { m.backend = backend.Name }
 
 // RecordTokenUsage implements [metrics.Metrics].
-func (m *mockMetrics) RecordTokenUsage(ctx context.Context, usage metrics.TokenUsage, _ map[string]string) {
-	m.recordTokenUsageCallCount++
-	m.recordTokenUsageCtxErrs = append(m.recordTokenUsageCtxErrs, ctx.Err())
+func (m *mockMetrics) RecordTokenUsage(_ context.Context, usage metrics.TokenUsage, _ map[string]string) {
 	if input, ok := usage.InputTokens(); ok {
 		m.inputTokenCount += int(input)
 	}
