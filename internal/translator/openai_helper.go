@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/utils/ptr"
-
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -739,21 +737,25 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 		s.model = chunk.Model
 	}
 
-	// Usage-only chunk (emitted when stream_options.include_usage=true)
-	// One of the two ways to indicate stream end (other is endOfStream)
-	if len(chunk.Choices) == 0 && chunk.Usage != nil {
+	// Capture token usage from any chunk that carries it — including the final content
+	// chunk (non-empty choices + finish_reason), the framing OpenRouter/GLM-5.2 uses on
+	// the /v1/messages path. OpenAI accounting (setOpenAIStreamUsage): prompt_tokens
+	// already includes cached tokens. Latest-wins; setting (not accumulating) avoids
+	// double-counting if a trailing usage-only chunk also arrives.
+	if chunk.Usage != nil {
 		s.inputTokens = chunk.Usage.PromptTokens
 		s.outputTokens = chunk.Usage.CompletionTokens
-		s.tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
-			int64(s.inputTokens),
-			int64(s.outputTokens),
-			ptr.To(int64(0)),
-			ptr.To(int64(0)),
-		)
-		return s.emitClosingEvents(out)
+		setOpenAIStreamUsage(&s.tokenUsage, chunk.Usage)
 	}
 
+	// A usage-only chunk (empty choices, emitted when stream_options.include_usage=true)
+	// is one of the two stream-end signals (the other is endOfStream) — emit closing
+	// events. A chunk with non-empty choices is still processed below even if it carried
+	// usage, so its content and finish_reason are not dropped.
 	if len(chunk.Choices) == 0 {
+		if chunk.Usage != nil {
+			return s.emitClosingEvents(out)
+		}
 		return nil
 	}
 

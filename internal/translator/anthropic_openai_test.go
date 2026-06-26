@@ -389,6 +389,64 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)
 }
 
+// TestAnthropicToOpenAITranslator_ResponseBody_Streaming_UsageOnFinishReasonChunk covers
+// the OpenRouter/GLM-5.2 streaming framing on the /v1/messages path: the upstream attaches
+// the usage object to the final content chunk (non-empty choices + finish_reason), with no
+// dedicated choices:[] usage-only chunk. The anthropic→OpenAI translator must still capture
+// genai_tokens_* from that chunk (incl. cached/reasoning subsets). RED before the
+// handleChunk fix (usage dropped → zero tokens), GREEN after.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_UsageOnFinishReasonChunk(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Usage rides on the finish_reason chunk (non-empty choices); no separate usage-only
+	// chunk. cached_tokens/reasoning_tokens mirror GLM-5.2's shape.
+	input := "data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello!\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15,\"prompt_tokens_details\":{\"cached_tokens\":4},\"completion_tokens_details\":{\"reasoning_tokens\":2}}}\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, tokenUsage, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	// Billing surface: usage captured from the finish_reason chunk (the fix).
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	totalTokens, totalSet := tokenUsage.TotalTokens()
+	require.True(t, inputSet)
+	require.True(t, outputSet)
+	require.True(t, totalSet)
+	assert.Equal(t, uint32(10), inputTokens)
+	assert.Equal(t, uint32(5), outputTokens)
+	assert.Equal(t, uint32(15), totalTokens)
+	// Parity: cached/reasoning subsets flow through on the /v1/messages path.
+	cached, cachedSet := tokenUsage.CachedInputTokens()
+	reasoning, reasoningSet := tokenUsage.ReasoningTokens()
+	require.True(t, cachedSet)
+	require.True(t, reasoningSet)
+	assert.Equal(t, uint32(4), cached)
+	assert.Equal(t, uint32(2), reasoning)
+
+	// Reconstructed Anthropic stream still closes correctly with the output token count.
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	assert.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`, events[4].data)
+	assert.Equal(t, "message_stop", events[5].eventType)
+}
+
 // The space after "data:" is optional per the SSE spec, so a backend emitting the
 // compact "data:{…}" framing must still have its usage-only chunk extracted rather
 // than silently dropped (BLA-2215).
