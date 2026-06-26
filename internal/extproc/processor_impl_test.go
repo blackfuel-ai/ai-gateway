@@ -631,6 +631,109 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		require.Equal(t, 138, mm.streamingOutputTokens) // accumulated output tokens from stream
 		require.Equal(t, 3, mm.cachedInputTokenCount)
 		require.Equal(t, 21, mm.cacheCreationInputTokenCount)
+		// Token usage should be recorded exactly once for the whole stream.
+		require.Equal(t, 1, mm.recordTokenUsageCallCount)
+	})
+
+	// Reproducer for the streaming OTEL token-usage drop bug
+	// (envoyproxy/ai-gateway#2115).
+	//
+	// In production we observed ~28% of long-running streaming Sonnet requests
+	// missing from gen_ai_client_token_usage_sum even though the access log
+	// (also gated on EndOfStream) captured 100% of them. The suspected cause is
+	// the request context being cancelled by the downstream client between the
+	// last data delivery and the EndOfStream chunk, which causes the OTEL
+	// Histogram.Record observation to be silently dropped by some readers.
+	//
+	// The fix detaches the request context with context.WithoutCancel before
+	// recording, so a cancelled downstream stream cannot drop the observation.
+	t.Run("streaming records usage with cancelled ctx at EndOfStream (H2)", func(t *testing.T) {
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "200"},
+			parent: &chatCompletionProcessorRouterFilter{
+				stream: true,
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+		// Mid-stream chunk parses message_start usage but is not EndOfStream.
+		mid := &extprocv3.HttpBody{Body: []byte("chunk-mid"), EndOfStream: false}
+		mt.expResponseBody = mid
+		mt.retUsedToken = metrics.TokenUsage{}
+		mt.retUsedToken.SetInputTokens(59241)
+		mt.retUsedToken.SetCachedInputTokens(0)
+		mt.retUsedToken.SetCacheCreationInputTokens(59238)
+		mt.retUsedToken.SetOutputTokens(1)
+		_, err := p.ProcessResponseBody(t.Context(), mid)
+		require.NoError(t, err)
+		require.Zero(t, mm.recordTokenUsageCallCount)
+
+		// Final chunk arrives with the request context already cancelled.
+		// This simulates a long-running stream where the downstream client has
+		// torn down its half of the HTTP/2 connection before the upstream
+		// finishes.
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		final := &extprocv3.HttpBody{Body: []byte("chunk-final"), EndOfStream: true}
+		mt.expResponseBody = final
+		// Translator returns the cumulative usage including final output.
+		mt.retUsedToken = metrics.TokenUsage{}
+		mt.retUsedToken.SetInputTokens(59241)
+		mt.retUsedToken.SetCachedInputTokens(0)
+		mt.retUsedToken.SetCacheCreationInputTokens(59238)
+		mt.retUsedToken.SetOutputTokens(341)
+		mt.retUsedToken.SetTotalTokens(59582)
+
+		_, err = p.ProcessResponseBody(ctx, final)
+		require.NoError(t, err)
+		// Token usage MUST be recorded exactly once at EndOfStream.
+		require.Equal(t, 1, mm.recordTokenUsageCallCount,
+			"RecordTokenUsage must be called exactly once at EndOfStream even when ctx is cancelled")
+		// And the ctx passed to RecordTokenUsage MUST not be cancelled (must be
+		// detached from the request ctx) so the OTEL meter cannot drop the
+		// observation due to ctx cancellation.
+		require.Len(t, mm.recordTokenUsageCtxErrs, 1)
+		require.NoErrorf(t, mm.recordTokenUsageCtxErrs[0],
+			"ctx passed to RecordTokenUsage must be detached from cancellation; got: %v", mm.recordTokenUsageCtxErrs[0])
+		// Final accumulated values must be emitted.
+		require.Equal(t, 59241, mm.inputTokenCount)
+		require.Equal(t, 0, mm.cachedInputTokenCount)
+		require.Equal(t, 59238, mm.cacheCreationInputTokenCount)
+		require.Equal(t, 341, mm.outputTokenCount)
+	})
+
+	// Non-streaming responses must continue to record token usage exactly once
+	// and (now) with a detached context.
+	t.Run("non-streaming records usage once with detached ctx", func(t *testing.T) {
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "200"},
+			parent: &chatCompletionProcessorRouterFilter{
+				stream: false,
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+		body := &extprocv3.HttpBody{Body: []byte("body"), EndOfStream: true}
+		mt.expResponseBody = body
+		mt.retUsedToken = metrics.TokenUsage{}
+		mt.retUsedToken.SetInputTokens(10)
+		mt.retUsedToken.SetOutputTokens(20)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel before invoking, to validate ctx detachment.
+		_, err := p.ProcessResponseBody(ctx, body)
+		require.NoError(t, err)
+		require.Equal(t, 1, mm.recordTokenUsageCallCount)
+		require.Len(t, mm.recordTokenUsageCtxErrs, 1)
+		require.NoError(t, mm.recordTokenUsageCtxErrs[0],
+			"ctx passed to RecordTokenUsage must be detached from cancellation")
 	})
 }
 
