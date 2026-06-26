@@ -84,7 +84,7 @@ func (a *anthropicToAnthropicTranslator) ResponseHeaders(_ map[string]string) (
 }
 
 // ResponseBody implements [AnthropicMessagesTranslator.ResponseBody].
-func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, endOfStream bool, span tracingapi.MessageSpan) (
+func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracingapi.MessageSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if a.stream {
@@ -95,7 +95,7 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 		}
 
 		a.buffered = append(a.buffered, buf...)
-		a.extractUsageFromBufferEvent(endOfStream, span)
+		a.extractUsageFromBufferEvent(span)
 		// Use stored streaming response model, fallback to request model for non-compliant backends
 		responseModel = cmp.Or(a.streamingResponseModel, a.requestModel)
 		return nil, nil, a.streamingTokenUsage, responseModel, nil
@@ -130,23 +130,17 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 }
 
 // extractUsageFromBufferEvent extracts the token usage from the buffered event.
-// It scans complete lines and accumulates usage from all events in this batch. At
-// endOfStream the final line is flushed even without a trailing newline, because a
-// provider may close the stream immediately after the usage chunk.
-func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent(endOfStream bool, s tracingapi.MessageSpan) {
+// It scans complete lines and accumulates usage from all events in this batch.
+func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent(s tracingapi.MessageSpan) {
 	for {
-		var line []byte
-		if i := bytes.IndexByte(a.buffered, '\n'); i >= 0 {
-			line = a.buffered[:i]
-			a.buffered = a.buffered[i+1:]
-		} else if endOfStream && len(a.buffered) > 0 {
-			line = a.buffered
-			a.buffered = nil
-		} else {
+		i := bytes.IndexByte(a.buffered, '\n')
+		if i == -1 {
 			// Recalculate total tokens before returning
 			a.updateTotalTokens()
 			return
 		}
+		line := a.buffered[:i]
+		a.buffered = a.buffered[i+1:]
 		data, ok := cutSSEDataPrefix(line)
 		if !ok {
 			continue
