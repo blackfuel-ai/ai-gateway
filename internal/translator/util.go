@@ -12,6 +12,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/json"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 )
 
 const (
@@ -25,9 +26,12 @@ const (
 )
 
 var (
-	sseDataPrefix   = []byte("data: ")
-	sseDoneMessage  = []byte("[DONE]")
-	sseDoneFullLine = append(append(sseDataPrefix, sseDoneMessage...), '\n')
+	sseDataPrefix = []byte("data: ")
+	// sseDataPrefixNoSpace matches the compact "data:" form (the space after the
+	// colon is optional per the SSE spec); used as a fallback when parsing events.
+	sseDataPrefixNoSpace = []byte("data:")
+	sseDoneMessage       = []byte("[DONE]")
+	sseDoneFullLine      = append(append(sseDataPrefix, sseDoneMessage...), '\n')
 )
 
 // regDataURI follows the web uri regex definition.
@@ -57,6 +61,28 @@ func systemMsgToDeveloperMsg(msg openai.ChatCompletionSystemMessageParam) openai
 		Name:    msg.Name,
 		Role:    openai.ChatMessageRoleDeveloper,
 		Content: msg.Content,
+	}
+}
+
+// setOpenAIStreamUsage copies OpenAI streaming usage into the metrics TokenUsage using
+// OpenAI accounting, where prompt_tokens already includes cached tokens (cached and
+// reasoning are informational subsets, not added to input). Shared by the OpenAI-native
+// and the anthropic→OpenAI streaming paths so usage is read identically from any chunk
+// that carries it — including the final content chunk (non-empty choices + finish_reason),
+// the framing OpenRouter/GLM-5.2 uses. No-op when usage is nil.
+func setOpenAIStreamUsage(tu *metrics.TokenUsage, usage *openai.Usage) {
+	if usage == nil {
+		return
+	}
+	tu.SetInputTokens(uint32(usage.PromptTokens))      //nolint:gosec
+	tu.SetOutputTokens(uint32(usage.CompletionTokens)) //nolint:gosec
+	tu.SetTotalTokens(uint32(usage.TotalTokens))       //nolint:gosec
+	if usage.PromptTokensDetails != nil {
+		tu.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))               //nolint:gosec
+		tu.SetCacheCreationInputTokens(uint32(usage.PromptTokensDetails.CacheCreationTokens)) //nolint:gosec
+	}
+	if usage.CompletionTokensDetails != nil {
+		tu.SetReasoningTokens(uint32(usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
 	}
 }
 

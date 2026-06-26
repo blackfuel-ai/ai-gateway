@@ -436,16 +436,27 @@ func TestExtractUsageFromBufferEvent(t *testing.T) {
 		s := &testotel.MockSpan{}
 		o := &openAIToOpenAITranslatorV1ChatCompletion{}
 		o.buffered = []byte("data: {\"usage\": {\"total_tokens\": 42}}\n")
-		usedToken := o.extractUsageFromBufferEvent(s)
+		usedToken := o.extractUsageFromBufferEvent(false, s)
 		require.Equal(t, tokenUsageFrom(0, -1, -1, 0, 42, -1), usedToken)
 		require.Empty(t, o.buffered)
 		require.Len(t, s.RespChunks, 1)
 	})
 
+	t.Run("usage on finish_reason chunk (non-empty choices)", func(t *testing.T) {
+		// OpenRouter/GLM-5.2 framing: usage rides on the final content chunk (non-empty
+		// choices + finish_reason), with no dedicated choices:[] usage chunk. The
+		// OpenAI-native extractor reads usage from any chunk, so this guards the path.
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		o.buffered = []byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n")
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
+		require.Equal(t, tokenUsageFrom(10, -1, -1, 5, 15, -1), usedToken)
+		require.Empty(t, o.buffered)
+	})
+
 	t.Run("valid usage data after invalid", func(t *testing.T) {
 		o := &openAIToOpenAITranslatorV1ChatCompletion{}
 		o.buffered = []byte("data: invalid\ndata: {\"usage\": {\"total_tokens\": 42}}\n")
-		usedToken := o.extractUsageFromBufferEvent(nil)
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
 		require.Equal(t, tokenUsageFrom(0, -1, -1, 0, 42, -1), usedToken)
 		require.Empty(t, o.buffered)
 	})
@@ -453,12 +464,12 @@ func TestExtractUsageFromBufferEvent(t *testing.T) {
 	t.Run("no usage data and then become valid", func(t *testing.T) {
 		o := &openAIToOpenAITranslatorV1ChatCompletion{}
 		o.buffered = []byte("data: {}\n\ndata: ")
-		usedToken := o.extractUsageFromBufferEvent(nil)
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
 		require.Equal(t, tokenUsageFrom(-1, -1, -1, -1, -1, -1), usedToken)
 		require.GreaterOrEqual(t, len(o.buffered), 1)
 
 		o.buffered = append(o.buffered, []byte("{\"usage\": {\"total_tokens\": 42}}\n")...)
-		usedToken = o.extractUsageFromBufferEvent(nil)
+		usedToken = o.extractUsageFromBufferEvent(false, nil)
 		require.Equal(t, tokenUsageFrom(0, -1, -1, 0, 42, -1), usedToken)
 		require.Empty(t, o.buffered)
 	})
@@ -466,7 +477,7 @@ func TestExtractUsageFromBufferEvent(t *testing.T) {
 	t.Run("valid usage data with cached tokens", func(t *testing.T) {
 		o := &openAIToOpenAITranslatorV1ChatCompletion{}
 		o.buffered = []byte("data: {\"usage\": {\"prompt_tokens\": 5, \"completion_tokens\": 3, \"total_tokens\": 8, \"prompt_tokens_details\": {\"cached_tokens\": 2, \"cache_creation_input_tokens\": 1}}}\n")
-		usedToken := o.extractUsageFromBufferEvent(nil)
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
 		require.Equal(t, tokenUsageFrom(5, 2, 1, 3, 8, -1), usedToken)
 		require.Empty(t, o.buffered)
 	})
@@ -474,7 +485,7 @@ func TestExtractUsageFromBufferEvent(t *testing.T) {
 	t.Run("valid usage data with reasoning tokens", func(t *testing.T) {
 		o := &openAIToOpenAITranslatorV1ChatCompletion{}
 		o.buffered = []byte("data: {\"usage\": {\"prompt_tokens\": 10, \"completion_tokens\": 20, \"total_tokens\": 30, \"completion_tokens_details\": {\"reasoning_tokens\": 8}}}\n")
-		usedToken := o.extractUsageFromBufferEvent(nil)
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
 		require.Equal(t, tokenUsageFrom(10, -1, -1, 20, 30, 8), usedToken)
 		require.Empty(t, o.buffered)
 	})
@@ -482,9 +493,88 @@ func TestExtractUsageFromBufferEvent(t *testing.T) {
 	t.Run("invalid JSON", func(t *testing.T) {
 		o := &openAIToOpenAITranslatorV1ChatCompletion{}
 		o.buffered = []byte("data: invalid\n")
-		usedToken := o.extractUsageFromBufferEvent(nil)
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
 		require.Equal(t, tokenUsageFrom(-1, -1, -1, -1, -1, -1), usedToken)
 		require.Empty(t, o.buffered)
+	})
+
+	// The SSE spec makes the space after "data:" optional (a single leading space
+	// is stripped if present), so the compact "data:{…}" form must parse too.
+	t.Run("compact data prefix without space", func(t *testing.T) {
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		o.buffered = []byte("data:{\"usage\": {\"total_tokens\": 42}}\n")
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
+		require.Equal(t, tokenUsageFrom(0, -1, -1, 0, 42, -1), usedToken)
+		require.Empty(t, o.buffered)
+	})
+
+	// At end-of-stream the final event may arrive without a trailing newline (the
+	// upstream can close the connection right after the usage chunk); it must be
+	// flushed rather than left stranded in the buffer.
+	t.Run("end-of-stream flushes unterminated final line", func(t *testing.T) {
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		o.buffered = []byte("data: {\"usage\": {\"total_tokens\": 42}}")
+		usedToken := o.extractUsageFromBufferEvent(true, nil)
+		require.Equal(t, tokenUsageFrom(0, -1, -1, 0, 42, -1), usedToken)
+		require.Empty(t, o.buffered)
+	})
+
+	// Both gaps at once: compact prefix AND no trailing newline, at end-of-stream.
+	t.Run("end-of-stream flushes compact unterminated final line", func(t *testing.T) {
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		o.buffered = []byte("data:{\"usage\": {\"total_tokens\": 42}}")
+		usedToken := o.extractUsageFromBufferEvent(true, nil)
+		require.Equal(t, tokenUsageFrom(0, -1, -1, 0, 42, -1), usedToken)
+		require.Empty(t, o.buffered)
+	})
+
+	// Guard: a trailing line WITHOUT a newline must NOT be force-parsed mid-stream;
+	// it stays buffered until either its newline arrives or the stream ends.
+	t.Run("mid-stream incomplete line stays buffered", func(t *testing.T) {
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		o.buffered = []byte("data: {\"usage\": {\"total_tokens\": 42}}")
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
+		require.Equal(t, tokenUsageFrom(-1, -1, -1, -1, -1, -1), usedToken)
+		require.NotEmpty(t, o.buffered)
+
+		// Once the terminating newline arrives, the buffered line is parsed.
+		o.buffered = append(o.buffered, '\n')
+		usedToken = o.extractUsageFromBufferEvent(false, nil)
+		require.Equal(t, tokenUsageFrom(0, -1, -1, 0, 42, -1), usedToken)
+		require.Empty(t, o.buffered)
+	})
+}
+
+// TestResponseBodyStreaming_UsageFraming exercises the public streaming ResponseBody
+// entry point for SSE-framing variants that carry usage but previously defeated the
+// extractor: a compact "data:" prefix and a usage chunk delivered as the final line
+// with no trailing newline (relying on ResponseBody threading endOfStream through).
+func TestResponseBodyStreaming_UsageFraming(t *testing.T) {
+	const usage = `{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`
+	want := tokenUsageFrom(11, -1, -1, 7, 18, -1)
+
+	newStreaming := func(t *testing.T) *openAIToOpenAITranslatorV1ChatCompletion {
+		tr := NewChatCompletionOpenAIToOpenAITranslator("v1", "").(*openAIToOpenAITranslatorV1ChatCompletion)
+		_, _, err := tr.RequestBody(nil, &openai.ChatCompletionRequest{Model: "m", Stream: true}, false)
+		require.NoError(t, err)
+		return tr
+	}
+
+	t.Run("compact data prefix", func(t *testing.T) {
+		tr := newStreaming(t)
+		body := "data:" + usage + "\n\ndata: [DONE]\n\n"
+		_, _, tokenUsage, _, err := tr.ResponseBody(nil, bytes.NewReader([]byte(body)), true, nil)
+		require.NoError(t, err)
+		require.Equal(t, want, tokenUsage)
+	})
+
+	t.Run("unterminated final line at end-of-stream", func(t *testing.T) {
+		tr := newStreaming(t)
+		// Final usage line, no trailing newline, no [DONE]; only end-of-stream flushes it.
+		body := "data: " + usage
+		_, _, tokenUsage, _, err := tr.ResponseBody(nil, bytes.NewReader([]byte(body)), true, nil)
+		require.NoError(t, err)
+		require.Equal(t, want, tokenUsage)
 	})
 }
 
