@@ -256,12 +256,45 @@ func TestAnthropicSystemPromptToText(t *testing.T) {
 			system:   &anthropic.SystemPrompt{},
 			expected: "",
 		},
+		{
+			name:     "no billing header is unchanged",
+			system:   &anthropic.SystemPrompt{Text: "Line 1\nLine 2"},
+			expected: "Line 1\nLine 2",
+		},
+		{
+			name:     "strips billing header line, keeps surrounding content",
+			system:   &anthropic.SystemPrompt{Text: "Line 1\nx-anthropic-billing-header: cc_version=2.1.92; cch=8ae40;\nLine 3"},
+			expected: "Line 1\nLine 3",
+		},
+		{
+			name:     "strips billing header at end without trailing newline",
+			system:   &anthropic.SystemPrompt{Text: "Some prompt\nx-anthropic-billing-header: cc_version=2.1.92; cch=abc;"},
+			expected: "Some prompt\n",
+		},
+		{
+			name: "strips billing header from array form",
+			system: &anthropic.SystemPrompt{
+				Texts: []anthropic.TextBlockParam{
+					{Text: "You are helpful.\n"},
+					{Text: "x-anthropic-billing-header: cc_version=2.1.92; cch=8ae40;\n"},
+				},
+			},
+			expected: "You are helpful.\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, anthropicSystemPromptToText(tt.system))
 		})
 	}
+
+	// Regression guard: prompts differing only by the per-turn cch= hash must
+	// produce identical output, so the system prompt stays stable for prefix caching.
+	t.Run("different cch values produce identical output", func(t *testing.T) {
+		r1 := anthropicSystemPromptToText(&anthropic.SystemPrompt{Text: "prefix\nx-anthropic-billing-header: cc_version=2.1.92; cch=8ae40;\nsuffix"})
+		r2 := anthropicSystemPromptToText(&anthropic.SystemPrompt{Text: "prefix\nx-anthropic-billing-header: cc_version=2.1.92; cch=4e20a;\nsuffix"})
+		assert.Equal(t, r1, r2)
+	})
 }
 
 func TestAnthropicContentToText(t *testing.T) {

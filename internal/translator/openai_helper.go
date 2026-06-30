@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
@@ -288,17 +289,22 @@ func toolResultToText(tr *anthropic.ToolResultBlockParam) string {
 	return sb.String()
 }
 
+// billingHeaderRe matches the x-anthropic-billing-header line that Claude Code
+// injects into the system prompt. Its cch= hash changes every turn, which breaks
+// vLLM/OpenAI-compatible prefix caching, so we strip it on the OpenAI translation path.
+var billingHeaderRe = regexp.MustCompile(`(?m)^x-anthropic-billing-header:[^\n]*\n?`)
+
 // anthropicSystemPromptToText extracts a plain string from an Anthropic system prompt,
 // concatenating text blocks if the prompt is in array form.
 func anthropicSystemPromptToText(s *anthropic.SystemPrompt) string {
 	if s.Text != "" {
-		return s.Text
+		return billingHeaderRe.ReplaceAllString(s.Text, "")
 	}
 	var sb strings.Builder
 	for _, t := range s.Texts {
 		sb.WriteString(t.Text)
 	}
-	return sb.String()
+	return billingHeaderRe.ReplaceAllString(sb.String(), "")
 }
 
 // anthropicContentToText extracts a plain text string from Anthropic message content.
