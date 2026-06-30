@@ -17,6 +17,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
@@ -80,11 +81,16 @@ func TestAnthropicToOpenAITranslator_RequestBody(t *testing.T) {
 			require.NotNil(t, headers)
 			require.NotNil(t, body)
 
-			// Verify the two headers: path and content-length.
-			require.Len(t, headers, 2)
+			// Verify the headers: path, content-length, and the two original-path
+			// headers that must track the rewritten :path (BLA-2364).
+			require.Len(t, headers, 4)
 			assert.Equal(t, pathHeaderName, headers[0].Key())
 			assert.Equal(t, "/v1/chat/completions", headers[0].Value())
 			assert.Equal(t, contentLengthHeaderName, headers[1].Key())
+			assert.Equal(t, internalapi.OriginalPathHeader, headers[2].Key())
+			assert.Equal(t, "/v1/chat/completions", headers[2].Value())
+			assert.Equal(t, internalapi.EnvoyOriginalPathHeader, headers[3].Key())
+			assert.Equal(t, "/v1/chat/completions", headers[3].Value())
 
 			// Verify body contains the correct model.
 			var req map[string]any
@@ -130,9 +136,14 @@ func TestAnthropicToOpenAITranslator_RequestBody_CustomPrefix(t *testing.T) {
 			}, false)
 			require.NoError(t, err)
 			require.NotNil(t, body)
-			require.Len(t, headers, 2)
+			require.Len(t, headers, 4)
 			assert.Equal(t, pathHeaderName, headers[0].Key())
 			assert.Equal(t, tt.wantPath, headers[0].Value())
+			// The original-path headers track the prefix-aware rewritten path (BLA-2364).
+			assert.Equal(t, internalapi.OriginalPathHeader, headers[2].Key())
+			assert.Equal(t, tt.wantPath, headers[2].Value())
+			assert.Equal(t, internalapi.EnvoyOriginalPathHeader, headers[3].Key())
+			assert.Equal(t, tt.wantPath, headers[3].Value())
 		})
 	}
 }
@@ -1019,7 +1030,7 @@ func TestAnthropicToOpenAITranslator_RequestBody_ThinkingConfig(t *testing.T) {
 	headers, newBody, err := translator.RequestBody(nil, body, false)
 	require.NoError(t, err)
 	require.NotNil(t, newBody)
-	require.Len(t, headers, 2)
+	require.Len(t, headers, 4)
 
 	var req map[string]any
 	require.NoError(t, json.Unmarshal(newBody, &req))
