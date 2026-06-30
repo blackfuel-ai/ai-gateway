@@ -247,6 +247,26 @@ func TestWithTestUpstream(t *testing.T) {
 			expResponseBody: `{"choices":[{"message":{"content":"This is a test."}}]}`,
 		},
 		{
+			// BLA-2364: an Anthropic /v1/messages request to an OpenAI backend is translated
+			// to /v1/chat/completions, and the original-path header the translator emits must
+			// follow the rewritten path. A downstream (two-tier) extproc selects its processor
+			// by x-ai-eg-original-path, so a stale /v1/messages there yields "unsupported path".
+			name:        "anthropic /anthropic/v1/messages to openai backend keeps original-path consistent",
+			backend:     "openai",
+			path:        "/anthropic/v1/messages",
+			method:      http.MethodPost,
+			requestBody: `{"model":"something","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`,
+			expPath:     "/v1/chat/completions",
+			expRequestHeaders: map[string]string{
+				"x-ai-eg-original-path": "/v1/chat/completions",
+			},
+			responseBody: `{"id":"chatcmpl-x","object":"chat.completion","created":123,"model":"something","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hi there"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			expStatus:    http.StatusOK,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				require.Contains(t, string(body), "Hi there")
+			},
+		},
+		{
 			name:            "openai - /v1/chat/completions - gzip",
 			backend:         "openai",
 			responseType:    "gzip",
