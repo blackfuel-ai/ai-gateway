@@ -645,7 +645,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_TextStreaming(t *testing.T) 
 	require.JSONEq(t, `{"type":"content_block_stop","index":0}`, events[4].data)
 
 	assert.Equal(t, "message_delta", events[5].eventType)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`, events[5].data)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[5].data)
 
 	assert.Equal(t, "message_stop", events[6].eventType)
 	require.JSONEq(t, `{"type":"message_stop"}`, events[6].data)
@@ -689,7 +689,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallStreaming(t *testing
 	require.JSONEq(t, `{"type":"content_block_stop","index":0}`, events[3].data)
 
 	assert.Equal(t, "message_delta", events[4].eventType)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":10}}`, events[4].data)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":15,"output_tokens":10}}`, events[4].data)
 
 	assert.Equal(t, "message_stop", events[5].eventType)
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)

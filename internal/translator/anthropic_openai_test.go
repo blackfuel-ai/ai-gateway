@@ -396,7 +396,7 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
 
 	// Spot-check specific event data.
 	require.JSONEq(t, `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello!"}}`, events[2].data)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`, events[4].data)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)
 }
 
@@ -454,7 +454,7 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_UsageOnFinishReasonC
 	events := parseSSEEventsFromBytes(body)
 	require.Len(t, events, 6)
 	assert.Equal(t, "message_delta", events[4].eventType)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`, events[4].data)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_read_input_tokens":4,"output_tokens":5}}`, events[4].data)
 	assert.Equal(t, "message_stop", events[5].eventType)
 }
 
@@ -500,7 +500,7 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_CompactDataPrefix(t 
 	events := parseSSEEventsFromBytes(body)
 	require.Len(t, events, 6)
 	assert.Equal(t, "message_delta", events[4].eventType)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`, events[4].data)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
 }
 
 func TestAnthropicToOpenAITranslator_ResponseBody_StreamingRequestModelFallback(t *testing.T) {
