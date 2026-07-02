@@ -836,7 +836,8 @@ func (s *openAIStreamToAnthropicState) emitMessageStart(out *[]byte) error {
 			Model:        cmp.Or(s.model, s.requestModel),
 			StopReason:   nil,
 			StopSequence: nil,
-			// Input tokens are not yet known; they will be reported in message_delta.usage.
+			// Input and cache token counts are not yet known here; they are reported on
+			// the message_delta event once the upstream usage chunk arrives.
 			Usage: sseMessageUsage{InputTokens: 0, OutputTokens: 0},
 		},
 	}
@@ -1069,6 +1070,9 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 	}
 
 	// Backfill input_tokens here (not message_start): OpenAI doesn't report it until now.
+	// OpenAI's cached_tokens/cache_creation_input_tokens are a breakdown within
+	// prompt_tokens, not additive like Anthropic's native cache fields, so we don't
+	// forward them here to avoid double-counting.
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
 		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil},
