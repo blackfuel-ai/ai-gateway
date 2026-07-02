@@ -797,7 +797,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_EndOfStreamClosing(t *testin
 		}
 	}
 	require.NotEmpty(t, msgDeltaData)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`, msgDeltaData)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}`, msgDeltaData)
 }
 
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_EmptyInput(t *testing.T) {

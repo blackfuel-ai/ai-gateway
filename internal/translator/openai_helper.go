@@ -538,6 +538,21 @@ type sseMessageUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
+// anthropicWireInputTokens converts OpenAI's gross prompt-token count (which already
+// includes any cached/cache-creation portion) into Anthropic's input_tokens semantics,
+// where cache_read_input_tokens/cache_creation_input_tokens are additive on top of
+// input_tokens. Reporting the raw gross count alongside the cache breakdown would have
+// an Anthropic-compliant client double-count the cached portion. Floored at zero since
+// the cache breakdown is sourced from a separate field on the same usage object and
+// could in principle exceed the gross count on a non-compliant backend.
+func anthropicWireInputTokens(gross int, cacheRead, cacheCreation uint32) int {
+	nonCache := gross - int(cacheRead) - int(cacheCreation)
+	if nonCache < 0 {
+		return 0
+	}
+	return nonCache
+}
+
 type sseContentBlockStartText struct {
 	Type         string       `json:"type"`
 	Index        int          `json:"index"`
@@ -634,8 +649,10 @@ type sseMessageDeltaBody struct {
 }
 
 type sseOutputUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens"`
 }
 
 type sseMessageStop struct {
@@ -876,7 +893,8 @@ func (s *openAIStreamToAnthropicState) emitMessageStart(out *[]byte) error {
 			Model:        cmp.Or(s.model, s.requestModel),
 			StopReason:   nil,
 			StopSequence: nil,
-			// Input tokens are not yet known; they will be reported in message_delta.usage.
+			// Input and cache token counts are not yet known here; they are reported on
+			// the message_delta event once the upstream usage chunk arrives.
 			Usage: sseMessageUsage{InputTokens: 0, OutputTokens: 0},
 		},
 	}
@@ -1108,13 +1126,20 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		stopReason = string(anthropic.StopReasonEndTurn)
 	}
 
-	// Backfill input_tokens here (not message_start): OpenAI doesn't report it until now.
+	// Emit message_delta with stop_reason and the final token usage. input_tokens and the
+	// cache fields ride message_delta because for OpenAI-backed streams the usage is not
+	// known until the terminal (or finish_reason) chunk, after message_start was emitted.
+	// Cache counts come from s.tokenUsage, populated by setOpenAIStreamUsage on capture.
+	cacheRead, _ := s.tokenUsage.CachedInputTokens()
+	cacheCreation, _ := s.tokenUsage.CacheCreationInputTokens()
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
 		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil},
 		Usage: sseOutputUsage{
-			InputTokens:  s.inputTokens,
-			OutputTokens: s.outputTokens,
+			InputTokens:              anthropicWireInputTokens(s.inputTokens, cacheRead, cacheCreation),
+			CacheReadInputTokens:     int(cacheRead),
+			CacheCreationInputTokens: int(cacheCreation),
+			OutputTokens:             s.outputTokens,
 		},
 	}
 	data, err := json.Marshal(msgDeltaPayload)
