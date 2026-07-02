@@ -634,7 +634,10 @@ type sseMessageDeltaBody struct {
 }
 
 type sseOutputUsage struct {
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens"`
 }
 
 type sseMessageStop struct {
@@ -832,7 +835,8 @@ func (s *openAIStreamToAnthropicState) emitMessageStart(out *[]byte) error {
 			Model:        cmp.Or(s.model, s.requestModel),
 			StopReason:   nil,
 			StopSequence: nil,
-			// Input tokens are not yet known; they will be reported in message_delta.usage.
+			// Input and cache token counts are not yet known here; they are reported on
+			// the message_delta event once the upstream usage chunk arrives.
 			Usage: sseMessageUsage{InputTokens: 0, OutputTokens: 0},
 		},
 	}
@@ -1064,11 +1068,21 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		stopReason = string(anthropic.StopReasonEndTurn)
 	}
 
-	// Emit message_delta with stop_reason and final output token count.
+	// Emit message_delta with stop_reason and the final token usage. input_tokens and the
+	// cache fields ride message_delta because for OpenAI-backed streams the usage is not
+	// known until the terminal (or finish_reason) chunk, after message_start was emitted.
+	// Cache counts come from s.tokenUsage, populated by setOpenAIStreamUsage on capture.
+	cacheRead, _ := s.tokenUsage.CachedInputTokens()
+	cacheCreation, _ := s.tokenUsage.CacheCreationInputTokens()
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
 		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil},
-		Usage: sseOutputUsage{OutputTokens: s.outputTokens},
+		Usage: sseOutputUsage{
+			InputTokens:              s.inputTokens,
+			CacheReadInputTokens:     int(cacheRead),
+			CacheCreationInputTokens: int(cacheCreation),
+			OutputTokens:             s.outputTokens,
+		},
 	}
 	data, err := json.Marshal(msgDeltaPayload)
 	if err != nil {
