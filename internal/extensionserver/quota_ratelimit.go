@@ -41,11 +41,31 @@ import (
 const (
 	// quotaRateLimitClusterName is the Envoy cluster name for the AI Gateway rate limit service.
 	quotaRateLimitClusterName = "ai_gateway_ratelimit_cluster"
-	// quotaRateLimitFilterName is the name of the rate limit HTTP filter inserted into the
-	// HCM filter chain for QuotaPolicy enforcement. The name uses a suffix to avoid
-	// conflicting with Envoy Gateway's own rate limit filter (e.g., from BackendTrafficPolicy).
-	// The per-route TypedPerFilterConfig keys on this name to target the quota filter specifically.
+	// QuotaPolicy enforcement uses two rate limit HTTP filters because Envoy's
+	// rate limit config placement rules are mutually exclusive for the two kinds
+	// of quota entries:
+	//   - RateLimit.limit (the per-request dynamic override) is only supported on
+	//     route-level rate limits (RouteAction.rate_limits), never in
+	//     typed_per_filter_config — Envoy NACKs the config otherwise.
+	//   - RateLimit.hits_addend (the stream-done token burndown) is only supported
+	//     in typed_per_filter_config.
+	// A single filter cannot read both: when RateLimitPerRoute.rate_limits is set,
+	// it replaces the route-level entries for that filter. Stage isolation (stage 1)
+	// keeps Envoy Gateway's own rate limit filter (stage 0, e.g. from
+	// BackendTrafficPolicy) from evaluating the quota entries and vice versa.
+	// The name suffixes avoid colliding with Envoy Gateway's filter name.
+
+	// quotaRateLimitFilterName is the stream-done charge filter: its per-route
+	// RateLimitPerRoute config carries only ApplyOnStreamDone entries with the
+	// quota_cost hits_addend; it never blocks a request.
 	quotaRateLimitFilterName = "envoy.filters.http.ratelimit/ai-gateway-quota"
+	// quotaRequestRateLimitFilterName is the request-time enforcement filter: it
+	// evaluates the stage-1 route-level rate limits (which legally carry the
+	// dynamic limit override) and returns 429 when a bucket is exhausted.
+	quotaRequestRateLimitFilterName = "envoy.filters.http.ratelimit/ai-gateway-quota-request"
+	// quotaRequestRateLimitStage is the stage shared by the request-time filter
+	// and the route-level quota entries it evaluates.
+	quotaRequestRateLimitStage = 1
 	// defaultQuotaRateLimitServicePort is the default gRPC port for the rate limit service.
 	defaultQuotaRateLimitServicePort = 8081
 
@@ -196,43 +216,55 @@ func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener,
 			continue
 		}
 
-		// Check if the filter already exists.
-		alreadyExists := false
-		for _, f := range httpConManager.HttpFilters {
-			if f.Name == quotaRateLimitFilterName {
-				alreadyExists = true
-				break
+		// The filters are always enabled at the HCM level. Routes without quota
+		// rate limit entries make them a no-op. We cannot use Disabled=true here
+		// because ext_proc clears the route cache after modifying headers, and
+		// the filter chain is created based on the initial route match (before
+		// ext_proc runs). The initial route typically lacks the quota entries,
+		// so a disabled filter would never be re-enabled.
+		modified := false
+		for _, spec := range []struct {
+			name  string
+			stage uint32
+		}{
+			{quotaRequestRateLimitFilterName, quotaRequestRateLimitStage},
+			{quotaRateLimitFilterName, 0},
+		} {
+			// Check if the filter already exists.
+			alreadyExists := false
+			for _, f := range httpConManager.HttpFilters {
+				if f.Name == spec.name {
+					alreadyExists = true
+					break
+				}
 			}
+			if alreadyExists {
+				continue
+			}
+
+			rateLimitFilter, buildErr := s.buildQuotaRateLimitFilter(spec.name, domain, spec.stage)
+			if buildErr != nil {
+				return fmt.Errorf("failed to build quota rate limit filter: %w", buildErr)
+			}
+
+			// Insert before the router filter.
+			inserted := false
+			for i, f := range httpConManager.HttpFilters {
+				if f.Name == wellknown.Router {
+					httpConManager.HttpFilters = append(httpConManager.HttpFilters, nil)
+					copy(httpConManager.HttpFilters[i+1:], httpConManager.HttpFilters[i:])
+					httpConManager.HttpFilters[i] = rateLimitFilter
+					inserted = true
+					break
+				}
+			}
+			if !inserted {
+				httpConManager.HttpFilters = append(httpConManager.HttpFilters, rateLimitFilter)
+			}
+			modified = true
 		}
-		if alreadyExists {
+		if !modified {
 			continue
-		}
-
-		rateLimitFilter, err := s.buildQuotaRateLimitFilter(domain)
-		if err != nil {
-			return fmt.Errorf("failed to build quota rate limit filter: %w", err)
-		}
-		// The filter is always enabled at the HCM level. Routes without
-		// per-route RateLimitPerRoute config will have no rate limit actions,
-		// making the filter a no-op. We cannot use Disabled=true here because
-		// ext_proc clears the route cache after modifying headers, and the
-		// filter chain is created based on the initial route match (before
-		// ext_proc runs). The initial route typically lacks the per-route
-		// config, so a disabled filter would never be re-enabled.
-
-		// Insert before the router filter.
-		inserted := false
-		for i, f := range httpConManager.HttpFilters {
-			if f.Name == wellknown.Router {
-				httpConManager.HttpFilters = append(httpConManager.HttpFilters, nil)
-				copy(httpConManager.HttpFilters[i+1:], httpConManager.HttpFilters[i:])
-				httpConManager.HttpFilters[i] = rateLimitFilter
-				inserted = true
-				break
-			}
-		}
-		if !inserted {
-			httpConManager.HttpFilters = append(httpConManager.HttpFilters, rateLimitFilter)
 		}
 
 		hcmAny, err := toAny(httpConManager)
@@ -244,11 +276,15 @@ func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener,
 	return nil
 }
 
-// buildQuotaRateLimitFilter creates the envoy.filters.http.ratelimit filter
-// for QuotaPolicy enforcement in the HCM filter chain.
-func (s *Server) buildQuotaRateLimitFilter(domain string) (*httpconnectionmanagerv3.HttpFilter, error) {
+// buildQuotaRateLimitFilter creates an envoy.filters.http.ratelimit filter
+// for QuotaPolicy enforcement in the HCM filter chain. The stage selects which
+// route-level rate limit entries the filter evaluates (the request-time filter
+// uses quotaRequestRateLimitStage; the stream-done filter reads its entries
+// from per-route config, where stages do not apply).
+func (s *Server) buildQuotaRateLimitFilter(name, domain string, stage uint32) (*httpconnectionmanagerv3.HttpFilter, error) {
 	rateLimitCfg := &ratelimitfilterv3.RateLimit{
 		Domain: domain,
+		Stage:  stage,
 		RateLimitService: &ratelimitv3.RateLimitServiceConfig{
 			GrpcService: &corev3.GrpcService{
 				TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
@@ -272,7 +308,7 @@ func (s *Server) buildQuotaRateLimitFilter(domain string) (*httpconnectionmanage
 	}
 
 	return &httpconnectionmanagerv3.HttpFilter{
-		Name: quotaRateLimitFilterName,
+		Name: name,
 		ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{
 			TypedConfig: cfgAny,
 		},
@@ -628,26 +664,40 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 		}
 	}
 
-	rateLimitActions = append(rateLimitActions, streamDoneActions...)
-
-	if len(rateLimitActions) == 0 {
+	if len(rateLimitActions) == 0 && len(streamDoneActions) == 0 {
 		return nil
 	}
 
-	perRouteConfig := &ratelimitfilterv3.RateLimitPerRoute{
-		Domain:     translator.QuotaDomain,
-		RateLimits: rateLimitActions,
+	// Request-time entries go on the route itself: only route-level rate limits
+	// support the per-request limit override, and the stage scopes them to the
+	// request-time quota filter (Envoy Gateway's stage-0 filter ignores them).
+	// Appended, never assigned, so entries emitted by Envoy Gateway survive.
+	if routeAction := route.GetRoute(); routeAction != nil && len(rateLimitActions) > 0 {
+		for _, rl := range rateLimitActions {
+			rl.Stage = wrapperspb.UInt32(quotaRequestRateLimitStage)
+		}
+		routeAction.RateLimits = append(routeAction.RateLimits, rateLimitActions...)
 	}
 
-	perRouteAny, err := anypb.New(perRouteConfig)
-	if err != nil {
-		return fmt.Errorf("failed to marshal RateLimitPerRoute: %w", err)
-	}
+	// Stream-done charge entries go in the per-route config of the stream-done
+	// filter: only typed_per_filter_config entries support the quota_cost
+	// hits_addend.
+	if len(streamDoneActions) > 0 {
+		perRouteConfig := &ratelimitfilterv3.RateLimitPerRoute{
+			Domain:     translator.QuotaDomain,
+			RateLimits: streamDoneActions,
+		}
 
-	if route.TypedPerFilterConfig == nil {
-		route.TypedPerFilterConfig = make(map[string]*anypb.Any)
+		perRouteAny, err := anypb.New(perRouteConfig)
+		if err != nil {
+			return fmt.Errorf("failed to marshal RateLimitPerRoute: %w", err)
+		}
+
+		if route.TypedPerFilterConfig == nil {
+			route.TypedPerFilterConfig = make(map[string]*anypb.Any)
+		}
+		route.TypedPerFilterConfig[quotaRateLimitFilterName] = perRouteAny
 	}
-	route.TypedPerFilterConfig[quotaRateLimitFilterName] = perRouteAny
 	return nil
 }
 
