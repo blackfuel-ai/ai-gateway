@@ -614,6 +614,7 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [ProtectedResourceMetadata](#github-com-envoyproxy-ai-gateway-api-v1alpha1-protectedresourcemetadata)
 - [QuotaBucketMode](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotabucketmode)
 - [QuotaDefinition](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotadefinition)
+- [QuotaLimitOverride](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride)
 - [QuotaPolicySpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotapolicyspec)
 - [QuotaPolicyStatus](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotapolicystatus)
 - [QuotaRule](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotarule)
@@ -2429,6 +2430,27 @@ QuotaDefinition specified expression for computing request cost and rules for ma
 />
 
 
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride">QuotaLimitOverride</a>
+
+
+
+**Appears in:**
+- [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
+
+QuotaLimitOverride specifies a per-request source for the quota limit value.
+
+##### Fields
+
+
+
+<ApiField
+  name="fromHeader"
+  type="string"
+  required="true"
+  description="FromHeader names a request header whose value is a non-negative integer limit<br />for the current time window. A value of 0 blocks all matching requests.<br />The header must be set or overwritten by a trusted component<br />(e.g. an external authorization service) and never accepted from clients."
+/>
+
+
 #### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotapolicyspec">QuotaPolicySpec</a>
 
 
@@ -2537,6 +2559,11 @@ QuotaValue defines the quota limits using sliding window.
   type="string"
   required="true"
   description="Time window. Must be exactly one of: `1s` (1 second), `1m` (1 minute), `1h` (1 hour), or `1d` (1 day)."
+/><ApiField
+  name="dynamicOverride"
+  type="[QuotaLimitOverride](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride)"
+  required="false"
+  description="DynamicOverride supplies the limit at request time, falling back to Limit<br />when the source is absent or malformed. The time window is always Duration."
 />
 
 

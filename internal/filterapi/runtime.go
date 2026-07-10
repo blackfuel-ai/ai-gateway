@@ -35,6 +35,9 @@ type RuntimeConfig struct {
 	// RequestCosts is the list of route-scoped request costs.
 	// Each entry has a RouteName identifying the route it applies to.
 	RequestCosts []RuntimeRequestCost
+	// QuotaLimitOverrides is the list of request headers to parse into per-request
+	// rate limit override metadata, inherited from filterapi.Config.
+	QuotaLimitOverrides []QuotaLimitOverride
 	// DeclaredModels is the list of declared models.
 	DeclaredModels []Model
 	// ModelsByHost maps hostnames to their specific model lists for per-host filtering. Each entry already includes
@@ -127,13 +130,14 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 	}
 
 	return &RuntimeConfig{
-		UUID:               config.UUID,
-		Backends:           backends,
-		GlobalRequestCosts: globalCosts,
-		RequestCosts:       costs,
-		DeclaredModels:     config.Models,
-		ModelsByHost:       config.ModelsByHost,
-		UnscopedModels:     config.UnscopedModels,
-		EmitErrorMetadata:  config.EmitErrorMetadata,
+		UUID:                config.UUID,
+		Backends:            backends,
+		GlobalRequestCosts:  globalCosts,
+		RequestCosts:        costs,
+		QuotaLimitOverrides: config.QuotaLimitOverrides,
+		DeclaredModels:      config.Models,
+		ModelsByHost:        config.ModelsByHost,
+		UnscopedModels:      config.UnscopedModels,
+		EmitErrorMetadata:   config.EmitErrorMetadata,
 	}, nil
 }

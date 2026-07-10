@@ -2424,3 +2424,93 @@ func TestListQuotaPolicies(t *testing.T) {
 		require.Len(t, policies, 2)
 	})
 }
+
+func TestQuotaLimitDynamicOverride(t *testing.T) {
+	oneTarget := []gwapiv1a2.LocalPolicyTargetReference{
+		{Name: "test-backend"},
+	}
+	override := &aigv1a1.QuotaLimitOverride{FromHeader: "x-bf-quota-limit"}
+
+	requireOverrideKey := func(t *testing.T, entry *routev3.RateLimit, wantKey string) {
+		t.Helper()
+		require.NotNil(t, entry.Limit)
+		dm := entry.Limit.GetDynamicMetadata()
+		require.NotNil(t, dm)
+		require.Equal(t, aigv1b1.AIGatewayFilterMetadataNamespace, dm.MetadataKey.Key)
+		require.Len(t, dm.MetadataKey.Path, 1)
+		require.Equal(t, wantKey, dm.MetadataKey.Path[0].GetKey())
+	}
+
+	t.Run("simple model default bucket override", func(t *testing.T) {
+		quota := &aigv1a1.QuotaDefinition{
+			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1h", DynamicOverride: override},
+		}
+		entries := buildSimpleModelEntries("gpt-4", "default", quota, oneTarget, nil)
+		require.Len(t, entries, 1)
+		requireOverrideKey(t, entries[0], "quota_limit_override_x-bf-quota-limit_HOUR")
+	})
+
+	t.Run("no override leaves Limit nil", func(t *testing.T) {
+		quota := &aigv1a1.QuotaDefinition{
+			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1h"},
+		}
+		entries := buildSimpleModelEntries("gpt-4", "default", quota, oneTarget, nil)
+		require.Len(t, entries, 1)
+		require.Nil(t, entries[0].Limit)
+	})
+
+	t.Run("bucket rule override", func(t *testing.T) {
+		quota := &aigv1a1.QuotaDefinition{
+			BucketRules: []aigv1a1.QuotaRule{
+				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m", DynamicOverride: override}},
+			},
+			DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1d", DynamicOverride: override},
+		}
+		entries := buildBucketRuleLimitEntries("gpt-4", "default", quota, oneTarget, nil)
+		require.Len(t, entries, 2)
+		requireOverrideKey(t, entries[0], "quota_limit_override_x-bf-quota-limit_MINUTE")
+		requireOverrideKey(t, entries[1], "quota_limit_override_x-bf-quota-limit_DAY")
+	})
+
+	t.Run("shadow rule gets no override", func(t *testing.T) {
+		quota := &aigv1a1.QuotaDefinition{
+			BucketRules: []aigv1a1.QuotaRule{
+				{
+					Quota:      aigv1a1.QuotaValue{Limit: 100, Duration: "1m", DynamicOverride: override},
+					ShadowMode: ptr.To(true),
+				},
+			},
+		}
+		entries := buildBucketRuleLimitEntries("gpt-4", "default", quota, oneTarget, nil)
+		require.Len(t, entries, 1)
+		require.Nil(t, entries[0].Limit)
+	})
+
+	t.Run("stream-done entries never carry an override", func(t *testing.T) {
+		policies := []aigv1a1.QuotaPolicy{
+			{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: aigv1a1.QuotaPolicySpec{
+					TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: "be"}},
+					PerModelQuotas: []aigv1a1.PerModelQuota{
+						{
+							ModelName: ptr.To("gpt-4"),
+							Quota: aigv1a1.QuotaDefinition{
+								DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m", DynamicOverride: override},
+							},
+						},
+					},
+				},
+			},
+		}
+		route := &routev3.Route{Name: "test-route"}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+
+		perRoute := &ratelimitfilterv3.RateLimitPerRoute{}
+		require.NoError(t, route.TypedPerFilterConfig[quotaRateLimitFilterName].UnmarshalTo(perRoute))
+		require.Len(t, perRoute.RateLimits, 2)
+		requireOverrideKey(t, perRoute.RateLimits[0], "quota_limit_override_x-bf-quota-limit_MINUTE")
+		require.True(t, perRoute.RateLimits[1].ApplyOnStreamDone)
+		require.Nil(t, perRoute.RateLimits[1].Limit)
+	})
+}

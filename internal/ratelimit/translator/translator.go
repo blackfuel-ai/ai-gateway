@@ -389,6 +389,10 @@ func flattenAndSortHeaders(selectors []egv1a1.RateLimitSelectCondition) []egv1a1
 	return headers
 }
 
+// quotaValueToPolicy converts a QuotaValue to the static rate limit policy in the
+// rate limit service config. When the QuotaValue has a dynamicOverride, the
+// per-request limit carried in the descriptor takes precedence in the rate limit
+// service; the static value here remains the fallback.
 func quotaValueToPolicy(qv *aigv1a1.QuotaValue) (*rlsconfv3.RateLimitPolicy, error) {
 	unit, err := parseDuration(qv.Duration)
 	if err != nil {

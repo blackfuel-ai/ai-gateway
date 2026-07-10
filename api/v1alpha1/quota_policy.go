@@ -59,6 +59,7 @@ type QuotaPolicySpec struct {
 	PerModelQuotas []PerModelQuota `json:"perModelQuotas,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.quota.dynamicOverride)",message="serviceQuota does not support dynamicOverride"
 type ServiceQuotaDefinition struct {
 	// CostExpression specifies a CEL expression for computing the quota burndown of the LLM-related request.
 	// If no expression is specified the "total_tokens" value is used.
@@ -133,6 +134,7 @@ const (
 	QuotaBucketModeShared QuotaBucketMode = "Shared"
 )
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.dynamicOverride))",message="dynamicOverride cannot be combined with shadowMode"
 type QuotaRule struct {
 	// ClientSelectors holds the list of conditions to select
 	// specific clients using attributes from the traffic flow.
@@ -169,6 +171,23 @@ type QuotaValue struct {
 	//
 	// +kubebuilder:validation:Enum="1s";"1m";"1h";"1d"
 	Duration string `json:"duration"`
+	// DynamicOverride supplies the limit at request time, falling back to Limit
+	// when the source is absent or malformed. The time window is always Duration.
+	//
+	// +optional
+	DynamicOverride *QuotaLimitOverride `json:"dynamicOverride,omitempty"`
+}
+
+// QuotaLimitOverride specifies a per-request source for the quota limit value.
+type QuotaLimitOverride struct {
+	// FromHeader names a request header whose value is a non-negative integer limit
+	// for the current time window. A value of 0 blocks all matching requests.
+	// The header must be set or overwritten by a trusted component
+	// (e.g. an external authorization service) and never accepted from clients.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	FromHeader string `json:"fromHeader"`
 }
 
 // QuotaPolicyList contains a list of QuotaPolicy
