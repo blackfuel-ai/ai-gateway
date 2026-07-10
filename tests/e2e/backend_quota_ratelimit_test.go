@@ -148,6 +148,63 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		// A malformed override falls back to the static limit (5), which is exhausted.
 		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests, limitHeader("not-a-number"))
 	})
+
+	// Expected failure: per-org token burndown. For Distinct client selectors
+	// the stream-done charge action degrades to a constant generic key, so the
+	// response's total_tokens land in a shared counter outside the per-org
+	// bucket and per-org buckets are burned down by request count (+1) only.
+	// "quota-org-model" gives each distinct x-org-id a 100-token/1h bucket: a
+	// single 200-token response should exhaust it, but the next request is
+	// still admitted. The sub-test skips while the limitation holds and fails
+	// if per-org token burndown unexpectedly starts working, so the xfail (and
+	// this comment) get removed together with the fix.
+	t.Run("per-org token burndown (xfail)", func(t *testing.T) {
+		orgHeader := http.Header{"x-org-id": []string{"org-burndown-a"}}
+
+		makeRequest("quota-org-model", 200, http.StatusOK, orgHeader)
+
+		// Give the asynchronous stream-done charge time to land, then check
+		// whether it reached the per-org bucket.
+		time.Sleep(5 * time.Second)
+		fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+		defer fwd.Kill()
+
+		req := newChatRequest(t, fwd.Address(), "quota-org-model", 5, orgHeader)
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			t.Fatal("per-org token burndown unexpectedly works: remove this xfail and assert 429 directly")
+		}
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		t.Skip("known limitation: Distinct-selector stream-done charge misses the per-org bucket; per-org quotas count requests, not tokens")
+	})
+}
+
+// newChatRequest builds one chat completion request against the test upstream
+// with the given total_tokens in the fake response.
+func newChatRequest(t *testing.T, addr, modelName string, totalTokens int, headers ...http.Header) *http.Request {
+	t.Helper()
+	requestBody := fmt.Sprintf(`{"messages":[{"role":"user","content":"Say this is a test"}],"model":"%s"}`, modelName)
+	fakeResponseBody := fmt.Sprintf(
+		`{"choices":[{"message":{"content":"This is a test.","role":"assistant"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":%d}}`,
+		totalTokens,
+	)
+	req, err := http.NewRequest(http.MethodPut, addr+"/v1/chat/completions", strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
+	req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+	req.Header.Set("Host", "openai.com")
+	for _, h := range headers {
+		for k, vals := range h {
+			for _, v := range vals {
+				req.Header.Set(k, v)
+			}
+		}
+	}
+	return req
 }
 
 // redisExec runs a redis-cli command on the Redis pod and returns the output.
