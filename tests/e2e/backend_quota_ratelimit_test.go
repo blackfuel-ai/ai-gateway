@@ -30,7 +30,9 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 	// Apply Redis manifest (shared with token rate limit tests).
 	require.NoError(t, e2elib.KubectlApplyManifest(t.Context(), "../../examples/token_ratelimit/redis.yaml"))
 	t.Cleanup(func() {
-		_ = e2elib.KubectlDeleteManifest(context.Background(), "../../examples/token_ratelimit/redis.yaml")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = e2elib.KubectlDeleteManifest(ctx, "../../examples/token_ratelimit/redis.yaml")
 	})
 
 	// Wait for the redis pod to be ready so that the rate limit service can connect.
@@ -38,7 +40,12 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 
 	require.NoError(t, e2elib.KubectlApplyManifest(t.Context(), "testdata/backend_quota_ratelimit.yaml"))
 	t.Cleanup(func() {
-		_ = e2elib.KubectlDeleteManifest(context.Background(), "testdata/backend_quota_ratelimit.yaml")
+		// Bounded: a QuotaPolicy finalizer that a starved controller has not
+		// removed yet would otherwise block this delete until the go test
+		// timeout.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = e2elib.KubectlDeleteManifest(ctx, "testdata/backend_quota_ratelimit.yaml")
 	})
 
 	const egSelector = "gateway.envoyproxy.io/owning-gateway-name=envoy-ai-gateway-quota-ratelimit"
@@ -62,21 +69,44 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 			totalTokens,
 		)
 
-		req, err := http.NewRequest(http.MethodPut, fwd.Address()+"/v1/chat/completions", strings.NewReader(requestBody))
-		require.NoError(t, err)
-		req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
-		req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
-		req.Header.Set("Host", "openai.com")
-		for _, h := range headers {
-			for k, vals := range h {
-				for _, v := range vals {
-					req.Header.Set(k, v)
+		newRequest := func() *http.Request {
+			req, err := http.NewRequest(http.MethodPut, fwd.Address()+"/v1/chat/completions", strings.NewReader(requestBody))
+			require.NoError(t, err)
+			req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
+			req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+			req.Header.Set("Host", "openai.com")
+			for _, h := range headers {
+				for k, vals := range h {
+					for _, v := range vals {
+						req.Header.Set(k, v)
+					}
 				}
 			}
+			return req
 		}
 
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		// A bounded client: without a timeout, one hung request on a starved
+		// CI runner stalls the whole suite until the go test timeout.
+		client := &http.Client{Timeout: 30 * time.Second}
+
+		// Retry 404s: right after the manifests are applied, the route may not
+		// be programmed in the proxy yet. The 404 fallback carries no quota
+		// rate limits, so retried requests do not consume any counter and the
+		// exact Redis assertions below stay valid.
+		var resp *http.Response
+		require.Eventually(t, func() bool {
+			r, doErr := client.Do(newRequest()) //nolint:bodyclose // closed below or on the retry path.
+			if doErr != nil {
+				t.Logf("request failed, retrying: %v", doErr)
+				return false
+			}
+			if expectedStatus != http.StatusNotFound && r.StatusCode == http.StatusNotFound {
+				_ = r.Body.Close()
+				return false
+			}
+			resp = r
+			return true
+		}, 30*time.Second, 500*time.Millisecond, "request kept failing or returning 404")
 		defer func() { _ = resp.Body.Close() }()
 
 		body, err := io.ReadAll(resp.Body)
