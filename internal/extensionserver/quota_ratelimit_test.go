@@ -15,6 +15,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	luav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	ratelimitfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ratelimit/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
@@ -129,7 +130,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: wellknown.Router},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
 
 		filters := getHCMFilters(t, ln)
 		require.Len(t, filters, 4)
@@ -164,7 +165,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: wellknown.Router},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
 
 		// The stream-done filter is not duplicated; the request-time filter is added.
 		filters := getHCMFilters(t, ln)
@@ -178,7 +179,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: "envoy.filters.http.health_check"},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
 
 		filters := getHCMFilters(t, ln)
 		require.Len(t, filters, 3)
@@ -191,10 +192,10 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: wellknown.Router},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
 		require.Len(t, getHCMFilters(t, ln), 3)
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
 		require.Len(t, getHCMFilters(t, ln), 3)
 	})
 
@@ -209,7 +210,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 				},
 			},
 		}
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
 	})
 }
 
@@ -223,7 +224,7 @@ func TestEnableQuotaRateLimitOnRoute(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -396,7 +397,7 @@ func TestEnableQuotaRateLimitOnRoute_DescriptorChain(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -457,7 +458,7 @@ func TestEnableQuotaRateLimitOnRoute_HitsAddend(t *testing.T) {
 								BucketRules: []aigv1a1.QuotaRule{
 									{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"}},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
 							},
 						},
 					},
@@ -517,7 +518,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners_FullHCMChain(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain))
+	require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
 
 	updatedHCM, _, err := findHCM(ln.FilterChains[0])
 	require.NoError(t, err)
@@ -572,7 +573,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
 							},
 						},
 					},
@@ -805,7 +806,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 						{
 							ModelName: ptr.To("gpt-4"),
 							Quota: aigv1a1.QuotaDefinition{
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 							},
 						},
 					},
@@ -837,7 +838,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
 							},
 						},
 					},
@@ -924,7 +925,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 							},
 						},
 					},
@@ -1012,7 +1013,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 							},
 						},
 					},
@@ -1036,7 +1037,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 300, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 							},
 						},
 					},
@@ -1099,7 +1100,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 							},
 						},
 					},
@@ -1123,7 +1124,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 							},
 						},
 					},
@@ -1249,7 +1250,7 @@ func TestBuildBucketRuleLimitEntries(t *testing.T) {
 			BucketRules: []aigv1a1.QuotaRule{
 				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
 		}
 		entries := buildBucketRuleLimitEntries("gpt-4", "default", quota, oneTarget, nil)
 		require.Len(t, entries, 2) // 1 bucket req-time + 1 default req-time (no stream-done)
@@ -1268,7 +1269,7 @@ func TestBuildBucketRuleLimitEntries(t *testing.T) {
 			BucketRules: []aigv1a1.QuotaRule{
 				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 0},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 0},
 		}
 		entries := buildBucketRuleLimitEntries("gpt-4", "default", quota, oneTarget, nil)
 		require.Len(t, entries, 1) // 1 request-time only (no default, no stream-done)
@@ -1328,13 +1329,13 @@ func TestEnableQuotaRateLimitOnRoute_MultiplePerModelQuotas(t *testing.T) {
 					{
 						ModelName: ptr.To("claude-sonnet-4-6"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
 						},
 					},
 					{
 						ModelName: ptr.To("claude-haiku-4-5"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 500, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 500, Duration: "1m"},
 						},
 					},
 				},
@@ -1389,13 +1390,13 @@ func TestEnableQuotaRateLimitOnRoute_MultiplePerModelQuotas(t *testing.T) {
 										Quota: aigv1a1.QuotaValue{Limit: 1000, Duration: "1m"},
 									},
 								},
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 							},
 						},
 						{
 							ModelName: ptr.To("claude-haiku-4-5"),
 							Quota: aigv1a1.QuotaDefinition{
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 500, Duration: "1m"},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 500, Duration: "1m"},
 							},
 						},
 					},
@@ -2243,7 +2244,7 @@ func TestMaybeInjectQuotaRateLimiting(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4-turbo"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -2447,7 +2448,7 @@ func TestQuotaLimitDynamicOverride(t *testing.T) {
 
 	t.Run("simple model default bucket override", func(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1h", DynamicOverride: override},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1h", DynamicOverride: override},
 		}
 		entries := buildSimpleModelEntries("gpt-4", "default", quota, oneTarget, nil)
 		require.Len(t, entries, 1)
@@ -2456,7 +2457,7 @@ func TestQuotaLimitDynamicOverride(t *testing.T) {
 
 	t.Run("no override leaves Limit nil", func(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1h"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1h"},
 		}
 		entries := buildSimpleModelEntries("gpt-4", "default", quota, oneTarget, nil)
 		require.Len(t, entries, 1)
@@ -2468,7 +2469,7 @@ func TestQuotaLimitDynamicOverride(t *testing.T) {
 			BucketRules: []aigv1a1.QuotaRule{
 				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m", DynamicOverride: override}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1d", DynamicOverride: override},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1d", DynamicOverride: override},
 		}
 		entries := buildBucketRuleLimitEntries("gpt-4", "default", quota, oneTarget, nil)
 		require.Len(t, entries, 2)
@@ -2500,7 +2501,7 @@ func TestQuotaLimitDynamicOverride(t *testing.T) {
 						{
 							ModelName: ptr.To("gpt-4"),
 							Quota: aigv1a1.QuotaDefinition{
-								DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m", DynamicOverride: override},
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m", DynamicOverride: override},
 							},
 						},
 					},
@@ -2567,7 +2568,7 @@ func TestEnableQuotaRateLimitOnRoute_PreservesExistingRouteRateLimits(t *testing
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -2581,4 +2582,82 @@ func TestEnableQuotaRateLimitOnRoute_PreservesExistingRouteRateLimits(t *testing
 	require.Same(t, existing, rls[0])
 	require.Nil(t, rls[0].Stage)
 	require.Equal(t, uint32(quotaRequestRateLimitStage), rls[1].Stage.GetValue())
+}
+
+func TestQuotaOverrideLuaFilter(t *testing.T) {
+	t.Run("collects distinct specs sorted, skipping shadow rules", func(t *testing.T) {
+		override := &aigv1a1.QuotaLimitOverride{FromHeader: "X-BF-Quota-Limit"}
+		policies := []aigv1a1.QuotaPolicy{
+			{
+				Spec: aigv1a1.QuotaPolicySpec{
+					PerModelQuotas: []aigv1a1.PerModelQuota{
+						{
+							ModelName: ptr.To("gpt-4"),
+							Quota: aigv1a1.QuotaDefinition{
+								DefaultBucket: &aigv1a1.QuotaValue{Limit: 1, Duration: "1h", DynamicOverride: override},
+								BucketRules: []aigv1a1.QuotaRule{
+									// Duplicate of the default bucket source: deduped.
+									{Quota: aigv1a1.QuotaValue{Limit: 1, Duration: "1h", DynamicOverride: override}},
+									// Different duration: separate spec.
+									{Quota: aigv1a1.QuotaValue{Limit: 1, Duration: "1m", DynamicOverride: override}},
+									// Shadow rule: skipped.
+									{Quota: aigv1a1.QuotaValue{Limit: 1, Duration: "1d", DynamicOverride: override}, ShadowMode: ptr.To(true)},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		specs := collectQuotaOverrideSpecs(policies)
+		require.Equal(t, []quotaOverrideSpec{
+			{headerName: "x-bf-quota-limit", unit: "HOUR"},
+			{headerName: "x-bf-quota-limit", unit: "MINUTE"},
+		}, specs)
+	})
+
+	t.Run("lua script carries header, key, unit and namespace", func(t *testing.T) {
+		filter, err := buildQuotaOverrideLuaFilter([]quotaOverrideSpec{{headerName: "x-bf-quota-limit", unit: "HOUR"}})
+		require.NoError(t, err)
+		require.Equal(t, quotaOverrideLuaFilterName, filter.Name)
+		luaCfg := &luav3.Lua{}
+		require.NoError(t, filter.GetTypedConfig().UnmarshalTo(luaCfg))
+		script := luaCfg.DefaultSourceCode.GetInlineString()
+		require.Contains(t, script, `{header = "x-bf-quota-limit", key = "quota_limit_override_x-bf-quota-limit_HOUR", unit = "HOUR"}`)
+		require.Contains(t, script, aigv1b1.AIGatewayFilterMetadataNamespace)
+		require.Contains(t, script, "envoy_on_request")
+	})
+
+	t.Run("listener injection places lua before the quota filters", func(t *testing.T) {
+		srv := &Server{quotaRateLimitTimeout: 5}
+		hcm := &httpconnectionmanagerv3.HttpConnectionManager{
+			HttpFilters: []*httpconnectionmanagerv3.HttpFilter{{Name: wellknown.Router}},
+		}
+		hcmAny := mustToAny(t, hcm)
+		ln := &listenerv3.Listener{
+			Name: "test-listener",
+			FilterChains: []*listenerv3.FilterChain{{
+				Filters: []*listenerv3.Filter{{
+					Name:       wellknown.HTTPConnectionManager,
+					ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+				}},
+			}},
+		}
+		specs := []quotaOverrideSpec{{headerName: "x-bf-quota-limit", unit: "HOUR"}}
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, specs))
+
+		updated, _, err := findHCM(ln.FilterChains[0])
+		require.NoError(t, err)
+		require.Len(t, updated.HttpFilters, 4)
+		require.Equal(t, quotaOverrideLuaFilterName, updated.HttpFilters[0].Name)
+		require.Equal(t, quotaRequestRateLimitFilterName, updated.HttpFilters[1].Name)
+		require.Equal(t, quotaRateLimitFilterName, updated.HttpFilters[2].Name)
+		require.Equal(t, wellknown.Router, updated.HttpFilters[3].Name)
+
+		// Idempotent.
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, specs))
+		updated, _, err = findHCM(ln.FilterChains[0])
+		require.NoError(t, err)
+		require.Len(t, updated.HttpFilters, 4)
+	})
 }

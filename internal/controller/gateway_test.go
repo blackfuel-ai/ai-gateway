@@ -28,7 +28,6 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/yaml"
 
-	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller/rotators"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -3104,44 +3103,5 @@ func TestGatewayReconcilePredicate(t *testing.T) {
 		require.True(t, p.Create(event.CreateEvent{Object: gw(1, nil)}))
 		require.True(t, p.Delete(event.DeleteEvent{Object: gw(1, nil)}))
 		require.True(t, p.Generic(event.GenericEvent{Object: gw(1, nil)}))
-	})
-}
-
-func TestGatewayController_appendQuotaLimitOverrides(t *testing.T) {
-	fakeClient := requireNewFakeClientWithIndexes(t)
-	fakeKube := fake2.NewClientset()
-	c := NewGatewayController(fakeClient, fakeKube, ctrl.Log,
-		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
-
-	override := &aigv1a1.QuotaLimitOverride{FromHeader: "X-BF-Quota-Limit"}
-
-	t.Run("collects default bucket and non-shadow rules, deduped", func(t *testing.T) {
-		ec := &filterapi.Config{}
-		quota := &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1h", DynamicOverride: override},
-			BucketRules: []aigv1a1.QuotaRule{
-				// Same header and duration as the default bucket: deduped.
-				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1h", DynamicOverride: override}},
-				// Different duration: separate entry.
-				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m", DynamicOverride: override}},
-				// Shadow rule: skipped.
-				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1d", DynamicOverride: override}, ShadowMode: ptr.To(true)},
-				// No override: skipped.
-				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1s"}},
-			},
-		}
-		c.appendQuotaLimitOverrides(ec, "test-policy", quota)
-		require.Equal(t, []filterapi.QuotaLimitOverride{
-			{HeaderName: "x-bf-quota-limit", MetadataKey: "quota_limit_override_x-bf-quota-limit_HOUR", Unit: "HOUR"},
-			{HeaderName: "x-bf-quota-limit", MetadataKey: "quota_limit_override_x-bf-quota-limit_MINUTE", Unit: "MINUTE"},
-		}, ec.QuotaLimitOverrides)
-	})
-
-	t.Run("no overrides leaves config empty", func(t *testing.T) {
-		ec := &filterapi.Config{}
-		c.appendQuotaLimitOverrides(ec, "test-policy", &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1h"},
-		})
-		require.Empty(t, ec.QuotaLimitOverrides)
 	})
 }

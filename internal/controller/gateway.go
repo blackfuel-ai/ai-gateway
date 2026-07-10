@@ -938,7 +938,6 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 			if len(routeModels) > 0 && !routeModels[*pmq.ModelName] {
 				continue
 			}
-			c.appendQuotaLimitOverrides(ec, qp.Name, &pmq.Quota)
 			expr := "total_tokens"
 			if pmq.Quota.CostExpression != nil {
 				expr = *pmq.Quota.CostExpression
@@ -976,48 +975,6 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 // is active per request, and ext_proc filters cost entries by Model before
 // writing to this key.
 const QuotaCostMetadataKey = "quota_cost"
-
-// appendQuotaLimitOverrides collects the dynamicOverride.fromHeader sources of a
-// PerModelQuota's default bucket and non-shadow bucket rules into the ext_proc
-// config, deduplicated by metadata key. ext_proc parses each configured header
-// into the override struct that the rate limit filter's request-time entries read.
-// Entries are not route-scoped: the metadata key is derived from (header, unit),
-// so identical sources across routes and policies converge on the same entry, and
-// emitting the metadata on a route that does not reference it is harmless.
-func (c *GatewayController) appendQuotaLimitOverrides(ec *filterapi.Config, policyName string, quota *aigv1a1.QuotaDefinition) {
-	appendOne := func(v *aigv1a1.QuotaValue) {
-		if v.DynamicOverride == nil {
-			return
-		}
-		unit, ok := filterapi.RateLimitUnitForQuotaDuration(v.Duration)
-		if !ok {
-			c.logger.Error(nil, "invalid QuotaPolicy duration for dynamicOverride, skipping",
-				"policy", policyName, "duration", v.Duration)
-			return
-		}
-		key := filterapi.QuotaLimitOverrideMetadataKey(v.DynamicOverride.FromHeader, unit)
-		for _, existing := range ec.QuotaLimitOverrides {
-			if existing.MetadataKey == key {
-				return
-			}
-		}
-		ec.QuotaLimitOverrides = append(ec.QuotaLimitOverrides, filterapi.QuotaLimitOverride{
-			HeaderName:  strings.ToLower(v.DynamicOverride.FromHeader),
-			MetadataKey: key,
-			Unit:        unit,
-		})
-	}
-	appendOne(&quota.DefaultBucket)
-	for i := range quota.BucketRules {
-		rule := &quota.BucketRules[i]
-		// Shadow rules never enforce, and the rate limit service's override path
-		// bypasses shadow mode; the CRD CEL validation forbids the combination.
-		if rule.ShadowMode != nil && *rule.ShadowMode {
-			continue
-		}
-		appendOne(&rule.Quota)
-	}
-}
 
 // backendWithMaybeBSP retrieves the AIServiceBackend and its associated BackendSecurityPolicy if it exists.
 func (c *GatewayController) backendWithMaybeBSP(ctx context.Context, namespace, name string) (backend *aigv1b1.AIServiceBackend, bsp *aigv1b1.BackendSecurityPolicy, err error) {

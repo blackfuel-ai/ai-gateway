@@ -107,7 +107,7 @@ type QuotaDefinition struct {
 	// using the "BucketRules" configuration.
 	//
 	// +optional
-	DefaultBucket QuotaValue `json:"defaultBucket"`
+	DefaultBucket *QuotaValue `json:"defaultBucket,omitempty"`
 	// BucketRules are a list of client selectors and quotas. If a request
 	// matches multiple rules, each of their associated quotas get applied, so a
 	// single request might burn down the quota for multiple rules.
