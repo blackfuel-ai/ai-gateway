@@ -34,6 +34,7 @@ import (
 
 	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
+	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/ratelimit/translator"
 )
 
@@ -564,7 +565,7 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 			}
 
 			if len(pmq.Quota.BucketRules) == 0 && pmq.Quota.DefaultBucket.Limit > 0 {
-				entries := buildSimpleModelEntries(modelName, policy.Namespace, policy.Spec.TargetRefs, backendModels)
+				entries := buildSimpleModelEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)
 				rateLimitActions = append(rateLimitActions, entries...)
 				// Simple case: 2-level stream-done (backend_name + model_name_override).
 				// All simple entries are identical (metadata-only actions, same hits_addend).
@@ -695,7 +696,7 @@ func baseDescriptorActions() []*routev3.RateLimit_Action {
 // buildSimpleModelEntries creates RateLimit entries for a model with no bucket rules.
 // Produces 2-level descriptors (backend_name, model_name_override) matching the
 // translator's simple case where rate_limit is directly on the model descriptor.
-func buildSimpleModelEntries(modelName, policyNamespace string, targets []gwapiv1a2.LocalPolicyTargetReference, routeModelNames map[string][]string) []*routev3.RateLimit {
+func buildSimpleModelEntries(modelName, policyNamespace string, quota *aigv1a1.QuotaDefinition, targets []gwapiv1a2.LocalPolicyTargetReference, routeModelNames map[string][]string) []*routev3.RateLimit {
 	var entries []*routev3.RateLimit
 
 	// Request-time entries only. Stream-done is added once per model in enableQuotaRateLimitOnRoute.
@@ -703,10 +704,41 @@ func buildSimpleModelEntries(modelName, policyNamespace string, targets []gwapiv
 		resolvedModel := resolveModelName(string(target.Name), modelName, routeModelNames)
 		entries = append(entries, &routev3.RateLimit{
 			Actions: requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel),
+			Limit:   buildQuotaLimitOverride(&quota.DefaultBucket),
 		})
 	}
 
 	return entries
+}
+
+// buildQuotaLimitOverride returns the per-request limit override for a QuotaValue
+// with a dynamicOverride source, or nil when none is configured. The override
+// reads the {"requests_per_unit", "unit"} struct that ext_proc parses from the
+// configured header into dynamic metadata; when the metadata is absent (header
+// missing or malformed), Envoy falls back to the static limit configured in the
+// rate limit service.
+func buildQuotaLimitOverride(v *aigv1a1.QuotaValue) *routev3.RateLimit_Override {
+	if v.DynamicOverride == nil {
+		return nil
+	}
+	unit, ok := filterapi.RateLimitUnitForQuotaDuration(v.Duration)
+	if !ok {
+		return nil
+	}
+	return &routev3.RateLimit_Override{
+		OverrideSpecifier: &routev3.RateLimit_Override_DynamicMetadata_{
+			DynamicMetadata: &routev3.RateLimit_Override_DynamicMetadata{
+				MetadataKey: &metadatav3.MetadataKey{
+					Key: aigv1b1.AIGatewayFilterMetadataNamespace,
+					Path: []*metadatav3.MetadataKey_PathSegment{{
+						Segment: &metadatav3.MetadataKey_PathSegment_Key{
+							Key: filterapi.QuotaLimitOverrideMetadataKey(v.DynamicOverride.FromHeader, unit),
+						},
+					}},
+				},
+			},
+		},
+	}
 }
 
 // quotaHitsAddend returns the HitsAddend that reads the quota cost from dynamic
@@ -735,7 +767,13 @@ func buildBucketRuleLimitEntries(modelName, policyNamespace string, quota *aigv1
 			clientActions := buildClientSelectorActions(rIdx, rule.ClientSelectors)
 			actions := requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
 			actions = append(actions, clientActions...)
-			entries = append(entries, &routev3.RateLimit{Actions: actions})
+			entry := &routev3.RateLimit{Actions: actions}
+			// Shadow rules never enforce, and the rate limit service's override path
+			// bypasses shadow mode; the CRD CEL validation forbids the combination.
+			if rule.ShadowMode == nil || !*rule.ShadowMode {
+				entry.Limit = buildQuotaLimitOverride(&rule.Quota)
+			}
+			entries = append(entries, entry)
 		}
 
 		if quota.DefaultBucket.Limit > 0 {
@@ -750,7 +788,10 @@ func buildBucketRuleLimitEntries(modelName, policyNamespace string, quota *aigv1
 			}
 			actions := requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
 			actions = append(actions, defaultAction)
-			entries = append(entries, &routev3.RateLimit{Actions: actions})
+			entries = append(entries, &routev3.RateLimit{
+				Actions: actions,
+				Limit:   buildQuotaLimitOverride(&quota.DefaultBucket),
+			})
 		}
 	}
 

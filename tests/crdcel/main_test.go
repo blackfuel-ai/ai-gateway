@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
+	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	testsinternal "github.com/envoyproxy/ai-gateway/tests/internal"
 )
@@ -294,6 +295,46 @@ func TestMCPRoutes(t *testing.T) {
 			} else {
 				require.NoError(t, c.Create(ctx, mcpRoute))
 				require.NoError(t, c.Delete(ctx, mcpRoute))
+			}
+		})
+	}
+}
+
+func TestQuotaPolicies(t *testing.T) {
+	c, _, _ := testsinternal.NewEnvTest(t)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name   string
+		expErr string
+	}{
+		{name: "basic-dynamic-override.yaml"},
+		{
+			name:   "shadow-with-override.yaml",
+			expErr: "dynamicOverride cannot be combined with shadowMode",
+		},
+		{
+			name:   "service-quota-override.yaml",
+			expErr: "serviceQuota does not support dynamicOverride",
+		},
+		{
+			name:   "empty-from-header.yaml",
+			expErr: "spec.perModelQuotas[0].quota.defaultBucket.dynamicOverride.fromHeader",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := testdata.ReadFile(path.Join("testdata/quotapolicies", tc.name))
+			require.NoError(t, err)
+
+			quotaPolicy := &aigv1a1.QuotaPolicy{}
+			err = yaml.UnmarshalStrict(data, quotaPolicy)
+			require.NoError(t, err)
+
+			if tc.expErr != "" {
+				require.ErrorContains(t, c.Create(ctx, quotaPolicy), tc.expErr)
+			} else {
+				require.NoError(t, c.Create(ctx, quotaPolicy))
+				require.NoError(t, c.Delete(ctx, quotaPolicy))
 			}
 		})
 	}
