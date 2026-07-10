@@ -220,7 +220,11 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 	}
 
 	if len(quota.BucketRules) == 0 {
-		policy, err := quotaValueToPolicy(&quota.DefaultBucket)
+		if quota.DefaultBucket == nil {
+			// No bucket rules and no default bucket: nothing to enforce.
+			return desc, nil, nil
+		}
+		policy, err := quotaValueToPolicy(quota.DefaultBucket)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -259,8 +263,8 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 		}
 	}
 
-	if quota.DefaultBucket.Limit > 0 {
-		defaultPolicy, err := quotaValueToPolicy(&quota.DefaultBucket)
+	if quota.DefaultBucket != nil && quota.DefaultBucket.Limit > 0 {
+		defaultPolicy, err := quotaValueToPolicy(quota.DefaultBucket)
 		if err != nil {
 			return nil, nil, err
 		}

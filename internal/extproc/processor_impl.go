@@ -461,9 +461,6 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	}
 	dm = mergeDynamicMetadata(dm, buildBackendDynamicMetadata(u.backendName))
 	dm = mergeDynamicMetadata(dm, buildRequestHeaderDynamicMetadata(u.requestHeaders))
-	if cfg := u.parent.config; cfg != nil {
-		dm = mergeDynamicMetadata(dm, buildQuotaLimitOverrideDynamicMetadata(u.logger, cfg.QuotaLimitOverrides, u.requestHeaders))
-	}
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
@@ -860,46 +857,6 @@ func buildRequestHeaderDynamicMetadata(requestHeaders map[string]string) *struct
 					StructValue: &structpb.Struct{Fields: fields},
 				},
 			},
-		},
-	}
-}
-
-// buildQuotaLimitOverrideDynamicMetadata parses the configured quota limit
-// override headers into the {"requests_per_unit", "unit"} structs that the rate
-// limit filter's RateLimit_Override_DynamicMetadata reads. An absent or
-// malformed header yields no metadata for that entry, so Envoy falls back to
-// the static limit configured in the rate limit service. A value of 0 is valid
-// and blocks the matching bucket.
-func buildQuotaLimitOverrideDynamicMetadata(logger *slog.Logger, overrides []filterapi.QuotaLimitOverride, requestHeaders map[string]string) *structpb.Struct {
-	if len(overrides) == 0 {
-		return nil
-	}
-	fields := make(map[string]*structpb.Value, len(overrides))
-	for _, o := range overrides {
-		raw, ok := requestHeaders[o.HeaderName]
-		if !ok || raw == "" {
-			continue
-		}
-		// The rate limit service's requests_per_unit is a uint32.
-		limit, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 32)
-		if err != nil {
-			logger.Warn("ignoring malformed quota limit override header",
-				slog.String("header", o.HeaderName), slog.String("value", raw), slog.String("error", err.Error()))
-			continue
-		}
-		fields[o.MetadataKey] = structpb.NewStructValue(&structpb.Struct{
-			Fields: map[string]*structpb.Value{
-				"requests_per_unit": structpb.NewNumberValue(float64(limit)),
-				"unit":              structpb.NewStringValue(o.Unit),
-			},
-		})
-	}
-	if len(fields) == 0 {
-		return nil
-	}
-	return &structpb.Struct{
-		Fields: map[string]*structpb.Value{
-			internalapi.AIGatewayFilterMetadataNamespace: structpb.NewStructValue(&structpb.Struct{Fields: fields}),
 		},
 	}
 }

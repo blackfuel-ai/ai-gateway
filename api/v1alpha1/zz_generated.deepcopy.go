@@ -1654,7 +1654,11 @@ func (in *QuotaDefinition) DeepCopyInto(out *QuotaDefinition) {
 		*out = new(string)
 		**out = **in
 	}
-	in.DefaultBucket.DeepCopyInto(&out.DefaultBucket)
+	if in.DefaultBucket != nil {
+		in, out := &in.DefaultBucket, &out.DefaultBucket
+		*out = new(QuotaValue)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.BucketRules != nil {
 		in, out := &in.BucketRules, &out.BucketRules
 		*out = make([]QuotaRule, len(*in))

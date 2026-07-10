@@ -14,7 +14,6 @@ package filterapi
 import (
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -39,11 +38,6 @@ type Config struct {
 	// LLMRequestCost configures the cost of each LLM-related request. Optional. If this is provided, the filter will populate
 	// the "calculated" cost in the filter metadata at the end of the response body processing.
 	LLMRequestCosts []LLMRequestCost `json:"llmRequestCosts,omitempty"`
-	// QuotaLimitOverrides configures request headers that the filter parses into
-	// per-request rate limit override metadata for QuotaPolicy enforcement.
-	// Set exclusively by the QuotaPolicy controller from dynamicOverride.fromHeader fields;
-	// it is NOT exposed in any user-facing CRD.
-	QuotaLimitOverrides []QuotaLimitOverride `json:"quotaLimitOverrides,omitempty"`
 	// Backends is the list of backends that this listener can route to.
 	Backends []Backend `json:"backends,omitempty"`
 	// Models is the list of models that this route is aware of. Used to populate the "/models" endpoint in OpenAI-compatible APIs.
@@ -117,50 +111,6 @@ type LLMRequestCost struct {
 	// only evaluated when the request's model name matches. This allows a single
 	// metadata key to be shared across models without conflicting overwrites.
 	Model string `json:"model,omitempty"`
-}
-
-// QuotaLimitOverride instructs the filter to parse a request header into a
-// per-request rate limit override stored in dynamic metadata. The rate limit
-// filter's request-time entries read the override via
-// RateLimit_Override_DynamicMetadata, replacing the static limit configured in
-// the rate limit service for the current request. The metadata value is the
-// struct {"requests_per_unit": <number>, "unit": <Unit>} that Envoy's override
-// mechanism requires.
-type QuotaLimitOverride struct {
-	// HeaderName is the lowercase request header to parse as a non-negative integer limit.
-	HeaderName string `json:"headerName"`
-	// MetadataKey is the dynamic metadata key (in the AI Gateway namespace) where the
-	// override struct is stored. Derived via QuotaLimitOverrideMetadataKey.
-	MetadataKey string `json:"metadataKey"`
-	// Unit is the rate limit time window: SECOND, MINUTE, HOUR, or DAY.
-	// Derived from the QuotaValue duration so the override and the static
-	// fallback share the same rate limit counter window.
-	Unit string `json:"unit"`
-}
-
-// QuotaLimitOverrideMetadataKey derives the dynamic metadata key under which a
-// parsed quota limit override is stored for the given header and rate limit unit.
-// Shared between the controller (filter config generation), the extension server
-// (route rate limit override wiring), and ext_proc (metadata emission).
-func QuotaLimitOverrideMetadataKey(headerName, unit string) string {
-	return "quota_limit_override_" + strings.ToLower(headerName) + "_" + unit
-}
-
-// RateLimitUnitForQuotaDuration maps a QuotaValue duration ("1s", "1m", "1h", "1d")
-// to the corresponding rate limit service unit. Returns false for unknown durations.
-func RateLimitUnitForQuotaDuration(duration string) (string, bool) {
-	switch duration {
-	case "1s":
-		return "SECOND", true
-	case "1m":
-		return "MINUTE", true
-	case "1h":
-		return "HOUR", true
-	case "1d":
-		return "DAY", true
-	default:
-		return "", false
-	}
 }
 
 // LLMRequestCostType specifies the kind of the request cost calculation.

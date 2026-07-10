@@ -157,7 +157,7 @@ func TestBuildServiceQuotaDescriptor(t *testing.T) {
 func TestBuildPerModelDescriptor(t *testing.T) {
 	t.Run("no bucket rules applies default directly", func(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
 		desc, err := buildPerModelDescriptor("gpt-4", quota)
 		require.NoError(t, err)
@@ -173,7 +173,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 			BucketRules: []aigv1a1.QuotaRule{
 				{Quota: aigv1a1.QuotaValue{Limit: 200, Duration: "1m"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 		}
 		desc, err := buildPerModelDescriptor("gpt-4", quota)
 		require.NoError(t, err)
@@ -187,7 +187,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 			BucketRules: []aigv1a1.QuotaRule{
 				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 0}, // zero limit = no default
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 0}, // zero limit = no default
 		}
 		desc, err := buildPerModelDescriptor("gpt-4", quota)
 		require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 				{Quota: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"}},
 				{Quota: aigv1a1.QuotaValue{Limit: 10, Duration: "1s"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 5, Duration: "1s"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 5, Duration: "1s"},
 		}
 		desc, err := buildPerModelDescriptor("model-x", quota)
 		require.NoError(t, err)
@@ -214,7 +214,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 
 	t.Run("invalid duration in default bucket", func(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "invalid"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "invalid"},
 		}
 		_, err := buildPerModelDescriptor("gpt-4", quota)
 		require.Error(t, err)
@@ -488,7 +488,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: nil,
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -510,7 +510,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -557,13 +557,13 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 					{
 						ModelName: ptr.To("claude"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
 						},
 					},
 				},
@@ -610,7 +610,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: ptr.To("bad-model"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "xyz"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "xyz"},
 						},
 					},
 				},
@@ -678,7 +678,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -705,7 +705,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -733,7 +733,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "bad"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "bad"},
 						},
 					},
 				},
@@ -764,7 +764,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 									Quota: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 								},
 							},
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
 						},
 					},
 				},
