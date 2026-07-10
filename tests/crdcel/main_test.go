@@ -309,6 +309,7 @@ func TestQuotaPolicies(t *testing.T) {
 		expErr string
 	}{
 		{name: "basic-dynamic-override.yaml"},
+		{name: "no-service-quota.yaml"},
 		{
 			name:   "shadow-with-override.yaml",
 			expErr: "dynamicOverride cannot be combined with shadowMode",
