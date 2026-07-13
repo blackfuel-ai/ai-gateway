@@ -322,6 +322,11 @@ func TestQuotaPolicies(t *testing.T) {
 	}{
 		{name: "basic-dynamic-override.yaml"},
 		{name: "no-service-quota.yaml"},
+		{name: "per-bucket-cost.yaml"},
+		{
+			name:   "cost-expression-with-requests.yaml",
+			expErr: "costExpression cannot be combined with costMetric=Requests",
+		},
 		{
 			name:   "shadow-with-override.yaml",
 			expErr: "dynamicOverride cannot be combined with shadowMode",

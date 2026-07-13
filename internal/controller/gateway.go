@@ -38,6 +38,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
+	"github.com/envoyproxy/ai-gateway/internal/ratelimit/translator"
 	"github.com/envoyproxy/ai-gateway/internal/version"
 )
 
@@ -1130,43 +1131,71 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 			if len(routeModels) > 0 && !routeModels[*pmq.ModelName] {
 				continue
 			}
-			expr := "total_tokens"
-			if pmq.Quota.CostExpression != nil {
-				expr = *pmq.Quota.CostExpression
-			}
-			if _, err := llmcostcel.NewProgram(expr); err != nil {
-				c.logger.Error(err, "invalid QuotaPolicy cost expression, skipping",
-					"policy", qp.Name, "model", *pmq.ModelName, "expression", expr)
-				continue
-			}
-			// One LLMRequestCost per target backend with the Backend and Model filters.
-			// ext_proc only evaluates the entry matching the serving backend and model,
-			// storing the result under the shared metadata key.
-			for _, ref := range qp.Spec.TargetRefs {
-				backendKey := route.Namespace + "/" + string(ref.Name)
-				dedupeKey := QuotaCostMetadataKey + "\x00" + *pmq.ModelName + "\x00" + backendKey
-				if _, exists := injectedQuotaCosts[dedupeKey]; exists {
+			// One LLMRequestCost per (bucket, target backend) with the Backend and
+			// Model filters. ext_proc only evaluates entries matching the serving
+			// backend and model, storing each bucket's cost under its own key.
+			for _, bucket := range quotaCostBuckets(&pmq.Quota) {
+				if _, err := llmcostcel.NewProgram(bucket.expr); err != nil {
+					c.logger.Error(err, "invalid QuotaPolicy cost expression, skipping",
+						"policy", qp.Name, "model", *pmq.ModelName, "bucket", bucket.key, "expression", bucket.expr)
 					continue
 				}
-				ec.LLMRequestCosts = append(ec.LLMRequestCosts, filterapi.LLMRequestCost{
-					Type:        filterapi.LLMRequestCostTypeCEL,
-					MetadataKey: QuotaCostMetadataKey,
-					CEL:         expr,
-					Backend:     backendKey,
-					RouteName:   routeName,
-					Model:       *pmq.ModelName,
-				})
-				injectedQuotaCosts[dedupeKey] = struct{}{}
+				metadataKey := translator.QuotaCostMetadataKey(bucket.key)
+				for _, ref := range qp.Spec.TargetRefs {
+					backendKey := route.Namespace + "/" + string(ref.Name)
+					dedupeKey := metadataKey + "\x00" + *pmq.ModelName + "\x00" + backendKey
+					if _, exists := injectedQuotaCosts[dedupeKey]; exists {
+						continue
+					}
+					ec.LLMRequestCosts = append(ec.LLMRequestCosts, filterapi.LLMRequestCost{
+						Type:        filterapi.LLMRequestCostTypeCEL,
+						MetadataKey: metadataKey,
+						CEL:         bucket.expr,
+						Backend:     backendKey,
+						RouteName:   routeName,
+						Model:       *pmq.ModelName,
+					})
+					injectedQuotaCosts[dedupeKey] = struct{}{}
+				}
 			}
 		}
 	}
 }
 
-// QuotaCostMetadataKey is the dynamic metadata key used to store a
-// QuotaPolicy's computed cost. A single key suffices because only one model
-// is active per request, and ext_proc filters cost entries by Model before
-// writing to this key.
-const QuotaCostMetadataKey = "quota_cost"
+// quotaCostBucket pairs one bucket's cost-metadata bucket key with its
+// resolved CEL cost expression (bucket-level, falling back to the model-level
+// expression, then "total_tokens").
+type quotaCostBucket struct {
+	key  string
+	expr string
+}
+
+// quotaCostBuckets returns the token-cost buckets of a model quota: the default
+// bucket plus each bucket rule, skipping Requests-metric buckets (those burn
+// down by the request-time +1 only and carry no stream-done token charge).
+func quotaCostBuckets(quota *aigv1a1.QuotaDefinition) []quotaCostBucket {
+	resolveExpr := func(v *aigv1a1.QuotaValue) string {
+		if v.CostExpression != nil {
+			return *v.CostExpression
+		}
+		if quota.CostExpression != nil {
+			return *quota.CostExpression
+		}
+		return "total_tokens"
+	}
+	var buckets []quotaCostBucket
+	if v := quota.DefaultBucket; v != nil && v.CostMetric != aigv1a1.QuotaCostMetricRequests {
+		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostDefaultBucketKey(), expr: resolveExpr(v)})
+	}
+	for i := range quota.BucketRules {
+		v := &quota.BucketRules[i].Quota
+		if v.CostMetric == aigv1a1.QuotaCostMetricRequests {
+			continue
+		}
+		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostRuleBucketKey(i), expr: resolveExpr(v)})
+	}
+	return buckets
+}
 
 // backendWithMaybeBSP retrieves the AIServiceBackend and its associated BackendSecurityPolicy if it exists.
 func (c *GatewayController) backendWithMaybeBSP(ctx context.Context, namespace, name string) (backend *aigv1b1.AIServiceBackend, bsp *aigv1b1.BackendSecurityPolicy, err error) {

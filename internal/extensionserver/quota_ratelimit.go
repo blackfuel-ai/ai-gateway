@@ -75,10 +75,6 @@ const (
 	quotaOverrideLuaFilterName = "envoy.filters.http.lua/ai-gateway-quota-override"
 	// defaultQuotaRateLimitServicePort is the default gRPC port for the rate limit service.
 	defaultQuotaRateLimitServicePort = 8081
-
-	// quotaCostMetadataKey is the dynamic metadata key where ext_proc stores
-	// the computed quota cost for the current request.
-	quotaCostMetadataKey = "quota_cost"
 )
 
 // maybeInjectQuotaRateLimiting injects the rate limit HTTP filter into the HCM
@@ -624,12 +620,13 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 				rateLimitActions = append(rateLimitActions, entries...)
 				// Simple case: 2-level stream-done (backend_name + model_name_override).
 				// All simple entries are identical (metadata-only actions, same hits_addend).
+				// Requests-metric buckets burn down by the request-time +1 only.
 				const simpleStreamDoneKey = "_simple_"
-				if !seenStreamDoneKeys[simpleStreamDoneKey] {
+				if pmq.Quota.DefaultBucket.CostMetric != aigv1a1.QuotaCostMetricRequests && !seenStreamDoneKeys[simpleStreamDoneKey] {
 					seenStreamDoneKeys[simpleStreamDoneKey] = true
 					streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
 						Actions:           baseDescriptorActions(),
-						HitsAddend:        quotaHitsAddend(),
+						HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostDefaultBucketKey())),
 						ApplyOnStreamDone: true,
 					})
 				}
@@ -638,9 +635,13 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 				rateLimitActions = append(rateLimitActions, bucketActions...)
 				// Bucket rules: one stream-done per unique rule/header structure.
 				// Stream-done actions read backend/model from dynamic metadata and
-				// hits_addend uses a single quota_cost key, so entries are identical
-				// regardless of target or model.
+				// hits_addend reads the rule's own cost key, so entries are identical
+				// regardless of target or model (rule keys are index-based).
+				// Requests-metric buckets burn down by the request-time +1 only.
 				for rIdx, rule := range pmq.Quota.BucketRules {
+					if rule.Quota.CostMetric == aigv1a1.QuotaCostMetricRequests {
+						continue
+					}
 					headers := flattenAndSortClientSelectorHeaders(rule.ClientSelectors)
 					var dupKey string
 					for mIdx, hdr := range headers {
@@ -654,13 +655,14 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 						clientActions := buildClientSelectorStreamDoneActions(rIdx, rule.ClientSelectors)
 						streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
 							Actions:           append(baseDescriptorActions(), clientActions...),
-							HitsAddend:        quotaHitsAddend(),
+							HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostRuleBucketKey(rIdx))),
 							ApplyOnStreamDone: true,
 						})
 					}
 				}
 				// Default bucket: 3-level stream-done with GenericKey (always fires).
-				if pmq.Quota.DefaultBucket != nil && pmq.Quota.DefaultBucket.Limit > 0 {
+				if pmq.Quota.DefaultBucket != nil && pmq.Quota.DefaultBucket.Limit > 0 &&
+					pmq.Quota.DefaultBucket.CostMetric != aigv1a1.QuotaCostMetricRequests {
 					defaultKey := translator.DefaultBucketDescriptorKey(len(pmq.Quota.BucketRules))
 					dupDefaultKey := defaultKey
 					if !seenStreamDoneKeys[dupDefaultKey] {
@@ -674,7 +676,7 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 									},
 								},
 							}),
-							HitsAddend:        quotaHitsAddend(),
+							HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostDefaultBucketKey())),
 							ApplyOnStreamDone: true,
 						})
 					}
@@ -933,12 +935,14 @@ func rateLimitUnitForQuotaDuration(duration string) (string, bool) {
 	}
 }
 
-// quotaHitsAddend returns the HitsAddend that reads the quota cost from dynamic
-// metadata stored by the ext_proc filter.
-func quotaHitsAddend() *routev3.RateLimit_HitsAddend {
+// quotaHitsAddend returns the HitsAddend that reads one bucket's quota cost
+// from the dynamic metadata key stored by the ext_proc filter. When the key was
+// not written for the current request (a bucket another model does not have),
+// the format resolves to nothing and Envoy ignores the descriptor.
+func quotaHitsAddend(costMetadataKey string) *routev3.RateLimit_HitsAddend {
 	return &routev3.RateLimit_HitsAddend{
 		Format: fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%",
-			aigv1b1.AIGatewayFilterMetadataNamespace, quotaCostMetadataKey),
+			aigv1b1.AIGatewayFilterMetadataNamespace, costMetadataKey),
 	}
 }
 

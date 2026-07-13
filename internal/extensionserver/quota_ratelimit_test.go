@@ -429,9 +429,9 @@ func TestEnableQuotaRateLimitOnRoute_DescriptorChain(t *testing.T) {
 }
 
 func TestQuotaHitsAddend(t *testing.T) {
-	ha := quotaHitsAddend()
+	ha := quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostRuleBucketKey(3)))
 	require.NotNil(t, ha)
-	expectedFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace, quotaCostMetadataKey)
+	expectedFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:quota_cost_rule-3)%%", aigv1b1.AIGatewayFilterMetadataNamespace)
 	require.Equal(t, expectedFormat, ha.Format)
 }
 
@@ -2662,4 +2662,60 @@ func TestQuotaOverrideLuaFilter(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, updated.HttpFilters, 4)
 	})
+}
+
+func TestEnableQuotaRateLimitOnRoute_PerBucketCost(t *testing.T) {
+	route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+	orgSelector := []egv1a1.RateLimitSelectCondition{
+		{Headers: []egv1a1.HeaderMatch{{Name: "x-org-id", Type: ptr.To(egv1a1.HeaderMatchDistinct)}}},
+	}
+	policies := []aigv1a1.QuotaPolicy{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+			Spec: aigv1a1.QuotaPolicySpec{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: "test-backend"}},
+				PerModelQuotas: []aigv1a1.PerModelQuota{
+					{
+						ModelName: ptr.To("gpt-4"),
+						Quota: aigv1a1.QuotaDefinition{
+							BucketRules: []aigv1a1.QuotaRule{
+								// Requests-metric bucket: request-time only, no stream-done.
+								{ClientSelectors: orgSelector, Quota: aigv1a1.QuotaValue{
+									Limit: 100, Duration: "1m", CostMetric: aigv1a1.QuotaCostMetricRequests,
+								}},
+								// Token bucket with its own expression.
+								{ClientSelectors: orgSelector, Quota: aigv1a1.QuotaValue{
+									Limit: 1000, Duration: "1h",
+									CostExpression: ptr.To("input_tokens - cached_input_tokens"),
+								}},
+							},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1d"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+
+	rateLimits := quotaRateLimitsOnRoute(t, route)
+
+	// 3 request-time entries (rule-0, rule-1, default) + 2 stream-done entries
+	// (rule-1 tokens + default tokens; rule-0 is Requests-metric and has none).
+	require.Len(t, rateLimits, 5)
+
+	var streamDone []*routev3.RateLimit
+	for _, rl := range rateLimits {
+		if rl.ApplyOnStreamDone {
+			streamDone = append(streamDone, rl)
+		}
+	}
+	require.Len(t, streamDone, 2)
+
+	// Each stream-done entry reads its own bucket's cost metadata key.
+	ruleFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:quota_cost_rule-1)%%", aigv1b1.AIGatewayFilterMetadataNamespace)
+	defaultFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:quota_cost_default)%%", aigv1b1.AIGatewayFilterMetadataNamespace)
+	require.Equal(t, ruleFormat, streamDone[0].HitsAddend.Format)
+	require.Equal(t, defaultFormat, streamDone[1].HitsAddend.Format)
 }
