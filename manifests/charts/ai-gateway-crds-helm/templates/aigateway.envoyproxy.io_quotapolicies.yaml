@@ -299,6 +299,22 @@ spec:
                                     - 1h
                                     - 1d
                                     type: string
+                                  dynamicOverride:
+                                    description: |-
+                                      DynamicOverride supplies the limit at request time, falling back to Limit
+                                      when the source is absent or malformed. The time window is always Duration.
+                                    properties:
+                                      fromHeader:
+                                        description: |-
+                                          FromHeader names a request header whose value is a non-negative integer limit
+                                          for the current time window. A value of 0 blocks all matching requests.
+                                          The header must be set or overwritten by a trusted component
+                                          (e.g. an external authorization service) and never accepted from clients.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                    - fromHeader
+                                    type: object
                                   limit:
                                     description: The limit alloted for a specified
                                       time window.
@@ -317,6 +333,10 @@ spec:
                             required:
                             - quota
                             type: object
+                            x-kubernetes-validations:
+                            - message: dynamicOverride cannot be combined with shadowMode
+                              rule: '!(has(self.shadowMode) && self.shadowMode &&
+                                has(self.quota.dynamicOverride))'
                           type: array
                         costExpression:
                           description: |-
@@ -341,6 +361,22 @@ spec:
                               - 1h
                               - 1d
                               type: string
+                            dynamicOverride:
+                              description: |-
+                                DynamicOverride supplies the limit at request time, falling back to Limit
+                                when the source is absent or malformed. The time window is always Duration.
+                              properties:
+                                fromHeader:
+                                  description: |-
+                                    FromHeader names a request header whose value is a non-negative integer limit
+                                    for the current time window. A value of 0 blocks all matching requests.
+                                    The header must be set or overwritten by a trusted component
+                                    (e.g. an external authorization service) and never accepted from clients.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - fromHeader
+                              type: object
                             limit:
                               description: The limit alloted for a specified time
                                 window.
@@ -394,6 +430,22 @@ spec:
                         - 1h
                         - 1d
                         type: string
+                      dynamicOverride:
+                        description: |-
+                          DynamicOverride supplies the limit at request time, falling back to Limit
+                          when the source is absent or malformed. The time window is always Duration.
+                        properties:
+                          fromHeader:
+                            description: |-
+                              FromHeader names a request header whose value is a non-negative integer limit
+                              for the current time window. A value of 0 blocks all matching requests.
+                              The header must be set or overwritten by a trusted component
+                              (e.g. an external authorization service) and never accepted from clients.
+                            minLength: 1
+                            type: string
+                        required:
+                        - fromHeader
+                        type: object
                       limit:
                         description: The limit alloted for a specified time window.
                         type: integer
@@ -404,6 +456,9 @@ spec:
                 required:
                 - quota
                 type: object
+                x-kubernetes-validations:
+                - message: serviceQuota does not support dynamicOverride
+                  rule: '!has(self.quota.dynamicOverride)'
               targetRefs:
                 description: TargetRefs are the names of the AIServiceBackend resources
                   this QuotaPolicy is being attached to.

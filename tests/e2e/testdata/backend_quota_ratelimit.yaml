@@ -61,6 +61,22 @@ spec:
       backendRefs:
         - name: envoy-ai-gateway-quota-ratelimit-testupstream
           modelNameOverride: quota-test-model
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: quota-dynamic-model
+      backendRefs:
+        - name: envoy-ai-gateway-quota-ratelimit-testupstream
+          modelNameOverride: quota-dynamic-model
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: quota-org-model
+      backendRefs:
+        - name: envoy-ai-gateway-quota-ratelimit-testupstream
+          modelNameOverride: quota-org-model
   # The following metadata keys are used to store the costs from the LLM request.
   llmRequestCosts:
     - metadataKey: llm_input_token
@@ -113,6 +129,29 @@ spec:
           # subsequent requests should be rate limited (429).
           limit: 10
           duration: "1h"
+    - modelName: "quota-dynamic-model"
+      quota:
+        mode: Shared
+        defaultBucket:
+          # Static fallback of 5 total tokens per hour; the x-test-quota-limit
+          # header supplies a per-request limit override parsed by ext_proc.
+          limit: 5
+          duration: "1h"
+          dynamicOverride:
+            fromHeader: x-test-quota-limit
+    - modelName: "quota-org-model"
+      quota:
+        mode: Shared
+        # Per-org buckets: each distinct x-org-id gets its own 100-token/1h
+        # budget. Exercised by the per-org token burndown xfail test.
+        bucketRules:
+          - clientSelectors:
+              - headers:
+                  - name: x-org-id
+                    type: Distinct
+            quota:
+              limit: 100
+              duration: "1h"
 ---
 apiVersion: apps/v1
 kind: Deployment

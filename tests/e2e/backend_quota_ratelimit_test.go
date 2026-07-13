@@ -30,7 +30,9 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 	// Apply Redis manifest (shared with token rate limit tests).
 	require.NoError(t, e2elib.KubectlApplyManifest(t.Context(), "../../examples/token_ratelimit/redis.yaml"))
 	t.Cleanup(func() {
-		_ = e2elib.KubectlDeleteManifest(context.Background(), "../../examples/token_ratelimit/redis.yaml")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = e2elib.KubectlDeleteManifest(ctx, "../../examples/token_ratelimit/redis.yaml")
 	})
 
 	// Wait for the redis pod to be ready so that the rate limit service can connect.
@@ -38,7 +40,12 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 
 	require.NoError(t, e2elib.KubectlApplyManifest(t.Context(), "testdata/backend_quota_ratelimit.yaml"))
 	t.Cleanup(func() {
-		_ = e2elib.KubectlDeleteManifest(context.Background(), "testdata/backend_quota_ratelimit.yaml")
+		// Bounded: a QuotaPolicy finalizer that a starved controller has not
+		// removed yet would otherwise block this delete until the go test
+		// timeout.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = e2elib.KubectlDeleteManifest(ctx, "testdata/backend_quota_ratelimit.yaml")
 	})
 
 	const egSelector = "gateway.envoyproxy.io/owning-gateway-name=envoy-ai-gateway-quota-ratelimit"
@@ -62,21 +69,44 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 			totalTokens,
 		)
 
-		req, err := http.NewRequest(http.MethodPut, fwd.Address()+"/v1/chat/completions", strings.NewReader(requestBody))
-		require.NoError(t, err)
-		req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
-		req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
-		req.Header.Set("Host", "openai.com")
-		for _, h := range headers {
-			for k, vals := range h {
-				for _, v := range vals {
-					req.Header.Set(k, v)
+		newRequest := func() *http.Request {
+			req, err := http.NewRequest(http.MethodPut, fwd.Address()+"/v1/chat/completions", strings.NewReader(requestBody))
+			require.NoError(t, err)
+			req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
+			req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+			req.Header.Set("Host", "openai.com")
+			for _, h := range headers {
+				for k, vals := range h {
+					for _, v := range vals {
+						req.Header.Set(k, v)
+					}
 				}
 			}
+			return req
 		}
 
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
+		// A bounded client: without a timeout, one hung request on a starved
+		// CI runner stalls the whole suite until the go test timeout.
+		client := &http.Client{Timeout: 30 * time.Second}
+
+		// Retry 404s: right after the manifests are applied, the route may not
+		// be programmed in the proxy yet. The 404 fallback carries no quota
+		// rate limits, so retried requests do not consume any counter and the
+		// exact Redis assertions below stay valid.
+		var resp *http.Response
+		require.Eventually(t, func() bool {
+			r, doErr := client.Do(newRequest()) //nolint:bodyclose // closed below or on the retry path.
+			if doErr != nil {
+				t.Logf("request failed, retrying: %v", doErr)
+				return false
+			}
+			if expectedStatus != http.StatusNotFound && r.StatusCode == http.StatusNotFound {
+				_ = r.Body.Close()
+				return false
+			}
+			resp = r
+			return true
+		}, 30*time.Second, 500*time.Millisecond, "request kept failing or returning 404")
 		defer func() { _ = resp.Body.Close() }()
 
 		body, err := io.ReadAll(resp.Body)
@@ -93,6 +123,88 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		makeRequest("quota-test-model", 5, http.StatusTooManyRequests)
 		requireQuotaUsage(t, "quota-test-model", 22)
 	})
+
+	// Test the per-request limit override for "quota-dynamic-model": the static
+	// fallback is 5 total tokens per hour, and the x-test-quota-limit header
+	// supplies the limit at request time. The override and the static fallback
+	// share the same Redis counter.
+	t.Run("dynamic limit override", func(t *testing.T) {
+		limitHeader := func(v string) http.Header { return http.Header{"x-test-quota-limit": []string{v}} }
+
+		// Exhaust the static fallback limit (5): first request passes, second is rejected.
+		makeRequest("quota-dynamic-model", 20, http.StatusOK)
+		requireQuotaUsage(t, "quota-dynamic-model", 21)
+		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests)
+		requireQuotaUsage(t, "quota-dynamic-model", 22)
+
+		// The header raises the limit past the current counter: allowed again,
+		// and the burndown lands on the same counter.
+		makeRequest("quota-dynamic-model", 5, http.StatusOK, limitHeader("1000"))
+		requireQuotaUsage(t, "quota-dynamic-model", 28)
+
+		// A zero override blocks the request outright.
+		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests, limitHeader("0"))
+
+		// A malformed override falls back to the static limit (5), which is exhausted.
+		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests, limitHeader("not-a-number"))
+	})
+
+	// Expected failure: per-org token burndown. For Distinct client selectors
+	// the stream-done charge action degrades to a constant generic key, so the
+	// response's total_tokens land in a shared counter outside the per-org
+	// bucket and per-org buckets are burned down by request count (+1) only.
+	// "quota-org-model" gives each distinct x-org-id a 100-token/1h bucket: a
+	// single 200-token response should exhaust it, but the next request is
+	// still admitted. The sub-test skips while the limitation holds and fails
+	// if per-org token burndown unexpectedly starts working, so the xfail (and
+	// this comment) get removed together with the fix.
+	t.Run("per-org token burndown (xfail)", func(t *testing.T) {
+		orgHeader := http.Header{"x-org-id": []string{"org-burndown-a"}}
+
+		makeRequest("quota-org-model", 200, http.StatusOK, orgHeader)
+
+		// Give the asynchronous stream-done charge time to land, then check
+		// whether it reached the per-org bucket.
+		time.Sleep(5 * time.Second)
+		fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+		defer fwd.Kill()
+
+		req := newChatRequest(t, fwd.Address(), "quota-org-model", 5, orgHeader)
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			t.Fatal("per-org token burndown unexpectedly works: remove this xfail and assert 429 directly")
+		}
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		t.Skip("known limitation: Distinct-selector stream-done charge misses the per-org bucket; per-org quotas count requests, not tokens")
+	})
+}
+
+// newChatRequest builds one chat completion request against the test upstream
+// with the given total_tokens in the fake response.
+func newChatRequest(t *testing.T, addr, modelName string, totalTokens int, headers ...http.Header) *http.Request {
+	t.Helper()
+	requestBody := fmt.Sprintf(`{"messages":[{"role":"user","content":"Say this is a test"}],"model":"%s"}`, modelName)
+	fakeResponseBody := fmt.Sprintf(
+		`{"choices":[{"message":{"content":"This is a test.","role":"assistant"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":%d}}`,
+		totalTokens,
+	)
+	req, err := http.NewRequest(http.MethodPut, addr+"/v1/chat/completions", strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
+	req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+	req.Header.Set("Host", "openai.com")
+	for _, h := range headers {
+		for k, vals := range h {
+			for _, v := range vals {
+				req.Header.Set(k, v)
+			}
+		}
+	}
+	return req
 }
 
 // redisExec runs a redis-cli command on the Redis pod and returns the output.
