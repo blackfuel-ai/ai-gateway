@@ -882,6 +882,9 @@ func buildQuotaOverrideLuaFilter(specs []quotaOverrideSpec) (*httpconnectionmana
         request_handle:streamInfo():dynamicMetadata():set(%q, o.key,
           {requests_per_unit = n, unit = o.unit})
       end
+      -- The override header is internal to the gateway: strip it so it never
+      -- reaches the upstream provider or a chained gateway tier.
+      request_handle:headers():remove(o.header)
     end
   end
 end
