@@ -289,6 +289,23 @@ spec:
                                   A response with 429 HTTP status code is sent back to the client when
                                   the selected requests have exceeded the quota.
                                 properties:
+                                  costExpression:
+                                    description: |-
+                                      CostExpression is a per-bucket CEL expression for computing this bucket's
+                                      quota burndown. When unset, the model-level CostExpression applies, then
+                                      "total_tokens". Ignored when CostMetric is "Requests".
+                                    type: string
+                                  costMetric:
+                                    default: Tokens
+                                    description: |-
+                                      CostMetric selects what this bucket counts. "Tokens" (the default) burns
+                                      the bucket down at stream-done by CostExpression (or the model-level
+                                      fallback). "Requests" burns the bucket down by exactly 1 per request at
+                                      request time and adds no stream-done token charge.
+                                    enum:
+                                    - Tokens
+                                    - Requests
+                                    type: string
                                   duration:
                                     description: 'Time window. Must be exactly one
                                       of: "1s" (1 second), "1m" (1 minute), "1h" (1
@@ -323,6 +340,11 @@ spec:
                                 - duration
                                 - limit
                                 type: object
+                                x-kubernetes-validations:
+                                - message: costExpression cannot be combined with
+                                    costMetric=Requests
+                                  rule: '!(has(self.costExpression) && has(self.costMetric)
+                                    && self.costMetric == ''Requests'')'
                               shadowMode:
                                 description: |-
                                   ShadowMode indicates whether this quota rule runs in shadow mode.
@@ -351,6 +373,23 @@ spec:
                             Quota applicable to all traffic. This value can be overridden for specific classes of requests
                             using the "BucketRules" configuration.
                           properties:
+                            costExpression:
+                              description: |-
+                                CostExpression is a per-bucket CEL expression for computing this bucket's
+                                quota burndown. When unset, the model-level CostExpression applies, then
+                                "total_tokens". Ignored when CostMetric is "Requests".
+                              type: string
+                            costMetric:
+                              default: Tokens
+                              description: |-
+                                CostMetric selects what this bucket counts. "Tokens" (the default) burns
+                                the bucket down at stream-done by CostExpression (or the model-level
+                                fallback). "Requests" burns the bucket down by exactly 1 per request at
+                                request time and adds no stream-done token charge.
+                              enum:
+                              - Tokens
+                              - Requests
+                              type: string
                             duration:
                               description: 'Time window. Must be exactly one of: "1s"
                                 (1 second), "1m" (1 minute), "1h" (1 hour), or "1d"
@@ -385,6 +424,10 @@ spec:
                           - duration
                           - limit
                           type: object
+                          x-kubernetes-validations:
+                          - message: costExpression cannot be combined with costMetric=Requests
+                            rule: '!(has(self.costExpression) && has(self.costMetric)
+                              && self.costMetric == ''Requests'')'
                         mode:
                           default: Shared
                           description: |-
@@ -421,6 +464,23 @@ spec:
                       A response with 429 HTTP status code is sent back to the client when
                       the selected requests have exceeded the quota.
                     properties:
+                      costExpression:
+                        description: |-
+                          CostExpression is a per-bucket CEL expression for computing this bucket's
+                          quota burndown. When unset, the model-level CostExpression applies, then
+                          "total_tokens". Ignored when CostMetric is "Requests".
+                        type: string
+                      costMetric:
+                        default: Tokens
+                        description: |-
+                          CostMetric selects what this bucket counts. "Tokens" (the default) burns
+                          the bucket down at stream-done by CostExpression (or the model-level
+                          fallback). "Requests" burns the bucket down by exactly 1 per request at
+                          request time and adds no stream-done token charge.
+                        enum:
+                        - Tokens
+                        - Requests
+                        type: string
                       duration:
                         description: 'Time window. Must be exactly one of: "1s" (1
                           second), "1m" (1 minute), "1h" (1 hour), or "1d" (1 day).'
@@ -453,6 +513,10 @@ spec:
                     - duration
                     - limit
                     type: object
+                    x-kubernetes-validations:
+                    - message: costExpression cannot be combined with costMetric=Requests
+                      rule: '!(has(self.costExpression) && has(self.costMetric) &&
+                        self.costMetric == ''Requests'')'
                 required:
                 - quota
                 type: object

@@ -159,6 +159,8 @@ type QuotaRule struct {
 }
 
 // QuotaValue defines the quota limits using sliding window.
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.costExpression) && has(self.costMetric) && self.costMetric == 'Requests')",message="costExpression cannot be combined with costMetric=Requests"
 type QuotaValue struct {
 	// The limit alloted for a specified time window.
 	Limit uint `json:"limit"`
@@ -171,7 +173,32 @@ type QuotaValue struct {
 	//
 	// +optional
 	DynamicOverride *QuotaLimitOverride `json:"dynamicOverride,omitempty"`
+	// CostMetric selects what this bucket counts. "Tokens" (the default) burns
+	// the bucket down at stream-done by CostExpression (or the model-level
+	// fallback). "Requests" burns the bucket down by exactly 1 per request at
+	// request time and adds no stream-done token charge.
+	//
+	// +optional
+	// +kubebuilder:default=Tokens
+	CostMetric QuotaCostMetric `json:"costMetric,omitempty"`
+	// CostExpression is a per-bucket CEL expression for computing this bucket's
+	// quota burndown. When unset, the model-level CostExpression applies, then
+	// "total_tokens". Ignored when CostMetric is "Requests".
+	//
+	// +optional
+	CostExpression *string `json:"costExpression,omitempty"`
 }
+
+// QuotaCostMetric selects whether a bucket counts tokens (stream-done charge)
+// or requests (request-time +1 only).
+//
+// +kubebuilder:validation:Enum=Tokens;Requests
+type QuotaCostMetric string
+
+const (
+	QuotaCostMetricTokens   QuotaCostMetric = "Tokens"
+	QuotaCostMetricRequests QuotaCostMetric = "Requests"
+)
 
 // QuotaLimitOverride specifies a per-request source for the quota limit value.
 type QuotaLimitOverride struct {

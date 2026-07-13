@@ -847,3 +847,12 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 		require.Equal(t, rlsconfv3.RateLimitUnit_HOUR, backendDesc.Descriptors[0].RateLimit.Unit)
 	})
 }
+
+func TestQuotaCostMetadataKeyHelpers(t *testing.T) {
+	require.Equal(t, "rule-0", QuotaCostRuleBucketKey(0))
+	require.Equal(t, "rule-7", QuotaCostRuleBucketKey(7))
+	require.Equal(t, "default", QuotaCostDefaultBucketKey())
+	require.Equal(t, "quota_cost_rule-3", QuotaCostMetadataKey(QuotaCostRuleBucketKey(3)))
+	require.Equal(t, "quota_cost_default", QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
+	require.NotEqual(t, QuotaCostMetadataKey(QuotaCostRuleBucketKey(0)), QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
+}
