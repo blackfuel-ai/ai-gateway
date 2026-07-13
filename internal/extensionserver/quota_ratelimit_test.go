@@ -2626,6 +2626,8 @@ func TestQuotaOverrideLuaFilter(t *testing.T) {
 		require.Contains(t, script, `{header = "x-bf-quota-limit", key = "quota_limit_override_x-bf-quota-limit_HOUR", unit = "HOUR"}`)
 		require.Contains(t, script, aigv1b1.AIGatewayFilterMetadataNamespace)
 		require.Contains(t, script, "envoy_on_request")
+		// The internal override header must be stripped after parsing.
+		require.Contains(t, script, `headers():remove(o.header)`)
 	})
 
 	t.Run("listener injection places lua before the quota filters", func(t *testing.T) {
