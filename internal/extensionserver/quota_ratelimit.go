@@ -128,6 +128,7 @@ func (s *Server) maybeInjectQuotaRateLimiting(
 
 	// Only inject the rate limit filters into listeners whose routes have quota backends.
 	overrideSpecs := collectQuotaOverrideSpecs(quotaPolicies)
+	distinctHeaders := collectQuotaDistinctHeaders(quotaPolicies)
 	for _, ln := range listeners {
 		hasQuotaRoute := false
 		for _, rcName := range findListenerRouteConfigs(ln) {
@@ -137,7 +138,7 @@ func (s *Server) maybeInjectQuotaRateLimiting(
 			}
 		}
 		if hasQuotaRoute {
-			if err := s.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, overrideSpecs); err != nil {
+			if err := s.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, overrideSpecs, distinctHeaders); err != nil {
 				s.log.Error(err, "failed to inject quota rate limit filter into listener", "listener", ln.Name)
 			}
 		}
@@ -209,7 +210,7 @@ func (s *Server) buildQuotaRateLimitCluster() *clusterv3.Cluster {
 // injectQuotaRateLimitFilterIntoListener adds the quota rate limit HTTP filter
 // into the HCM filter chain of the given listener. The filter is inserted before the
 // router filter. It is a no-op on routes without per-route RateLimitPerRoute config.
-func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener, domain string, overrideSpecs []quotaOverrideSpec) error {
+func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener, domain string, overrideSpecs []quotaOverrideSpec, distinctHeaders []string) error {
 	filterChains := ln.GetFilterChains()
 	if ln.DefaultFilterChain != nil {
 		filterChains = append(filterChains, ln.DefaultFilterChain)
@@ -219,8 +220,8 @@ func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener,
 	// request-time filter so the parsed limit metadata exists when the rate
 	// limit entries are evaluated.
 	var filters []*httpconnectionmanagerv3.HttpFilter
-	if len(overrideSpecs) > 0 {
-		luaFilter, err := buildQuotaOverrideLuaFilter(overrideSpecs)
+	if len(overrideSpecs) > 0 || len(distinctHeaders) > 0 {
+		luaFilter, err := buildQuotaOverrideLuaFilter(overrideSpecs, distinctHeaders)
 		if err != nil {
 			return fmt.Errorf("failed to build quota override lua filter: %w", err)
 		}
@@ -867,12 +868,22 @@ func collectQuotaOverrideSpecs(policies []aigv1a1.QuotaPolicy) []quotaOverrideSp
 // non-numeric header writes nothing, so Envoy falls back to the static limit;
 // 0 is a valid value that blocks the bucket. requests_per_unit is a uint32 in
 // the rate limit protocol, hence the bounds check.
-func buildQuotaOverrideLuaFilter(specs []quotaOverrideSpec) (*httpconnectionmanagerv3.HttpFilter, error) {
+//
+// It also copies each Distinct selector header's value into dynamic metadata:
+// request headers are not available on the stream-done path, so the charge
+// entries read the per-request bucket value (e.g. the organization id) from
+// metadata instead.
+func buildQuotaOverrideLuaFilter(specs []quotaOverrideSpec, distinctHeaders []string) (*httpconnectionmanagerv3.HttpFilter, error) {
 	var sb strings.Builder
 	sb.WriteString("local overrides = {\n")
 	for _, spec := range specs {
 		fmt.Fprintf(&sb, "  {header = %q, key = %q, unit = %q},\n",
 			spec.headerName, quotaLimitOverrideMetadataKey(spec.headerName, spec.unit), spec.unit)
+	}
+	sb.WriteString("}\n")
+	sb.WriteString("local distinct_headers = {\n")
+	for _, hdr := range distinctHeaders {
+		fmt.Fprintf(&sb, "  {header = %q, key = %q},\n", hdr, quotaDistinctHeaderMetadataKey(hdr))
 	}
 	sb.WriteString("}\n")
 	fmt.Fprintf(&sb, `function envoy_on_request(request_handle)
@@ -889,8 +900,14 @@ func buildQuotaOverrideLuaFilter(specs []quotaOverrideSpec) (*httpconnectionmana
       request_handle:headers():remove(o.header)
     end
   end
+  for _, d in ipairs(distinct_headers) do
+    local v = request_handle:headers():get(d.header)
+    if v ~= nil then
+      request_handle:streamInfo():dynamicMetadata():set(%q, d.key, v)
+    end
+  end
 end
-`, aigv1b1.AIGatewayFilterMetadataNamespace)
+`, aigv1b1.AIGatewayFilterMetadataNamespace, aigv1b1.AIGatewayFilterMetadataNamespace)
 
 	luaCfg := &luav3.Lua{
 		DefaultSourceCode: &corev3.DataSource{
@@ -907,6 +924,41 @@ end
 			TypedConfig: cfgAny,
 		},
 	}, nil
+}
+
+// quotaDistinctHeaderMetadataKey derives the dynamic metadata key under which
+// the quota Lua filter stores a Distinct selector header's request value for
+// the stream-done charge to read.
+func quotaDistinctHeaderMetadataKey(headerName string) string {
+	return "quota_distinct_header_" + strings.ToLower(headerName)
+}
+
+// collectQuotaDistinctHeaders gathers the distinct-match header names across
+// all policies' bucket rules, sorted for
+// deterministic Lua script generation. The Lua filter copies each into dynamic
+// metadata so stream-done charge actions can key descriptors by header value.
+func collectQuotaDistinctHeaders(policies []aigv1a1.QuotaPolicy) []string {
+	seen := make(map[string]bool)
+	addRules := func(rules []aigv1a1.QuotaRule) {
+		for i := range rules {
+			for _, hdr := range flattenAndSortClientSelectorHeaders(rules[i].ClientSelectors) {
+				if hdr.Type != nil && *hdr.Type == egv1a1.HeaderMatchDistinct {
+					seen[strings.ToLower(hdr.Name)] = true
+				}
+			}
+		}
+	}
+	for i := range policies {
+		for _, pmq := range policies[i].Spec.PerModelQuotas {
+			addRules(pmq.Quota.BucketRules)
+		}
+	}
+	headers := make([]string, 0, len(seen))
+	for h := range seen {
+		headers = append(headers, h)
+	}
+	sort.Strings(headers)
+	return headers
 }
 
 // quotaLimitOverrideMetadataKey derives the dynamic metadata key under which a
@@ -1113,11 +1165,26 @@ func buildStreamDoneHeaderMatchAction(
 	descriptorKey := translator.BucketRuleDescriptorKey(ruleIndex, matchIndex, header.Name, headerMatchKeyValue(header))
 
 	if header.Type != nil && *header.Type == egv1a1.HeaderMatchDistinct {
+		// Request headers are not available on the stream-done path, so the
+		// quota Lua filter copies each Distinct header's value into dynamic
+		// metadata at request time and the charge reads it from there. This
+		// sends the same (key, header value) descriptor tuple as the
+		// request-time RequestHeaders action, landing the charge on the same
+		// per-value counter. When the metadata is absent (the request did not
+		// carry the header), the descriptor is not generated — matching the
+		// request-time entry, which skips too.
 		return &routev3.RateLimit_Action{
-			ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
-				GenericKey: &routev3.RateLimit_Action_GenericKey{
-					DescriptorKey:   descriptorKey,
-					DescriptorValue: descriptorKey,
+			ActionSpecifier: &routev3.RateLimit_Action_Metadata{
+				Metadata: &routev3.RateLimit_Action_MetaData{
+					DescriptorKey: descriptorKey,
+					MetadataKey: &metadatav3.MetadataKey{
+						Key: aigv1b1.AIGatewayFilterMetadataNamespace,
+						Path: []*metadatav3.MetadataKey_PathSegment{{
+							Segment: &metadatav3.MetadataKey_PathSegment_Key{
+								Key: quotaDistinctHeaderMetadataKey(header.Name),
+							},
+						}},
+					},
 				},
 			},
 		}

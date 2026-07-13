@@ -130,7 +130,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: wellknown.Router},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil, nil))
 
 		filters := getHCMFilters(t, ln)
 		require.Len(t, filters, 4)
@@ -165,7 +165,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: wellknown.Router},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil, nil))
 
 		// The stream-done filter is not duplicated; the request-time filter is added.
 		filters := getHCMFilters(t, ln)
@@ -179,7 +179,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: "envoy.filters.http.health_check"},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil, nil))
 
 		filters := getHCMFilters(t, ln)
 		require.Len(t, filters, 3)
@@ -192,10 +192,10 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 			{Name: wellknown.Router},
 		})
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil, nil))
 		require.Len(t, getHCMFilters(t, ln), 3)
 
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil, nil))
 		require.Len(t, getHCMFilters(t, ln), 3)
 	})
 
@@ -210,7 +210,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 				},
 			},
 		}
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil, nil))
 	})
 }
 
@@ -518,7 +518,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners_FullHCMChain(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil))
+	require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, nil, nil))
 
 	updatedHCM, _, err := findHCM(ln.FilterChains[0])
 	require.NoError(t, err)
@@ -2617,7 +2617,7 @@ func TestQuotaOverrideLuaFilter(t *testing.T) {
 	})
 
 	t.Run("lua script carries header, key, unit and namespace", func(t *testing.T) {
-		filter, err := buildQuotaOverrideLuaFilter([]quotaOverrideSpec{{headerName: "x-bf-quota-limit", unit: "HOUR"}})
+		filter, err := buildQuotaOverrideLuaFilter([]quotaOverrideSpec{{headerName: "x-bf-quota-limit", unit: "HOUR"}}, nil)
 		require.NoError(t, err)
 		require.Equal(t, quotaOverrideLuaFilterName, filter.Name)
 		luaCfg := &luav3.Lua{}
@@ -2646,7 +2646,7 @@ func TestQuotaOverrideLuaFilter(t *testing.T) {
 			}},
 		}
 		specs := []quotaOverrideSpec{{headerName: "x-bf-quota-limit", unit: "HOUR"}}
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, specs))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, specs, nil))
 
 		updated, _, err := findHCM(ln.FilterChains[0])
 		require.NoError(t, err)
@@ -2657,7 +2657,7 @@ func TestQuotaOverrideLuaFilter(t *testing.T) {
 		require.Equal(t, wellknown.Router, updated.HttpFilters[3].Name)
 
 		// Idempotent.
-		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, specs))
+		require.NoError(t, srv.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, specs, nil))
 		updated, _, err = findHCM(ln.FilterChains[0])
 		require.NoError(t, err)
 		require.Len(t, updated.HttpFilters, 4)
@@ -2718,4 +2718,66 @@ func TestEnableQuotaRateLimitOnRoute_PerBucketCost(t *testing.T) {
 	defaultFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:quota_cost_default)%%", aigv1b1.AIGatewayFilterMetadataNamespace)
 	require.Equal(t, ruleFormat, streamDone[0].HitsAddend.Format)
 	require.Equal(t, defaultFormat, streamDone[1].HitsAddend.Format)
+}
+
+func TestBuildStreamDoneHeaderMatchAction_Distinct(t *testing.T) {
+	distinct := egv1a1.HeaderMatchDistinct
+	action := buildStreamDoneHeaderMatchAction(0, 0, egv1a1.HeaderMatch{Name: "x-org-id", Type: &distinct})
+
+	// Distinct stream-done charges read the header value from dynamic metadata
+	// (copied there by the quota Lua filter), keying the same per-value
+	// descriptor as the request-time RequestHeaders action.
+	md := action.GetMetadata()
+	require.NotNil(t, md)
+	require.Equal(t, translator.BucketRuleDescriptorKey(0, 0, "x-org-id", ""), md.DescriptorKey)
+	require.Equal(t, aigv1b1.AIGatewayFilterMetadataNamespace, md.MetadataKey.Key)
+	require.Equal(t, "quota_distinct_header_x-org-id", md.MetadataKey.Path[0].GetKey())
+}
+
+func TestCollectQuotaDistinctHeadersAndLua(t *testing.T) {
+	distinct := egv1a1.HeaderMatchDistinct
+	exact := egv1a1.HeaderMatchExact
+	policies := []aigv1a1.QuotaPolicy{
+		{
+			Spec: aigv1a1.QuotaPolicySpec{
+				PerModelQuotas: []aigv1a1.PerModelQuota{
+					{
+						ModelName: ptr.To("m"),
+						Quota: aigv1a1.QuotaDefinition{
+							BucketRules: []aigv1a1.QuotaRule{
+								{ClientSelectors: []egv1a1.RateLimitSelectCondition{
+									{Headers: []egv1a1.HeaderMatch{
+										{Name: "X-Org-Id", Type: &distinct},
+										{Name: "x-api-key", Type: &exact, Value: ptr.To("premium")},
+									}},
+								}},
+							},
+						},
+					},
+					{
+						ModelName: ptr.To("m2"),
+						Quota: aigv1a1.QuotaDefinition{
+							BucketRules: []aigv1a1.QuotaRule{
+								{ClientSelectors: []egv1a1.RateLimitSelectCondition{
+									{Headers: []egv1a1.HeaderMatch{{Name: "x-organization-id", Type: &distinct}}},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	headers := collectQuotaDistinctHeaders(policies)
+	require.Equal(t, []string{"x-org-id", "x-organization-id"}, headers)
+
+	filter, err := buildQuotaOverrideLuaFilter(nil, headers)
+	require.NoError(t, err)
+	lua := &luav3.Lua{}
+	require.NoError(t, filter.GetTypedConfig().UnmarshalTo(lua))
+	code := lua.DefaultSourceCode.GetInlineString()
+	require.Contains(t, code, `{header = "x-org-id", key = "quota_distinct_header_x-org-id"}`)
+	require.Contains(t, code, `{header = "x-organization-id", key = "quota_distinct_header_x-organization-id"}`)
+	require.Contains(t, code, "for _, d in ipairs(distinct_headers) do")
 }

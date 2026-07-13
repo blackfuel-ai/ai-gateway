@@ -149,37 +149,34 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests, limitHeader("not-a-number"))
 	})
 
-	// Expected failure: per-org token burndown. For Distinct client selectors
-	// the stream-done charge action degrades to a constant generic key, so the
-	// response's total_tokens land in a shared counter outside the per-org
-	// bucket and per-org buckets are burned down by request count (+1) only.
-	// "quota-org-model" gives each distinct x-org-id a 100-token/1h bucket: a
-	// single 200-token response should exhaust it, but the next request is
-	// still admitted. The sub-test skips while the limitation holds and fails
-	// if per-org token burndown unexpectedly starts working, so the xfail (and
-	// this comment) get removed together with the fix.
-	t.Run("per-org token burndown (xfail)", func(t *testing.T) {
+	// Per-org token burndown: the quota Lua filter copies each Distinct
+	// selector header's value into dynamic metadata, and the stream-done
+	// charge keys the per-org descriptor from it. "quota-org-model" gives each
+	// distinct x-org-id a 100-token/1h bucket: a single 200-token response
+	// exhausts it, so the next request from the same org is rejected while a
+	// different org is unaffected.
+	t.Run("per-org token burndown", func(t *testing.T) {
 		orgHeader := http.Header{"x-org-id": []string{"org-burndown-a"}}
 
 		makeRequest("quota-org-model", 200, http.StatusOK, orgHeader)
 
-		// Give the asynchronous stream-done charge time to land, then check
-		// whether it reached the per-org bucket.
-		time.Sleep(5 * time.Second)
-		fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
-		defer fwd.Kill()
+		// The stream-done charge lands asynchronously after the response.
+		require.Eventually(t, func() bool {
+			fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+			defer fwd.Kill()
+			req := newChatRequest(t, fwd.Address(), "quota-org-model", 5, orgHeader)
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Logf("request failed, retrying: %v", err)
+				return false
+			}
+			defer func() { _ = resp.Body.Close() }()
+			return resp.StatusCode == http.StatusTooManyRequests
+		}, 30*time.Second, time.Second, "per-org bucket was not exhausted by the token charge")
 
-		req := newChatRequest(t, fwd.Address(), "quota-org-model", 5, orgHeader)
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode == http.StatusTooManyRequests {
-			t.Fatal("per-org token burndown unexpectedly works: remove this xfail and assert 429 directly")
-		}
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		t.Skip("known limitation: Distinct-selector stream-done charge misses the per-org bucket; per-org quotas count requests, not tokens")
+		// A different org's bucket is untouched.
+		makeRequest("quota-org-model", 5, http.StatusOK, http.Header{"x-org-id": []string{"org-burndown-b"}})
 	})
 }
 
