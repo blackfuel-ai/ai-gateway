@@ -131,6 +131,17 @@ const (
 	// This is the default header name in the reference implementation:
 	// https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/2b5b337b45c3289e5f9367b2c19deef021722fcd/pkg/epp/server/runserver.go#L63
 	EndpointPickerHeaderKey = "x-gateway-destination-endpoint"
+	// MirrorEndpointPickerHeaderKey carries the endpoint picked for an InferencePool request
+	// MIRROR. A mirror pool's EPP runs first in the downstream chain and its selection is copied
+	// from EndpointPickerHeaderKey into this header by a header_mutation filter (the source
+	// header is kept — a primary pool's EPP overwrites it for the real upstream, and on the
+	// mirror's deployment-id-pinned rule it stays the rule cluster's ORIGINAL_DST key), so the
+	// shadow clone — which inherits the finalized downstream headers — resolves the mirror
+	// ORIGINAL_DST cluster through this header.
+	MirrorEndpointPickerHeaderKey = "x-bf-mirror-destination-endpoint"
+	// DefaultEndpointPickerPort is the endpoint-picker Service port assumed when an
+	// InferencePool's endpointPickerRef does not carry an explicit port.
+	DefaultEndpointPickerPort = 9002
 )
 
 const (

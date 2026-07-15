@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -111,7 +112,7 @@ func TestMaybeModifyCluster_forwardProxy(t *testing.T) {
 		s := newServerWithForwardProxy(t, "proxy.corp:3128")
 		cluster := clusterWithTLSMatch(t, "api.openai.com")
 
-		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil))
+		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil, nil))
 
 		wrapper := unwrapHTTP11Proxy(t, cluster.TransportSocketMatches[0].TransportSocket)
 		requireProxyAddress(t, wrapper, "proxy.corp", 3128)
@@ -129,18 +130,48 @@ func TestMaybeModifyCluster_forwardProxy(t *testing.T) {
 		cluster.TransportSocket = tlsTransportSocket(t, "api.openai.com")
 		cluster.TransportSocketMatches = nil
 
-		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil))
+		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil, nil))
 
 		wrapper := unwrapHTTP11Proxy(t, cluster.TransportSocket)
 		requireProxyAddress(t, wrapper, "10.0.0.9", 8080)
 		require.Equal(t, tlsTransportSocketName, wrapper.GetTransportSocket().GetName())
 	})
 
+	t.Run("skips an InferencePool mirror cluster", func(t *testing.T) {
+		s := newServerWithForwardProxy(t, "proxy.corp:3128")
+		var route aigv1b1.AIGatewayRoute
+		require.NoError(t, s.k8sClient.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "myroute"}, &route))
+		route.Spec.Rules[0].Mirrors = []aigv1b1.AIGatewayRouteRuleMirror{{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+			Name: "mirror-pool", Group: ptr.To("inference.networking.k8s.io"), Kind: ptr.To("InferencePool"),
+		}}}
+		require.NoError(t, s.k8sClient.Update(t.Context(), &route))
+		require.NoError(t, s.k8sClient.Create(t.Context(), &gwaiev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{Name: "mirror-pool", Namespace: "default"},
+			Spec: gwaiev1.InferencePoolSpec{
+				EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "mirror-pool-epp", Port: ptr.To(gwaiev1.Port{Number: 9002})},
+			},
+		}))
+		// The mirror cluster Envoy Gateway built from the placeholder EPP Service ref (plaintext).
+		cluster := &clusterv3.Cluster{
+			Name: "httproute/default/myroute/rule/0-mirror-1",
+			LoadAssignment: &endpointv3.ClusterLoadAssignment{
+				Endpoints: []*endpointv3.LocalityLbEndpoints{{LbEndpoints: []*endpointv3.LbEndpoint{{}}}},
+			},
+		}
+
+		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil, nil))
+
+		// Converted to an in-cluster ORIGINAL_DST cluster, which must not tunnel through the proxy.
+		require.Equal(t, clusterv3.Cluster_ORIGINAL_DST, cluster.GetType())
+		require.Nil(t, cluster.TransportSocket)
+		require.Empty(t, cluster.TransportSocketMatches)
+	})
+
 	t.Run("no forwardProxy leaves the socket unchanged", func(t *testing.T) {
 		s := newServerWithForwardProxy(t, "") // GatewayConfig without forwardProxy.
 		cluster := clusterWithTLSMatch(t, "api.openai.com")
 
-		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil))
+		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil, nil))
 
 		require.Equal(t, tlsTransportSocketName, cluster.TransportSocketMatches[0].TransportSocket.Name)
 	})
@@ -339,6 +370,6 @@ func TestResolveForwardProxyAddr_getError(t *testing.T) {
 
 func TestMaybeModifyCluster_forwardProxyInvalidAddress(t *testing.T) {
 	s := newServerWithForwardProxy(t, "missing-port") // not host:port.
-	err := s.maybeModifyCluster(t.Context(), clusterWithTLSMatch(t, "api.openai.com"), nil)
+	err := s.maybeModifyCluster(t.Context(), clusterWithTLSMatch(t, "api.openai.com"), nil, nil)
 	require.ErrorContains(t, err, "forward proxy")
 }

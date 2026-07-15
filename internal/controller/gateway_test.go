@@ -669,7 +669,11 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		require.Equal(t, "supersecret", fc.Backends[0].Auth.APIKey.Key)
 	})
 
-	newMirrorRoute := func() []aigv1b1.AIGatewayRoute {
+	newMirrorRoute := func(kind, name string) []aigv1b1.AIGatewayRoute {
+		group := aiServiceBackendGroup
+		if kind == "InferencePool" {
+			group = inferencePoolGroup
+		}
 		return []aigv1b1.AIGatewayRoute{
 			{
 				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: routeNamespace},
@@ -678,8 +682,10 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 						{
 							Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
 								{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
-									Name:      "backend1",
+									Name:      name,
 									Namespace: ptr.To(gwapiv1.Namespace(backendNamespace)),
+									Group:     ptr.To(group),
+									Kind:      ptr.To(kind),
 								}},
 							},
 						},
@@ -693,7 +699,7 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		c, kube := setup(t, nil)
 		const someNamespace = "some-namespace"
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
-			newMirrorRoute(), nil, "uuid", nil, nil)
+			newMirrorRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil)
 		require.NoError(t, err)
 
 		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
@@ -705,7 +711,7 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		c, kube := setup(t, grant)
 		const someNamespace = "some-namespace"
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
-			newMirrorRoute(), nil, "uuid", nil, nil)
+			newMirrorRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil)
 		require.NoError(t, err)
 
 		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
@@ -715,6 +721,32 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		require.NotNil(t, fc.Backends[0].Auth)
 		require.NotNil(t, fc.Backends[0].Auth.APIKey)
 		require.Equal(t, "supersecret", fc.Backends[0].Auth.APIKey.Key)
+	})
+
+	t.Run("InferencePool cross-namespace mirror without ReferenceGrant is rejected", func(t *testing.T) {
+		c, kube := setup(t, nil)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute("InferencePool", "pool1"), nil, "uuid", nil, nil)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Empty(t, fc.Backends, "cross-namespace mirror inference pool without a ReferenceGrant must not be wired into the filter config")
+	})
+
+	t.Run("InferencePool cross-namespace mirror with ReferenceGrant is allowed", func(t *testing.T) {
+		grant := referenceGrant(aiServiceBackendGroup, aiGatewayRouteKind, inferencePoolGroup, inferencePoolKind)
+		c, kube := setup(t, grant)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute("InferencePool", "pool1"), nil, "uuid", nil, nil)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Len(t, fc.Backends, 1)
+		require.True(t, fc.Backends[0].IsMirror)
+		require.Equal(t, internalapi.PerRouteRuleMirrorBackendName(routeNamespace, "pool1", "route1", 0, 0), fc.Backends[0].Name)
+		require.Equal(t, filterapi.APISchemaOpenAI, fc.Backends[0].Schema.Name)
 	})
 }
 
@@ -4726,12 +4758,16 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 							},
 							// References a backend that does not exist: must be skipped, not fatal.
 							{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "does-not-exist"}},
-							// InferencePool mirrors are unsupported and must be skipped.
-							{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
-								Name:  "some-pool",
-								Group: ptr.To("inference.networking.k8s.io"),
-								Kind:  ptr.To("InferencePool"),
-							}},
+							// An InferencePool mirror is emitted with the OpenAI-schema defaults
+							// (no AIServiceBackend/BSP behind it).
+							{
+								BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+									Name:              "some-pool",
+									Group:             ptr.To("inference.networking.k8s.io"),
+									Kind:              ptr.To("InferencePool"),
+									ModelNameOverride: "pool-shadow-model",
+								},
+							},
 						},
 					},
 				},
@@ -4760,9 +4796,24 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 	require.NotNil(t, mirror.HeaderMutation)
 	require.NotNil(t, mirror.BodyMutation)
 
-	// The missing-backend and InferencePool mirrors must have been skipped.
+	// The missing-backend mirror must have been skipped.
 	for i := range fc.Backends {
 		require.NotEqual(t, internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "does-not-exist", "route1", 0, 1), fc.Backends[i].Name)
-		require.NotEqual(t, internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "some-pool", "route1", 0, 2), fc.Backends[i].Name)
 	}
+
+	// The InferencePool mirror is emitted with IsMirror, the route-level override, and the
+	// OpenAI-schema default (pools carry no AIServiceBackend).
+	poolMirrorName := internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "some-pool", "route1", 0, 2)
+	var poolMirror *filterapi.Backend
+	for i := range fc.Backends {
+		if fc.Backends[i].Name == poolMirrorName {
+			poolMirror = &fc.Backends[i]
+			break
+		}
+	}
+	require.NotNil(t, poolMirror, "expected pool mirror backend %q in filter config", poolMirrorName)
+	require.True(t, poolMirror.IsMirror)
+	require.Equal(t, "pool-shadow-model", poolMirror.ModelNameOverride)
+	require.Equal(t, filterapi.APISchemaOpenAI, poolMirror.Schema.Name)
+	require.Nil(t, poolMirror.Auth)
 }

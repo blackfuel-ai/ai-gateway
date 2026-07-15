@@ -23,6 +23,7 @@ import (
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -337,33 +338,44 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				Path:    &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix},
 			})
 		}
-		// Envoy Gateway names mirror clusters by the filter's position in the rule, so the mirror
-		// filters are emitted all-or-nothing per rule: skipping only the invalid ones would shift the
+		// Envoy Gateway names each mirror cluster `<rule>-mirror-<filterIdx>` where filterIdx is the
+		// index across ALL of the rule's filters, and the extension server's mirror-cluster parse
+		// (post_translate_modify.go) maps that suffix back to rule.Mirrors[j] assuming exactly the one
+		// leading host-rewrite filter (suffix = j+1). Mirrors therefore stay the trailing filters of the
+		// rule and are emitted all-or-nothing per rule: skipping only the invalid ones would shift the
 		// indices of the remaining mirrors and make the extension server resolve the wrong backend.
 		var mirrorFilters []gwapiv1.HTTPRouteFilter
+		poolMirrors := 0
 		for j := range rule.Mirrors {
 			mirror := &rule.Mirrors[j]
 			mirrorBR := &mirror.BackendRef
+			var mirrorObjRef gwapiv1.BackendObjectReference
+			var err error
 			if mirrorBR.IsInferencePool() {
-				// Mirroring to InferencePool is unsupported because the endpoint picker's
-				// stateful selection is incompatible with fire-and-forget shadow traffic.
-				errs = append(errs, fmt.Errorf("mirror backendRef cannot reference an InferencePool (rule %d, mirror %d)", i, j))
-				mirrorFilters = nil
-				break
+				if poolMirrors++; poolMirrors > 1 {
+					err = fmt.Errorf("at most one InferencePool mirror per rule (rule %d, mirror %d): each pool mirror needs the mirror endpoint-picker header to itself", i, j)
+				} else {
+					mirrorObjRef, err = c.inferencePoolMirrorBackendRef(ctx, aiGatewayRoute, mirrorBR)
+				}
+			} else {
+				var mirrorBackend *aigv1b1.AIServiceBackend
+				if mirrorBackend, err = c.validateAndGetBackend(ctx, aiGatewayRoute, mirrorBR); err != nil {
+					err = fmt.Errorf("failed to get AIServiceBackend for mirror %s.%s: %w",
+						mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), err)
+				} else {
+					mirrorObjRef = mirrorBackend.Spec.BackendRef
+					if mirrorObjRef.Namespace == nil && mirrorBackend.Namespace != "" && mirrorBackend.Namespace != aiGatewayRoute.Namespace {
+						ns := gwapiv1.Namespace(mirrorBackend.Namespace)
+						mirrorObjRef.Namespace = &ns
+					}
+				}
 			}
-			mirrorBackend, err := c.validateAndGetBackend(ctx, aiGatewayRoute, mirrorBR)
 			if err != nil {
 				c.logger.Error(err, "skipping mirrors of rule with a mirror backendRef that failed validation",
 					"namespace", aiGatewayRoute.Namespace, "name", aiGatewayRoute.Name, "rule", i, "mirror", j)
-				errs = append(errs, fmt.Errorf("failed to get AIServiceBackend for mirror %s.%s: %w",
-					mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), err))
+				errs = append(errs, err)
 				mirrorFilters = nil
 				break
-			}
-			mirrorObjRef := mirrorBackend.Spec.BackendRef
-			if mirrorObjRef.Namespace == nil && mirrorBackend.Namespace != "" && mirrorBackend.Namespace != aiGatewayRoute.Namespace {
-				ns := gwapiv1.Namespace(mirrorBackend.Namespace)
-				mirrorObjRef.Namespace = &ns
 			}
 			mirrorFilters = append(mirrorFilters, gwapiv1.HTTPRouteFilter{
 				Type: gwapiv1.HTTPRouteFilterRequestMirror,
@@ -468,6 +480,48 @@ func (c *AIGatewayRouteController) backend(ctx context.Context, namespace, name 
 		return nil, err
 	}
 	return backend, nil
+}
+
+// inferencePoolMirrorBackendRef returns the HTTPRoute RequestMirror backendRef for a mirror leg
+// targeting an InferencePool.
+//
+// A pool mirror's real target is decided per request by its endpoint picker: the extension server
+// rewrites the mirror cluster to ORIGINAL_DST keyed on the mirror endpoint-picker header and wires
+// the pool's EPP into the downstream chain. Envoy Gateway however refuses non-Service/Backend kinds
+// on a RequestMirror backendRef, so the HTTPRoute carries a placeholder Service ref — the pool's own
+// endpointPickerRef Service, which always exists alongside the pool. Its endpoints are irrelevant
+// once the cluster is ORIGINAL_DST.
+func (c *AIGatewayRouteController) inferencePoolMirrorBackendRef(
+	ctx context.Context,
+	aiGatewayRoute *aigv1b1.AIGatewayRoute,
+	mirrorBR *aigv1b1.AIGatewayRouteRuleBackendRef,
+) (gwapiv1.BackendObjectReference, error) {
+	// The placeholder Service ref lives in the pool's namespace, so a cross-namespace pool mirror
+	// would also need a Service ReferenceGrant at the Envoy Gateway level, whose absence fails the
+	// RequestMirror filter of the rule. Only same-namespace pool mirrors are supported.
+	if mirrorBR.IsCrossNamespace(aiGatewayRoute.Namespace) {
+		return gwapiv1.BackendObjectReference{}, fmt.Errorf("mirror InferencePool %s.%s must be in the AIGatewayRoute namespace %s",
+			mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), aiGatewayRoute.Namespace)
+	}
+	pool := &gwaiev1.InferencePool{}
+	if err := c.client.Get(ctx, client.ObjectKey{
+		Namespace: aiGatewayRoute.Namespace, Name: mirrorBR.Name,
+	}, pool); err != nil {
+		return gwapiv1.BackendObjectReference{}, fmt.Errorf("failed to get InferencePool for mirror %s.%s: %w",
+			mirrorBR.Name, aiGatewayRoute.Namespace, err)
+	}
+	if pool.Spec.EndpointPickerRef == nil {
+		return gwapiv1.BackendObjectReference{}, fmt.Errorf("mirror InferencePool %s.%s has no endpointPickerRef",
+			mirrorBR.Name, aiGatewayRoute.Namespace)
+	}
+	eppPort := gwapiv1.PortNumber(internalapi.DefaultEndpointPickerPort)
+	if p := pool.Spec.EndpointPickerRef.Port; p != nil {
+		eppPort = gwapiv1.PortNumber(p.Number)
+	}
+	return gwapiv1.BackendObjectReference{
+		Name: gwapiv1.ObjectName(pool.Spec.EndpointPickerRef.Name),
+		Port: ptr.To(eppPort),
+	}, nil
 }
 
 // validateAndGetBackend validates a backend reference (including cross-namespace ReferenceGrant check)
