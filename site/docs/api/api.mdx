@@ -609,6 +609,7 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [PerModelQuota](#github-com-envoyproxy-ai-gateway-api-v1alpha1-permodelquota)
 - [ProtectedResourceMetadata](#github-com-envoyproxy-ai-gateway-api-v1alpha1-protectedresourcemetadata)
 - [QuotaBucketMode](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotabucketmode)
+- [QuotaCostMetric](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric)
 - [QuotaDefinition](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotadefinition)
 - [QuotaLimitOverride](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride)
 - [QuotaPolicySpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotapolicyspec)
@@ -2289,6 +2290,31 @@ QuotaBucketMode specifies whether the default and per request buckets values are
   required="false"
   description=""
 />
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric">QuotaCostMetric</a>
+
+**Underlying type:** string
+
+**Appears in:**
+- [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
+
+QuotaCostMetric selects whether a bucket counts tokens (stream-done charge)
+or requests (request-time +1 only).
+
+
+
+##### Possible Values
+
+<ApiField
+  name="Tokens"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="Requests"
+  type="enum"
+  required="false"
+  description=""
+/>
 #### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotadefinition">QuotaDefinition</a>
 
 
@@ -2460,6 +2486,17 @@ QuotaValue defines the quota limits using sliding window.
   type="[QuotaLimitOverride](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride)"
   required="false"
   description="DynamicOverride supplies the limit at request time, falling back to Limit<br />when the source is absent or malformed. The time window is always Duration."
+/><ApiField
+  name="costMetric"
+  type="[QuotaCostMetric](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric)"
+  required="false"
+  defaultValue="Tokens"
+  description="CostMetric selects what this bucket counts. `Tokens` (the default) burns<br />the bucket down at stream-done by CostExpression (or the model-level<br />fallback). `Requests` burns the bucket down by exactly 1 per request at<br />request time and adds no stream-done token charge."
+/><ApiField
+  name="costExpression"
+  type="string"
+  required="false"
+  description="CostExpression is a per-bucket CEL expression for computing this bucket's<br />quota burndown. When unset, the model-level CostExpression applies, then<br />`total_tokens`. Ignored when CostMetric is `Requests`."
 />
 
 

@@ -88,6 +88,26 @@ func DefaultBucketDescriptorKey(numRules int) string {
 	return fmt.Sprintf("rule-%d-match--1", numRules)
 }
 
+// QuotaCostRuleBucketKey identifies a bucket rule's cost bucket by rule index.
+func QuotaCostRuleBucketKey(ruleIndex int) string {
+	return fmt.Sprintf("rule-%d", ruleIndex)
+}
+
+// QuotaCostDefaultBucketKey identifies a model's default cost bucket.
+func QuotaCostDefaultBucketKey() string {
+	return "default"
+}
+
+// QuotaCostMetadataKey derives the dynamic metadata key under which ext_proc
+// stores one bucket's computed cost. Keyed by bucket only (not model): a single
+// model is active per request and ext_proc filters cost entries by model before
+// writing, so buckets of different models can share a key without collision. A
+// stream-done entry whose key was not written (a rule index another model does
+// not have) resolves to nothing, and Envoy ignores that descriptor.
+func QuotaCostMetadataKey(bucketKey string) string {
+	return "quota_cost_" + bucketKey
+}
+
 // BuildRateLimitConfigs translates a QuotaPolicy and its resolved target
 // AIServiceBackends into a single rate limit service configuration.
 // All backends share the same domain, distinguished by backend_name descriptors.
