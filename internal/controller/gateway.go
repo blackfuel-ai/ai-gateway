@@ -567,15 +567,29 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 			for mirrorIndex := range rule.Mirrors {
 				mirror := &rule.Mirrors[mirrorIndex]
 				mirrorBR := &mirror.BackendRef
-				if mirrorBR.IsInferencePool() {
-					// Validated at the HTTPRoute translation step; defensive guard here.
-					c.logger.Info("skipping InferencePool mirror backend; not supported",
-						"backend_name", mirrorBR.Name, "aigatewayroute", aiGatewayRoute.Name)
-					continue
-				}
 				b := filterapi.Backend{IsMirror: true}
 				b.Name = internalapi.PerRouteRuleMirrorBackendName(aiGatewayRoute.Namespace, mirrorBR.Name, aiGatewayRoute.Name, ruleIndex, mirrorIndex)
 				b.ModelNameOverride = mirrorBR.ModelNameOverride
+
+				if mirrorBR.IsInferencePool() {
+					// A pool mirror has no AIServiceBackend: like primary InferencePool
+					// backendRefs, it is assumed OpenAI-schema, carries only the route-level
+					// mutations, and has no BackendSecurityPolicy (the mirror pool's pods are
+					// in-cluster model servers).
+					b.Schema = filterapi.VersionedAPISchema{
+						Name: filterapi.APISchemaOpenAI,
+						// This is for backward compatibility. TODO: Remove the 'version' field usage after v0.5.0 release.
+						Version: "v1", Prefix: "v1",
+					}
+					b.HeaderMutation = headerMutationToFilterAPI(mirrorBR.HeaderMutation)
+					b.BodyMutation = bodyMutationToFilterAPI(mirrorBR.BodyMutation)
+					ec.Backends = append(ec.Backends, b)
+					if _, exists := routeBackendNamesSet[b.Name]; !exists {
+						routeBackendNamesSet[b.Name] = struct{}{}
+						routeBackendNames = append(routeBackendNames, b.Name)
+					}
+					continue
+				}
 
 				backendNamespace := mirrorBR.GetNamespace(aiGatewayRoute.Namespace)
 				backendObj, bsp, err := c.backendWithMaybeBSP(ctx, backendNamespace, mirrorBR.Name)

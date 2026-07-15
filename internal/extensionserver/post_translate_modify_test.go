@@ -21,7 +21,9 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
@@ -486,7 +488,7 @@ func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
 			},
 		},
 	}
-	err = s.maybeModifyCluster(t.Context(), mirrorCluster)
+	err = s.maybeModifyCluster(t.Context(), mirrorCluster, nil)
 	require.NoError(t, err)
 
 	// Cluster metadata must contain the mirror backend name and the mirror flag
@@ -578,7 +580,7 @@ func Test_maybeModifyCluster_mirrorIndexIsOneBased(t *testing.T) {
 					},
 				},
 			}
-			require.NoError(t, s.maybeModifyCluster(t.Context(), cluster))
+			require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil))
 
 			_, installed := cluster.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
 			require.Equal(t, tc.expectInstalled, installed,
@@ -607,7 +609,192 @@ func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
 		"httproute/ns/myroute/rule/0-mirror-xyz",
 	} {
 		t.Run(name, func(t *testing.T) {
-			require.NoError(t, s.maybeModifyCluster(t.Context(), &clusterv3.Cluster{Name: name}))
+			require.NoError(t, s.maybeModifyCluster(t.Context(), &clusterv3.Cluster{Name: name}, nil))
 		})
 	}
+}
+
+// Test_maybeModifyCluster_inferencePoolMirror verifies that a mirror cluster whose
+// AIGatewayRoute mirror leg targets an InferencePool is rewritten to ORIGINAL_DST keyed on the
+// MIRROR endpoint-picker header, carries the mirror + pool metadata, drops the placeholder
+// Service endpoints, and reports the (rule cluster → pool) pair to the collector.
+func Test_maybeModifyCluster_inferencePoolMirror(t *testing.T) {
+	c := newFakeClient()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "primary"}},
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+						{
+							BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+								Name:  "mirror-pool",
+								Group: ptr.To("inference.networking.k8s.io"),
+								Kind:  ptr.To("InferencePool"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}))
+	require.NoError(t, c.Create(t.Context(), &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mirror-pool", Namespace: "ns",
+			Annotations: map[string]string{"aigateway.envoyproxy.io/processing-body-mode": "buffered"},
+		},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: gwaiev1.EndpointPickerRef{
+				Name: "mirror-pool-epp",
+				Port: ptr.To(gwaiev1.Port{Number: 9002}),
+			},
+		},
+	}))
+
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	require.NoError(t, err)
+
+	mirrorCluster := &clusterv3.Cluster{
+		Name: "httproute/ns/myroute/rule/0-mirror-1",
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
+			},
+		},
+	}
+	collected := map[string]*gwaiev1.InferencePool{}
+	require.NoError(t, s.maybeModifyCluster(t.Context(), mirrorCluster, collected))
+
+	// ORIGINAL_DST keyed on the mirror endpoint-picker header, placeholder endpoints dropped.
+	require.Equal(t, clusterv3.Cluster_ORIGINAL_DST, mirrorCluster.GetType())
+	require.Equal(t, clusterv3.Cluster_CLUSTER_PROVIDED, mirrorCluster.LbPolicy)
+	lb := mirrorCluster.GetOriginalDstLbConfig()
+	require.NotNil(t, lb)
+	require.True(t, lb.UseHttpHeader)
+	require.Equal(t, internalapi.MirrorEndpointPickerHeaderKey, lb.HttpHeaderName)
+	require.Nil(t, mirrorCluster.LoadAssignment)
+
+	// Mirror attribution + pool metadata are both present (the pool metadata is what makes
+	// buildClustersForInferencePoolEndpointPickers emit the mirror pool's EPP cluster).
+	internalMD := mirrorCluster.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+	require.NotNil(t, internalMD)
+	require.Equal(t,
+		internalapi.PerRouteRuleMirrorBackendName("ns", "mirror-pool", "myroute", 0, 0),
+		internalMD.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue())
+	require.True(t, internalMD.Fields[internalapi.InternalMetadataMirrorKey].GetBoolValue())
+	pool := getInferencePoolByMetadata(mirrorCluster.Metadata)
+	require.NotNil(t, pool)
+	require.Equal(t, "mirror-pool", pool.Name)
+	require.Equal(t, "buffered", pool.Annotations["aigateway.envoyproxy.io/processing-body-mode"])
+
+	// The collector maps the rule cluster to the pool for listener/vhost patching.
+	require.Len(t, collected, 1)
+	require.Equal(t, "mirror-pool", collected["httproute/ns/myroute/rule/0"].Name)
+
+	// The EPP cluster is emitted for the mirror pool, exactly once even when two clusters
+	// reference the same pool.
+	eppClusters, err := buildClustersForInferencePoolEndpointPickers(
+		[]*clusterv3.Cluster{mirrorCluster, mirrorCluster})
+	require.NoError(t, err)
+	require.Len(t, eppClusters, 1)
+	require.Equal(t, clusterNameForInferencePool(pool), eppClusters[0].Name)
+}
+
+// Test_patchListenerAndVirtualHost_mirrorPool verifies the downstream wiring for a mirror pool:
+// the listener chain gains [mirror-EPP, mirror endpoint copy filter] BEFORE the primary pool's
+// EPP filter (all before the router), and per-route config enables the mirror filters only on
+// the mirror rule's route.
+func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	require.NoError(t, err)
+
+	primaryPool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary-pool", Namespace: "ns"},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: gwaiev1.EndpointPickerRef{Name: "primary-epp", Port: ptr.To(gwaiev1.Port{Number: 9002})},
+		},
+	}
+	mirrorPool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-pool", Namespace: "ns"},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: gwaiev1.EndpointPickerRef{Name: "mirror-epp", Port: ptr.To(gwaiev1.Port{Number: 9002})},
+		},
+	}
+
+	routerFilter := &httpconnectionmanagerv3.HttpFilter{Name: "envoy.filters.http.router"}
+	hcmIn := &httpconnectionmanagerv3.HttpConnectionManager{
+		HttpFilters: []*httpconnectionmanagerv3.HttpFilter{routerFilter},
+	}
+	hcmAny, err := toAny(hcmIn)
+	require.NoError(t, err)
+	listener := &listenerv3.Listener{
+		Name: "test-listener",
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+			}},
+		}},
+	}
+	s.patchListenerWithInferencePoolFilters(listener,
+		[]*gwaiev1.InferencePool{primaryPool}, []*gwaiev1.InferencePool{mirrorPool})
+
+	hcm, _, err := findHCM(listener.FilterChains[0])
+	require.NoError(t, err)
+	names := make([]string, 0, len(hcm.HttpFilters))
+	for _, f := range hcm.HttpFilters {
+		names = append(names, f.Name)
+	}
+	mirrorEPPName := httpFilterNameForInferencePool(mirrorPool)
+	primaryEPPName := httpFilterNameForInferencePool(primaryPool)
+	idx := func(n string) int {
+		for i, v := range names {
+			if v == n {
+				return i
+			}
+		}
+		return -1
+	}
+	require.GreaterOrEqual(t, idx(mirrorEPPName), 0, "mirror EPP filter missing: %v", names)
+	require.GreaterOrEqual(t, idx(mirrorEndpointCopyFilterName), 0, "copy filter missing: %v", names)
+	require.GreaterOrEqual(t, idx(primaryEPPName), 0, "primary EPP filter missing: %v", names)
+	require.Less(t, idx(mirrorEPPName), idx(mirrorEndpointCopyFilterName), "mirror EPP must precede the copy filter")
+	require.Less(t, idx(mirrorEndpointCopyFilterName), idx(primaryEPPName), "copy filter must precede the primary EPP")
+	require.Equal(t, "envoy.filters.http.router", names[len(names)-1])
+
+	// Virtual host per-route config: the mirror rule's route keeps the mirror filters enabled;
+	// a plain route gets everything disabled including the copy filter.
+	mirrorRuleCluster := "httproute/ns/myroute/rule/0"
+	vh := &routev3.VirtualHost{
+		Routes: []*routev3.Route{
+			{
+				Name: "mirror-rule-route",
+				Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: mirrorRuleCluster},
+				}},
+			},
+			{
+				Name: "plain-route",
+				Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "httproute/ns/other/rule/0"},
+				}},
+			},
+		},
+	}
+	mirrorMap := map[string]*gwaiev1.InferencePool{mirrorRuleCluster: mirrorPool}
+	require.NoError(t, s.patchVirtualHostWithInferencePool(vh,
+		[]*gwaiev1.InferencePool{primaryPool}, []*gwaiev1.InferencePool{mirrorPool}, mirrorMap))
+
+	mirrorRoute := vh.Routes[0]
+	plainRoute := vh.Routes[1]
+	// Mirror route: mirror EPP + copy filter enabled (no disable override), primary EPP
+	// disabled (route metadata carries no primary pool in this synthetic setup).
+	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEPPName)
+	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
+	require.Contains(t, mirrorRoute.TypedPerFilterConfig, primaryEPPName)
+	// Plain route: everything disabled.
+	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEPPName)
+	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
+	require.Contains(t, plainRoute.TypedPerFilterConfig, primaryEPPName)
 }

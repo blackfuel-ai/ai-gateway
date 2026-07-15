@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -1206,4 +1207,102 @@ func Test_newHTTPRoute_Mirrors(t *testing.T) {
 	// Verify default route-not-found rule is still the last rule.
 	require.Equal(t, "route-not-found", string(*httpRoute.Spec.Rules[1].Name))
 	require.Empty(t, httpRoute.Spec.Rules[1].BackendRefs)
+}
+
+// Test_newHTTPRoute_InferencePoolMirror verifies that a request-mirror leg whose backendRef is
+// an InferencePool is emitted with the placeholder Service ref derived from the pool's
+// endpointPickerRef (Envoy Gateway refuses non-Service/Backend kinds on RequestMirror
+// backendRefs; the extension server later rewrites the mirror cluster to ORIGINAL_DST, making
+// the placeholder's endpoints irrelevant), and that mirrors remain the rule's trailing filters.
+func Test_newHTTPRoute_InferencePoolMirror(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesAndInferencePool(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	s := NewAIGatewayRouteController(fakeClient, nil, logr.Discard(), eventCh.Ch, "/")
+
+	backend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: "test-ns"},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{Name: "primary-svc", Namespace: ptr.To(gwapiv1.Namespace("test-ns"))},
+		},
+	}
+	require.NoError(t, s.client.Create(t.Context(), backend, &client.CreateOptions{}))
+
+	pool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-pool", Namespace: "test-ns"},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: gwaiev1.EndpointPickerRef{
+				Name: "mirror-pool-epp",
+				Port: ptr.To(gwaiev1.Port{Number: 9002}),
+			},
+		},
+	}
+	require.NoError(t, s.client.Create(t.Context(), pool, &client.CreateOptions{}))
+
+	mirrorPercent := int32(10)
+	poolMirror := aigv1b1.AIGatewayRouteRuleMirror{
+		BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+			Name:  "mirror-pool",
+			Group: ptr.To("inference.networking.k8s.io"),
+			Kind:  ptr.To("InferencePool"),
+		},
+		Percent: &mirrorPercent,
+	}
+	aiGatewayRoute := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-mirror-route", Namespace: "test-ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "primary", Weight: ptr.To[int32](1)}},
+					Matches: []aigv1b1.AIGatewayRouteRuleMatch{
+						{Headers: []gwapiv1.HTTPHeaderMatch{{Name: "x-test", Value: "pool-mirror-rule"}}},
+					},
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{poolMirror},
+				},
+			},
+		},
+	}
+
+	httpRoute := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "pool-mirror-route", Namespace: "test-ns"}}
+	require.NoError(t, s.newHTTPRoute(t.Context(), httpRoute, aiGatewayRoute))
+
+	filters := httpRoute.Spec.Rules[0].Filters
+	require.Len(t, filters, 2)
+	require.Equal(t, gwapiv1.HTTPRouteFilterExtensionRef, filters[0].Type)
+	require.Equal(t, gwapiv1.HTTPRouteFilterRequestMirror, filters[1].Type)
+	mf := filters[1].RequestMirror
+	require.NotNil(t, mf)
+	// Placeholder ref: the pool's EPP Service + port, no group/kind (core Service).
+	require.Equal(t, "mirror-pool-epp", string(mf.BackendRef.Name))
+	require.Nil(t, mf.BackendRef.Group)
+	require.Nil(t, mf.BackendRef.Kind)
+	require.NotNil(t, mf.BackendRef.Port)
+	require.Equal(t, gwapiv1.PortNumber(9002), *mf.BackendRef.Port)
+	require.NotNil(t, mf.Percent)
+	require.Equal(t, int32(10), *mf.Percent)
+
+	// A pool without an explicit endpointPickerRef port falls back to the default EPP port.
+	poolNoPort := pool.DeepCopy()
+	poolNoPort.ObjectMeta = metav1.ObjectMeta{Name: "mirror-pool-noport", Namespace: "test-ns"}
+	poolNoPort.Spec.EndpointPickerRef.Port = nil
+	require.NoError(t, s.client.Create(t.Context(), poolNoPort, &client.CreateOptions{}))
+	noPortRoute := aiGatewayRoute.DeepCopy()
+	noPortRoute.Spec.Rules[0].Mirrors[0].BackendRef.Name = "mirror-pool-noport"
+	httpRoute2 := &gwapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "pool-mirror-route-2", Namespace: "test-ns"}}
+	require.NoError(t, s.newHTTPRoute(t.Context(), httpRoute2, noPortRoute))
+	require.Equal(t, gwapiv1.PortNumber(9002),
+		*httpRoute2.Spec.Rules[0].Filters[1].RequestMirror.BackendRef.Port)
+
+	// A missing pool errors.
+	missingRoute := aiGatewayRoute.DeepCopy()
+	missingRoute.Spec.Rules[0].Mirrors[0].BackendRef.Name = "does-not-exist"
+	err := s.newHTTPRoute(t.Context(), &gwapiv1.HTTPRoute{}, missingRoute)
+	require.ErrorContains(t, err, "failed to get InferencePool for mirror")
+
+	// More than one pool mirror per rule errors.
+	twoPoolRoute := aiGatewayRoute.DeepCopy()
+	second := poolMirror
+	second.BackendRef.Name = "mirror-pool-noport"
+	twoPoolRoute.Spec.Rules[0].Mirrors = append(twoPoolRoute.Spec.Rules[0].Mirrors, second)
+	err = s.newHTTPRoute(t.Context(), &gwapiv1.HTTPRoute{}, twoPoolRoute)
+	require.ErrorContains(t, err, "at most one InferencePool mirror per rule")
 }

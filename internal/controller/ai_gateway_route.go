@@ -22,6 +22,7 @@ import (
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -319,25 +320,55 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				Path:    &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix},
 			})
 		}
+		// Mirrors MUST stay the trailing filters of the rule: Envoy Gateway names each mirror
+		// cluster `<rule>-mirror-<filterIdx>` where filterIdx is the index across ALL of the
+		// rule's filters, and the extension server's mirror-cluster parse
+		// (post_translate_modify.go) maps that suffix back to rule.Mirrors[j] assuming exactly
+		// the one leading host-rewrite filter (suffix = j+1).
 		filters := make([]gwapiv1.HTTPRouteFilter, 0, len(rewriteFilters)+len(rule.Mirrors))
 		filters = append(filters, rewriteFilters...)
+		poolMirrors := 0
 		for j := range rule.Mirrors {
 			mirror := &rule.Mirrors[j]
 			mirrorBR := &mirror.BackendRef
+			var mirrorObjRef gwapiv1.BackendObjectReference
 			if mirrorBR.IsInferencePool() {
-				// Mirroring to InferencePool is unsupported because the endpoint picker's
-				// stateful selection is incompatible with fire-and-forget shadow traffic.
-				return fmt.Errorf("mirror backendRef cannot reference an InferencePool (rule %d, mirror %d)", i, j)
-			}
-			mirrorBackend, err := c.validateAndGetBackend(ctx, aiGatewayRoute, mirrorBR)
-			if err != nil {
-				return fmt.Errorf("failed to get AIServiceBackend for mirror %s.%s: %w",
-					mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), err)
-			}
-			mirrorObjRef := mirrorBackend.Spec.BackendRef
-			if mirrorObjRef.Namespace == nil && mirrorBackend.Namespace != "" && mirrorBackend.Namespace != aiGatewayRoute.Namespace {
-				ns := gwapiv1.Namespace(mirrorBackend.Namespace)
-				mirrorObjRef.Namespace = &ns
+				// A pool mirror's real target is decided per request by its endpoint picker: the
+				// extension server rewrites the mirror cluster to ORIGINAL_DST keyed on the
+				// mirror endpoint-picker header and wires the pool's EPP into the downstream
+				// chain. Envoy Gateway however refuses non-Service/Backend kinds on a
+				// RequestMirror backendRef, so the HTTPRoute carries a placeholder Service ref —
+				// the pool's own endpointPickerRef Service, which always exists alongside the
+				// pool. Its endpoints are irrelevant once the cluster is ORIGINAL_DST.
+				if poolMirrors++; poolMirrors > 1 {
+					return fmt.Errorf("at most one InferencePool mirror per rule (rule %d, mirror %d): each pool mirror needs the mirror endpoint-picker header to itself", i, j)
+				}
+				pool := &gwaiev1.InferencePool{}
+				if err := c.client.Get(ctx, client.ObjectKey{
+					Namespace: aiGatewayRoute.Namespace, Name: mirrorBR.Name,
+				}, pool); err != nil {
+					return fmt.Errorf("failed to get InferencePool for mirror %s.%s: %w",
+						mirrorBR.Name, aiGatewayRoute.Namespace, err)
+				}
+				eppPort := gwapiv1.PortNumber(internalapi.DefaultEndpointPickerPort)
+				if p := pool.Spec.EndpointPickerRef.Port; p != nil {
+					eppPort = gwapiv1.PortNumber(p.Number)
+				}
+				mirrorObjRef = gwapiv1.BackendObjectReference{
+					Name: gwapiv1.ObjectName(pool.Spec.EndpointPickerRef.Name),
+					Port: ptr.To(eppPort),
+				}
+			} else {
+				mirrorBackend, err := c.validateAndGetBackend(ctx, aiGatewayRoute, mirrorBR)
+				if err != nil {
+					return fmt.Errorf("failed to get AIServiceBackend for mirror %s.%s: %w",
+						mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), err)
+				}
+				mirrorObjRef = mirrorBackend.Spec.BackendRef
+				if mirrorObjRef.Namespace == nil && mirrorBackend.Namespace != "" && mirrorBackend.Namespace != aiGatewayRoute.Namespace {
+					ns := gwapiv1.Namespace(mirrorBackend.Namespace)
+					mirrorObjRef.Namespace = &ns
+				}
 			}
 			filters = append(filters, gwapiv1.HTTPRouteFilter{
 				Type: gwapiv1.HTTPRouteFilterRequestMirror,

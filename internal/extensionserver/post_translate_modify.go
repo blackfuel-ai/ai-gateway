@@ -43,6 +43,9 @@ const (
 	extProcUDSClusterName = "ai-gateway-extproc-uds"
 	aiGatewayExtProcName  = "envoy.filters.http.ext_proc/aigateway"
 	noBackendRefIndex     = -1
+	// mirrorEndpointCopyFilterName is the downstream header_mutation filter isolating a mirror
+	// pool EPP's endpoint selection into the mirror endpoint-picker header.
+	mirrorEndpointCopyFilterName = "envoy.filters.http.header_mutation/aigateway-mirror-endpoint"
 )
 
 type aiGatewayClusterName struct {
@@ -99,8 +102,13 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostT
 	var extProcUDSExist bool
 
 	// Process existing clusters - may add metadata or modify configurations.
+	// mirrorPoolsByRuleCluster collects, per rule cluster name
+	// ("httproute/<ns>/<name>/rule/<i>"), the InferencePool a request-mirror leg of that rule
+	// targets: mirror clusters carry no route metadata, so the listener/vhost patching below
+	// cannot discover mirror pools the way it discovers primary pools.
+	mirrorPoolsByRuleCluster := make(map[string]*gwaiev1.InferencePool)
 	for _, cluster := range req.Clusters {
-		if err := s.maybeModifyCluster(ctx, cluster); err != nil {
+		if err := s.maybeModifyCluster(ctx, cluster, mirrorPoolsByRuleCluster); err != nil {
 			return nil, fmt.Errorf("failed to modify cluster %s: %w", cluster.Name, err)
 		}
 		extProcUDSExist = extProcUDSExist || cluster.Name == extProcUDSClusterName
@@ -115,7 +123,7 @@ func (s *Server) PostTranslateModify(ctx context.Context, req *egextension.PostT
 	req.Clusters = append(req.Clusters, cs...)
 
 	// Modify listeners and routes to support InferencePool backends.
-	if err = s.maybeModifyListenerAndRoutes(req.Listeners, req.Routes); err != nil {
+	if err = s.maybeModifyListenerAndRoutes(req.Listeners, req.Routes, mirrorPoolsByRuleCluster); err != nil {
 		return nil, fmt.Errorf("failed to modify listeners and routes for InferencePool support: %w", err)
 	}
 
@@ -299,7 +307,7 @@ func (s *Server) retrieveAndCacheAIGatewayRoute(ctx context.Context, cache map[c
 //
 // The resulting configuration is similar to the envoy.yaml files in tests/data-plane/.
 // Only clusters with names matching the AIGatewayRoute pattern are modified.
-func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Cluster) error {
+func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Cluster, mirrorPoolsByRuleCluster map[string]*gwaiev1.InferencePool) error {
 	// Envoy Gateway names mirror backend clusters
 	// "httproute/<ns>/<name>/rule/<ruleIdx>-mirror-<mirrorIdx>". Mirror clusters get
 	// the same ExtProc/header-mutation upstream filters as primary clusters so the
@@ -399,6 +407,30 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 			// skip LLMRequestCost emission and avoid double-billing.
 			cluster.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace].
 				Fields[internalapi.InternalMetadataMirrorKey] = structpb.NewBoolValue(true)
+			if mirror.BackendRef.IsInferencePool() {
+				// A pool mirror: the HTTPRoute carries only a placeholder Service ref (Envoy
+				// Gateway refuses InferencePool kinds on RequestMirror backendRefs), so the
+				// pool identity is recovered here from the AIGatewayRoute spec. The cluster is
+				// rewritten to ORIGINAL_DST keyed on the MIRROR endpoint-picker header: the
+				// mirror pool's EPP runs first in the downstream chain and its selection is
+				// isolated into that header (see maybeModifyListenerAndRoutes), so the shadow
+				// clone — which inherits the finalized downstream headers — resolves this
+				// cluster while a primary pool's EPP still owns the standard header.
+				mirrorPool := &gwaiev1.InferencePool{}
+				if err = s.k8sClient.Get(ctx, client.ObjectKey{
+					Namespace: aigwRoute.Namespace, Name: mirror.BackendRef.Name,
+				}, mirrorPool); err != nil {
+					s.log.Error(err, "failed to get InferencePool for mirror cluster",
+						"cluster_name", cluster.Name, "pool", mirror.BackendRef.Name)
+					return err
+				}
+				s.handleInferencePoolMirrorCluster(cluster, mirrorPool)
+				if mirrorPoolsByRuleCluster != nil {
+					ruleClusterName := fmt.Sprintf("httproute/%s/%s/rule/%d",
+						aigwRoute.Namespace, httpRouteName, httpRouteRuleIndex)
+					mirrorPoolsByRuleCluster[ruleClusterName] = mirrorPool
+				}
+			}
 			if cluster.LoadAssignment != nil {
 				for _, endpoints := range cluster.LoadAssignment.Endpoints {
 					for _, endpoint := range endpoints.LbEndpoints {
@@ -633,7 +665,7 @@ func (s *Server) maybeModifyCluster(ctx context.Context, cluster *clusterv3.Clus
 // 2. Adds endpoint picker (EPP) external processor filters to relevant listeners
 // 3. Configures per-route filters to disable EPP processing for non-InferencePool routes
 // This ensures that only routes targeting InferencePool backends go through the endpoint picker.
-func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, routes []*routev3.RouteConfiguration) error {
+func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, routes []*routev3.RouteConfiguration, mirrorPoolsByRuleCluster map[string]*gwaiev1.InferencePool) error {
 	listenerNameToRouteNames := make(map[string][]string)
 	listenerNameToListener := make(map[string]*listenerv3.Listener)
 	for _, listener := range listeners {
@@ -652,8 +684,12 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 	}
 
 	// inferencePoolRoutes builds a matrix of route configs and the inference pools they use.
+	// Mirror pools are discovered separately: a mirror rule's vh route carries only its PRIMARY
+	// pool in route metadata, so the mirror pool is looked up by the route action's cluster name
+	// (the rule cluster, "httproute/<ns>/<name>/rule/<i>") in mirrorPoolsByRuleCluster.
 	routeNameToRoute := make(map[string]*routev3.RouteConfiguration)
 	routeNameToVHRouteNameToInferencePool := make(map[string]map[string]*gwaiev1.InferencePool)
+	routeNameToVHRouteNameToMirrorPool := make(map[string]map[string]*gwaiev1.InferencePool)
 	for _, routeCfg := range routes {
 		routeNameToRoute[routeCfg.Name] = routeCfg
 		for _, vh := range routeCfg.VirtualHosts {
@@ -663,6 +699,12 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 						routeNameToVHRouteNameToInferencePool[routeCfg.Name] = make(map[string]*gwaiev1.InferencePool)
 					}
 					routeNameToVHRouteNameToInferencePool[routeCfg.Name][route.Name] = pool
+				}
+				if mirrorPool := mirrorPoolForRoute(route, mirrorPoolsByRuleCluster); mirrorPool != nil {
+					if routeNameToVHRouteNameToMirrorPool[routeCfg.Name] == nil {
+						routeNameToVHRouteNameToMirrorPool[routeCfg.Name] = make(map[string]*gwaiev1.InferencePool)
+					}
+					routeNameToVHRouteNameToMirrorPool[routeCfg.Name][route.Name] = mirrorPool
 				}
 			}
 		}
@@ -682,13 +724,12 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 	// /v1/embeddings. Dedupe by pool identity (namespace/name) so exactly one endpoint
 	// picker filter is emitted per pool per listener.
 	listenerToInferencePools := make(map[string][]*gwaiev1.InferencePool)
+	listenerToMirrorPools := make(map[string][]*gwaiev1.InferencePool)
 	listenerSeenPools := make(map[string]map[string]struct{})
+	listenerSeenMirrorPools := make(map[string]map[string]struct{})
 	for listener, routeCfgNames := range listenerNameToRouteNames {
 		for _, name := range routeCfgNames {
 			if routeNameToRoute[name] == nil {
-				continue
-			}
-			if routeNameToVHRouteNameToInferencePool[name] == nil {
 				continue
 			}
 			for _, pool := range routeNameToVHRouteNameToInferencePool[name] {
@@ -703,13 +744,35 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 				listenerSeenPools[listener][poolKey] = struct{}{}
 				listenerToInferencePools[listener] = append(listenerToInferencePools[listener], pool)
 			}
+			for _, pool := range routeNameToVHRouteNameToMirrorPool[name] {
+				if listenerToMirrorPools[listener] == nil {
+					listenerToMirrorPools[listener] = make([]*gwaiev1.InferencePool, 0)
+					listenerSeenMirrorPools[listener] = make(map[string]struct{})
+				}
+				poolKey := pool.GetNamespace() + "/" + pool.GetName()
+				if _, seen := listenerSeenMirrorPools[listener][poolKey]; seen {
+					continue
+				}
+				listenerSeenMirrorPools[listener][poolKey] = struct{}{}
+				listenerToMirrorPools[listener] = append(listenerToMirrorPools[listener], pool)
+			}
 		}
 	}
 
 	// patch the listeners, the route configs and the virtual hosts with inference pool filters.
-	for listener, pools := range listenerToInferencePools {
+	// Listeners that only carry mirror pools (no primary pools) still need patching.
+	patchListeners := make(map[string]struct{}, len(listenerToInferencePools)+len(listenerToMirrorPools))
+	for l := range listenerToInferencePools {
+		patchListeners[l] = struct{}{}
+	}
+	for l := range listenerToMirrorPools {
+		patchListeners[l] = struct{}{}
+	}
+	for listener := range patchListeners {
+		pools := listenerToInferencePools[listener]
+		mirrorPools := listenerToMirrorPools[listener]
 		s.log.Info("patching listener with inference pool filters", "listener", listener)
-		s.patchListenerWithInferencePoolFilters(listenerNameToListener[listener], pools)
+		s.patchListenerWithInferencePoolFilters(listenerNameToListener[listener], pools, mirrorPools)
 		routeCfgNames := listenerNameToRouteNames[listener]
 		for _, routeCfgName := range routeCfgNames {
 			routeCfg := routeNameToRoute[routeCfgName]
@@ -718,7 +781,7 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 			}
 			for _, vh := range routeCfg.VirtualHosts {
 				s.log.Info("patching virtual host with inference pool filters", "listener", listener, "virtual_host", vh.Name)
-				if err := s.patchVirtualHostWithInferencePool(vh, pools); err != nil {
+				if err := s.patchVirtualHostWithInferencePool(vh, pools, mirrorPools, mirrorPoolsByRuleCluster); err != nil {
 					return fmt.Errorf("failed to patch virtual host %s in route config %s: %w", vh.Name, routeCfg.Name, err)
 				}
 			}
@@ -749,8 +812,13 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 	return nil
 }
 
-// patchListenerWithInferencePoolFilters adds the necessary HTTP filters to the listener to support InferencePool backends.
-func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.Listener, inferencePools []*gwaiev1.InferencePool) {
+// patchListenerWithInferencePoolFilters adds the necessary HTTP filters to the listener to
+// support InferencePool backends. Mirror pools insert FIRST, followed by one header_mutation
+// filter that moves the mirror EPP's selection from the standard endpoint-picker header into
+// the mirror header, then the primary pools' filters: the shadow clone is created in the router
+// from the finalized downstream headers, so the mirror header must be settled before any
+// primary EPP writes the standard header for the real upstream.
+func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.Listener, inferencePools, mirrorPools []*gwaiev1.InferencePool) {
 	// First, get the filter chains from the listener.
 	filterChains := listener.GetFilterChains()
 	defaultFC := listener.DefaultFilterChain
@@ -765,6 +833,31 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 			continue
 		}
 		var poolFilters []*httpconnectionmanagerv3.HttpFilter
+		for _, pool := range mirrorPools {
+			_, baIndex, searchErr := searchInferencePoolInFilterChain(pool, httpConManager.HttpFilters)
+			if searchErr != nil {
+				s.log.Error(searchErr, "failed to find a mirror inference pool ext proc filter")
+				continue
+			}
+			if baIndex == -1 {
+				s.log.Info("adding mirror inference pool ext proc filter", "pool", pool.Name)
+				var eppExtProc *httpconnectionmanagerv3.HttpFilter
+				eppExtProc, err = buildInferencePoolHTTPFilter(pool)
+				if err != nil {
+					s.log.Error(err, "failed to build mirror inference pool ext proc filter", "pool", pool.Name)
+					continue
+				}
+				poolFilters = append(poolFilters, eppExtProc)
+			}
+		}
+		if len(poolFilters) > 0 && !hasHTTPFilter(httpConManager.HttpFilters, mirrorEndpointCopyFilterName) {
+			copyFilter, cerr := buildMirrorEndpointCopyFilter()
+			if cerr != nil {
+				s.log.Error(cerr, "failed to build mirror endpoint copy filter")
+			} else {
+				poolFilters = append(poolFilters, copyFilter)
+			}
+		}
 		for _, pool := range inferencePools {
 			_, baIndex, searchErr := searchInferencePoolInFilterChain(pool, httpConManager.HttpFilters)
 			if searchErr != nil {
@@ -800,12 +893,20 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 	}
 }
 
-// patchVirtualHostWithInferencePool adds the necessary per-route configuration to disable.
-func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, inferencePools []*gwaiev1.InferencePool) error {
+// patchVirtualHostWithInferencePool adds the necessary per-route configuration to disable
+// inference pool filters (and the mirror endpoint copy filter) on routes they do not belong to.
+// A route keeps enabled: its primary pool's EPP filter (route metadata), plus — when one of its
+// rule's request-mirror legs targets a pool — that mirror pool's EPP filter and the shared copy
+// filter. Everything else is explicitly disabled per route.
+func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, inferencePools, mirrorPools []*gwaiev1.InferencePool, mirrorPoolsByRuleCluster map[string]*gwaiev1.InferencePool) error {
 	inferenceMatrix := make(map[string]*gwaiev1.InferencePool)
 	for _, pool := range inferencePools {
 		inferenceMatrix[httpFilterNameForInferencePool(pool)] = pool
 	}
+	for _, pool := range mirrorPools {
+		inferenceMatrix[httpFilterNameForInferencePool(pool)] = pool
+	}
+	hasMirrorFilters := len(mirrorPools) > 0
 	for _, route := range vh.Routes {
 		override := &extprocv3.ExtProcPerRoute{
 			Override: &extprocv3.ExtProcPerRoute_Disabled{
@@ -816,28 +917,109 @@ func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, infe
 		if err != nil {
 			return fmt.Errorf("failed to marshal ExtProcPerRoute to Any: %w", err)
 		}
-		inferencePool := getInferencePoolByMetadata(route.Metadata)
-		if inferencePool == nil {
-			for key, pool := range inferenceMatrix {
-				s.log.Info("disabling inference pool filter", "route", route.Name, "filter", key, "pool", pool.Name)
-				if route.TypedPerFilterConfig == nil {
-					route.TypedPerFilterConfig = make(map[string]*anypb.Any)
-				}
-				route.TypedPerFilterConfig[key] = overrideAny
+		enabled := make(map[string]struct{}, 2)
+		if inferencePool := getInferencePoolByMetadata(route.Metadata); inferencePool != nil {
+			enabled[httpFilterNameForInferencePool(inferencePool)] = struct{}{}
+		}
+		mirrorPool := mirrorPoolForRoute(route, mirrorPoolsByRuleCluster)
+		if mirrorPool != nil {
+			enabled[httpFilterNameForInferencePool(mirrorPool)] = struct{}{}
+		}
+		for key, pool := range inferenceMatrix {
+			if _, keep := enabled[key]; keep {
+				continue
 			}
-		} else {
-			for key, pool := range inferenceMatrix {
-				if key != httpFilterNameForInferencePool(inferencePool) {
-					s.log.Info("disabling inference pool filter", "route", route.Name, "filter", key, "pool", pool.Name)
-					if route.TypedPerFilterConfig == nil {
-						route.TypedPerFilterConfig = make(map[string]*anypb.Any)
-					}
-					route.TypedPerFilterConfig[key] = overrideAny
-				}
+			s.log.Info("disabling inference pool filter", "route", route.Name, "filter", key, "pool", pool.Name)
+			if route.TypedPerFilterConfig == nil {
+				route.TypedPerFilterConfig = make(map[string]*anypb.Any)
+			}
+			route.TypedPerFilterConfig[key] = overrideAny
+		}
+		// The copy filter must only act on mirror routes: anywhere else it would strip the
+		// primary endpoint-picker header before the router reads it.
+		if hasMirrorFilters && mirrorPool == nil {
+			disabledAny, derr := toAny(&routev3.FilterConfig{Disabled: true})
+			if derr != nil {
+				return fmt.Errorf("failed to marshal FilterConfig to Any: %w", derr)
+			}
+			if route.TypedPerFilterConfig == nil {
+				route.TypedPerFilterConfig = make(map[string]*anypb.Any)
+			}
+			route.TypedPerFilterConfig[mirrorEndpointCopyFilterName] = disabledAny
+		}
+	}
+	return nil
+}
+
+// mirrorPoolForRoute resolves the InferencePool a route's request-mirror leg targets, keyed by
+// the route action's cluster name (the rule cluster). Weighted-cluster actions are matched on
+// any member cluster.
+func mirrorPoolForRoute(route *routev3.Route, mirrorPoolsByRuleCluster map[string]*gwaiev1.InferencePool) *gwaiev1.InferencePool {
+	if len(mirrorPoolsByRuleCluster) == 0 {
+		return nil
+	}
+	action := route.GetRoute()
+	if action == nil {
+		return nil
+	}
+	if c := action.GetCluster(); c != "" {
+		return mirrorPoolsByRuleCluster[c]
+	}
+	if wc := action.GetWeightedClusters(); wc != nil {
+		for _, c := range wc.Clusters {
+			if pool := mirrorPoolsByRuleCluster[c.Name]; pool != nil {
+				return pool
 			}
 		}
 	}
 	return nil
+}
+
+// buildMirrorEndpointCopyFilter builds the downstream header_mutation filter that isolates a
+// mirror pool EPP's endpoint selection: it copies the standard endpoint-picker header into the
+// mirror header and removes the original, so a primary pool's EPP (which runs after this
+// filter) owns the standard header while the shadow clone resolves its ORIGINAL_DST cluster
+// through the mirror header.
+func buildMirrorEndpointCopyFilter() (*httpconnectionmanagerv3.HttpFilter, error) {
+	hmAny, err := toAny(&header_mutationv3.HeaderMutation{
+		Mutations: &header_mutationv3.Mutations{
+			RequestMutations: []*mutation_rulesv3.HeaderMutation{
+				{
+					Action: &mutation_rulesv3.HeaderMutation_Append{
+						Append: &corev3.HeaderValueOption{
+							AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+							Header: &corev3.HeaderValue{
+								Key:   internalapi.MirrorEndpointPickerHeaderKey,
+								Value: `%REQ(` + internalapi.EndpointPickerHeaderKey + `)%`,
+							},
+						},
+					},
+				},
+				{
+					Action: &mutation_rulesv3.HeaderMutation_Remove{
+						Remove: internalapi.EndpointPickerHeaderKey,
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal mirror endpoint copy HeaderMutation to Any: %w", err)
+	}
+	return &httpconnectionmanagerv3.HttpFilter{
+		Name:       mirrorEndpointCopyFilterName,
+		ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{TypedConfig: hmAny},
+	}, nil
+}
+
+// hasHTTPFilter reports whether the filter chain already carries a filter with the given name.
+func hasHTTPFilter(filters []*httpconnectionmanagerv3.HttpFilter, name string) bool {
+	for _, f := range filters {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // enableRouterLevelAIGatewayExtProcOnRoute checks if the extproc filter should be enabled for routes
