@@ -2765,12 +2765,16 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 							},
 							// References a backend that does not exist: must be skipped, not fatal.
 							{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "does-not-exist"}},
-							// InferencePool mirrors are unsupported and must be skipped.
-							{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
-								Name:  "some-pool",
-								Group: ptr.To("inference.networking.k8s.io"),
-								Kind:  ptr.To("InferencePool"),
-							}},
+							// An InferencePool mirror is emitted with the OpenAI-schema defaults
+							// (no AIServiceBackend/BSP behind it).
+							{
+								BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+									Name:              "some-pool",
+									Group:             ptr.To("inference.networking.k8s.io"),
+									Kind:              ptr.To("InferencePool"),
+									ModelNameOverride: "pool-shadow-model",
+								},
+							},
 						},
 					},
 				},
@@ -2803,11 +2807,26 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 	require.NotNil(t, mirror.HeaderMutation)
 	require.NotNil(t, mirror.BodyMutation)
 
-	// The missing-backend and InferencePool mirrors must have been skipped.
+	// The missing-backend mirror must have been skipped.
 	for i := range fc.Backends {
 		require.NotEqual(t, internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "does-not-exist", "route1", 0, 1), fc.Backends[i].Name)
-		require.NotEqual(t, internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "some-pool", "route1", 0, 2), fc.Backends[i].Name)
 	}
+
+	// The InferencePool mirror is emitted with IsMirror, the route-level override, and the
+	// OpenAI-schema default (pools carry no AIServiceBackend).
+	poolMirrorName := internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "some-pool", "route1", 0, 2)
+	var poolMirror *filterapi.Backend
+	for i := range fc.Backends {
+		if fc.Backends[i].Name == poolMirrorName {
+			poolMirror = &fc.Backends[i]
+			break
+		}
+	}
+	require.NotNil(t, poolMirror, "expected pool mirror backend %q in filter config", poolMirrorName)
+	require.True(t, poolMirror.IsMirror)
+	require.Equal(t, "pool-shadow-model", poolMirror.ModelNameOverride)
+	require.Equal(t, filterapi.APISchemaOpenAI, poolMirror.Schema.Name)
+	require.Nil(t, poolMirror.Auth)
 }
 
 func Test_mergeBodyMutations(t *testing.T) {

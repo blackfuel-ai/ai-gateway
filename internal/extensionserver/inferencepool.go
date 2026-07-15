@@ -185,8 +185,20 @@ func buildEPPMetadata(metadata *corev3.Metadata, inferencePool *gwaiev1.Inferenc
 // for each InferencePool's endpoint picker service.
 func buildClustersForInferencePoolEndpointPickers(clusters []*clusterv3.Cluster) ([]*clusterv3.Cluster, error) {
 	result := make([]*clusterv3.Cluster, 0, len(clusters))
+	// Several rule clusters commonly reference the same pool (version/deployment-id pinned
+	// rules, catch-all, mirror legs); the EPP cluster name is keyed by pool, so emit each one
+	// exactly once — duplicate cluster names are invalid xDS.
+	seen := make(map[string]struct{}, len(clusters))
+	for _, cluster := range clusters {
+		seen[cluster.Name] = struct{}{}
+	}
 	for _, cluster := range clusters {
 		if pool := getInferencePoolByMetadata(cluster.Metadata); pool != nil {
+			name := clusterNameForInferencePool(pool)
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
 			c, err := buildExtProcClusterForInferencePoolEndpointPicker(pool)
 			if err != nil {
 				return nil, err
