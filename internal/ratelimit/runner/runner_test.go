@@ -165,6 +165,33 @@ func TestStart(t *testing.T) {
 		cancel()
 		require.NoError(t, <-errCh)
 	})
+
+	t.Run("publishes empty snapshot on start", func(t *testing.T) {
+		r := New(logr.Discard(), 0)
+		ctx, cancel := context.WithCancel(t.Context())
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- r.Start(ctx) }()
+
+		// The initial empty snapshot must exist before any QuotaPolicy is
+		// reconciled, so the rate limit service gets its initial config event.
+		require.Eventually(t, func() bool {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.cache == nil {
+				return false
+			}
+			_, err := r.cache.GetSnapshot(NodeID)
+			return err == nil
+		}, 5*time.Second, 50*time.Millisecond)
+
+		snap, err := r.cache.GetSnapshot(NodeID)
+		require.NoError(t, err)
+		require.Empty(t, snap.GetResources(resourcev3.RateLimitConfigType))
+
+		cancel()
+		require.NoError(t, <-errCh)
+	})
 }
 
 // newRunnerWithCache creates a Runner with an initialized snapshot cache
