@@ -24,9 +24,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -256,10 +258,18 @@ func StartControllers(ctx context.Context, mgr manager.Manager, config *rest.Con
 	}
 
 	// QuotaPolicy controller for backend quota rate limiting.
+	//
+	// Registered with NeedLeaderElection=false so it reconciles on every
+	// replica: its output feeds the per-replica rate limit xDS snapshot cache,
+	// and the ratelimit service's connection can land on any replica. Mutating
+	// writes (status, finalizer) are gated on mgr.Elected() inside the
+	// controller. This mirrors Envoy Gateway core, where the xDS pipeline runs
+	// on all replicas and only status writers opt into leader election.
 	if options.RateLimitRunner != nil {
-		quotaPolicyC := NewQuotaPolicyController(c, kube, logger.WithName("quota-policy"), options.RateLimitRunner, aiGatewayRouteEventChan)
+		quotaPolicyC := NewQuotaPolicyController(c, kube, logger.WithName("quota-policy"), options.RateLimitRunner, aiGatewayRouteEventChan, mgr.Elected())
 		if err = TypedControllerBuilderForCRD(mgr, &aigv1a1.QuotaPolicy{}).
 			Watches(&aigv1b1.AIServiceBackend{}, handler.EnqueueRequestsFromMapFunc(quotaPolicyC.BackendToQuotaPolicy)).
+			WithOptions(crcontroller.Options{NeedLeaderElection: ptr.To(false)}).
 			Complete(quotaPolicyC); err != nil {
 			return fmt.Errorf("failed to create controller for QuotaPolicy: %w", err)
 		}
