@@ -731,7 +731,8 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 		for _, rl := range rateLimitActions {
 			rl.Stage = wrapperspb.UInt32(quotaRequestRateLimitStage)
 		}
-		routeAction.RateLimits = append(kept, rateLimitActions...)
+		kept = append(kept, rateLimitActions...)
+		routeAction.RateLimits = kept
 	}
 
 	// Stream-done charge entries go in the per-route config of the stream-done
