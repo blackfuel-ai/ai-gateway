@@ -1292,6 +1292,38 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_PingOnlyWhenSilent(t
 	}
 }
 
+// Valid-but-eventless protocol blocks (finish_reason-only chunk, [DONE]) and
+// incomplete buffered fragments are normal stream flow and must NOT ping — the
+// data-plane e2e tests deliver the stream one event per extproc call and assert
+// exact output.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_NoPingOnEventlessProtocolBlocks(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	// Open the message with a content call.
+	_, _, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(`data: {"id":"chatcmpl-ne","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}],"model":"gpt-4o"}`+"\n\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+
+	for name, input := range map[string]string{
+		"finish_reason-only chunk": `data: {"id":"chatcmpl-ne","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+		"done marker":              "data: [DONE]\n\n",
+		"partial fragment":         `data: {"id":"chatcmpl-ne","choi`,
+	} {
+		_, body, _, _, err := translator.ResponseBody(
+			map[string]string{"content-type": "text/event-stream"},
+			strings.NewReader(input),
+			false,
+			nil,
+		)
+		require.NoError(t, err, name)
+		assert.Empty(t, body, "%s must suppress silently, not ping", name)
+	}
+}
+
 // A malformed chunk is skipped by processEventBlock; mid-stream the call must
 // still produce a ping rather than byte-silence.
 func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_MalformedChunkEmitsPing(t *testing.T) {

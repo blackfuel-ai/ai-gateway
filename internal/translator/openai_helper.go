@@ -685,15 +685,27 @@ type streamToolCall struct {
 }
 
 // processBuffer processes the buffered OpenAI SSE data and emits Anthropic SSE events.
-func (s *openAIStreamToAnthropicState) processBuffer(out *[]byte, endOfStream bool) error {
+// It reports whether a ping should keep the downstream connection byte-alive: true when
+// at least one complete block was processed and none of them was a valid protocol block
+// (only keepalive comments and undecodable garbage) — the traffic shapes an upstream
+// emits precisely to hold the connection open, which must not be suppressed into
+// byte-silence (BLA-2721). Valid-but-eventless blocks (finish_reason-only chunks,
+// [DONE]) and incomplete buffered fragments are normal protocol flow and never ping.
+func (s *openAIStreamToAnthropicState) processBuffer(out *[]byte, endOfStream bool) (pingWorthy bool, err error) {
+	blocksProcessed, validBlocks := 0, 0
 	// Loop through all event blocks that are separated by a blank line
 	for {
 		eventBlock, remaining, found := bytes.Cut(s.buffer.Bytes(), []byte("\n\n"))
 		if !found {
 			break
 		}
-		if err := s.processEventBlock(eventBlock, out); err != nil {
-			return err
+		valid, err := s.processEventBlock(eventBlock, out)
+		if err != nil {
+			return false, err
+		}
+		blocksProcessed++
+		if valid {
+			validBlocks++
 		}
 		// Clear buffer and add back remaining SSE data
 		s.buffer.Reset()
@@ -705,19 +717,23 @@ func (s *openAIStreamToAnthropicState) processBuffer(out *[]byte, endOfStream bo
 		if s.buffer.Len() > 0 {
 			remaining := s.buffer.Bytes()
 			s.buffer.Reset()
-			if err := s.processEventBlock(remaining, out); err != nil {
-				return err
+			if _, err := s.processEventBlock(remaining, out); err != nil {
+				return false, err
 			}
 		}
 		if !s.closingEmitted {
-			return s.emitClosingEvents(out)
+			return false, s.emitClosingEvents(out)
 		}
+		return false, nil
 	}
-	return nil
+	return blocksProcessed > 0 && validBlocks == 0, nil
 }
 
-// processEventBlock processes a single SSE event block (data between consecutive \n\n separators).
-func (s *openAIStreamToAnthropicState) processEventBlock(block []byte, out *[]byte) error {
+// processEventBlock processes a single SSE event block (data between consecutive \n\n
+// separators). It reports whether the block was a valid protocol block: a well-formed
+// data event or the [DONE] marker. Comment-only blocks (SSE keepalives such as
+// OpenRouter's ": OPENROUTER PROCESSING") and undecodable data report false.
+func (s *openAIStreamToAnthropicState) processEventBlock(block []byte, out *[]byte) (valid bool, err error) {
 	var eventData []byte
 	for line := range bytes.SplitSeq(block, []byte("\n")) {
 		if after, ok := cutSSEDataPrefix(line); ok {
@@ -729,21 +745,21 @@ func (s *openAIStreamToAnthropicState) processEventBlock(block []byte, out *[]by
 	}
 
 	if len(eventData) == 0 {
-		return nil
+		return false, nil
 	}
 
 	// Skip the [DONE] marker; closing events are emitted on the usage chunk or endOfStream.
 	if bytes.Equal(eventData, sseDoneMessage) {
-		return nil
+		return true, nil
 	}
 
 	var chunk openai.ChatCompletionResponseChunk
 	if err := json.Unmarshal(eventData, &chunk); err != nil {
 		// Skip malformed chunks silently.
-		return nil
+		return false, nil
 	}
 
-	return s.handleChunk(&chunk, out)
+	return true, s.handleChunk(&chunk, out)
 }
 
 // handleChunk converts a single OpenAI ChatCompletionResponseChunk to Anthropic SSE events.
