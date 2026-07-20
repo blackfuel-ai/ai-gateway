@@ -28,12 +28,20 @@ import (
 )
 
 // QuotaPolicyController implements [reconcile.TypedReconciler] for [aigv1a1.QuotaPolicy].
+//
+// Unlike the other controllers, this one runs on every replica regardless of
+// leadership (registered with NeedLeaderElection=false): its reconcile output
+// feeds the per-replica rate limit xDS snapshot cache, and the ratelimit
+// service's gRPC connection can land on any replica. Only the mutating writes
+// (status, finalizer) are gated on leadership via the elected channel.
 type QuotaPolicyController struct {
 	client             client.Client
 	kube               kubernetes.Interface
 	logger             logr.Logger
 	rateLimitRunner    *runner.Runner
 	aiGatewayRouteChan chan event.GenericEvent
+	// elected is closed when this replica acquires leadership (manager.Elected()).
+	elected <-chan struct{}
 	// configCache stores rate limit configs per QuotaPolicy namespace/name.
 	// This allows incremental updates when only one policy changes.
 	configCache map[string][]*rlsconfv3.RateLimitConfig
@@ -41,12 +49,17 @@ type QuotaPolicyController struct {
 }
 
 // NewQuotaPolicyController creates a new reconciler for QuotaPolicy resources.
+//
+// elected is the manager's Elected() channel; it is closed when this replica
+// becomes the leader. Pass a closed channel to make the controller behave as
+// the leader unconditionally (e.g. when leader election is disabled).
 func NewQuotaPolicyController(
 	client client.Client,
 	kube kubernetes.Interface,
 	logger logr.Logger,
 	rateLimitRunner *runner.Runner,
 	aiGatewayRouteChan chan event.GenericEvent,
+	elected <-chan struct{},
 ) *QuotaPolicyController {
 	return &QuotaPolicyController{
 		client:             client,
@@ -54,7 +67,21 @@ func NewQuotaPolicyController(
 		logger:             logger,
 		rateLimitRunner:    rateLimitRunner,
 		aiGatewayRouteChan: aiGatewayRouteChan,
+		elected:            elected,
 		configCache:        make(map[string][]*rlsconfv3.RateLimitConfig),
+	}
+}
+
+// isLeader reports whether this replica currently holds the leader lease.
+// The elected channel is closed on acquisition and leadership is never
+// relinquished while the process lives (controller-runtime exits on a lost
+// lease), so a closed channel is a stable signal.
+func (c *QuotaPolicyController) isLeader() bool {
+	select {
+	case <-c.elected:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -68,26 +95,43 @@ func (c *QuotaPolicyController) Reconcile(ctx context.Context, req reconcile.Req
 			if err = c.deleteQuotaPolicyConfig(ctx, req.NamespacedName); err != nil {
 				return ctrl.Result{}, err
 			}
-			c.notifyAllAIGatewayRoutesInNamespace(ctx, req.Namespace)
+			// The AIGatewayRoute controller only runs on the leader, so its
+			// event channel has no consumer on other replicas.
+			if c.isLeader() {
+				c.notifyAllAIGatewayRoutesInNamespace(ctx, req.Namespace)
+			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 	c.logger.Info("Reconciling QuotaPolicy", "namespace", req.Namespace, "name", req.Name)
 
-	if handleFinalizer(ctx, c.client, c.logger, &quotaPolicy, func(ctx context.Context, _ *aigv1a1.QuotaPolicy) error {
-		return c.deleteQuotaPolicyConfig(ctx, req.NamespacedName)
-	}) {
+	if c.isLeader() {
+		if handleFinalizer(ctx, c.client, c.logger, &quotaPolicy, func(ctx context.Context, _ *aigv1a1.QuotaPolicy) error {
+			return c.deleteQuotaPolicyConfig(ctx, req.NamespacedName)
+		}) {
+			return ctrl.Result{}, nil
+		}
+	} else if !quotaPolicy.GetDeletionTimestamp().IsZero() {
+		// A non-leader must still purge its local snapshot cache on deletion,
+		// but leaves the finalizer to the leader.
+		if err := c.deleteQuotaPolicyConfig(ctx, req.NamespacedName); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
 	if err := c.syncQuotaPolicy(ctx, &quotaPolicy); err != nil {
 		c.logger.Error(err, "failed to sync QuotaPolicy")
-		c.updateQuotaPolicyStatus(ctx, &quotaPolicy, aigv1a1.ConditionTypeNotAccepted, err.Error())
+		if c.isLeader() {
+			c.updateQuotaPolicyStatus(ctx, &quotaPolicy, aigv1a1.ConditionTypeNotAccepted, err.Error())
+		}
 		return ctrl.Result{}, err
 	}
-	c.updateQuotaPolicyStatus(ctx, &quotaPolicy, aigv1a1.ConditionTypeAccepted, "QuotaPolicy reconciled successfully")
-	c.notifyAIGatewayRoutes(ctx, &quotaPolicy)
+	if c.isLeader() {
+		c.updateQuotaPolicyStatus(ctx, &quotaPolicy, aigv1a1.ConditionTypeAccepted, "QuotaPolicy reconciled successfully")
+		c.notifyAIGatewayRoutes(ctx, &quotaPolicy)
+	}
 	return ctrl.Result{}, nil
 }
 
