@@ -1291,7 +1291,8 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_PingOnlyWhenSilent(t
 func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_NoPingOnEventlessProtocolBlocks(t *testing.T) {
 	translator := newStreamingAnthropicTranslator(t)
 
-	// Open the message with a content call.
+	// Open the message with a content call so the eventless blocks below arrive
+	// mid-stream (a fresh stream's first delta emits message_start).
 	_, _, _, _, err := translator.ResponseBody(
 		map[string]string{"content-type": "text/event-stream"},
 		strings.NewReader(`data: {"id":"chatcmpl-ne","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}],"model":"gpt-4o"}`+"\n\n"),
@@ -1300,19 +1301,24 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_NoPingOnEventlessPro
 	)
 	require.NoError(t, err)
 
-	for name, input := range map[string]string{
-		"finish_reason-only chunk": `data: {"id":"chatcmpl-ne","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
-		"done marker":              "data: [DONE]\n\n",
-		"partial fragment":         `data: {"id":"chatcmpl-ne","choi`,
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"finish_reason-only chunk", `data: {"id":"chatcmpl-ne","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"},
+		{"done marker", "data: [DONE]\n\n"},
+		// Kept last: the unterminated line stays buffered and would merge into a
+		// subsequent call's first line.
+		{"partial fragment", `data: {"id":"chatcmpl-ne","choi`},
 	} {
 		_, body, _, _, err := translator.ResponseBody(
 			map[string]string{"content-type": "text/event-stream"},
-			strings.NewReader(input),
+			strings.NewReader(tc.input),
 			false,
 			nil,
 		)
-		require.NoError(t, err, name)
-		assert.Empty(t, body, "%s must suppress silently, not ping", name)
+		require.NoError(t, err, tc.name)
+		assert.Empty(t, body, "%s must suppress silently, not ping", tc.name)
 	}
 }
 
