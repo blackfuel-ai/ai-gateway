@@ -644,6 +644,24 @@ type sseMessageStop struct {
 	Type string `json:"type"`
 }
 
+type ssePing struct {
+	Type string `json:"type"`
+}
+
+// emitPing emits an Anthropic ping SSE event. Anthropic streams may include any
+// number of ping events at any position; compliant clients treat them as no-ops.
+// Used to keep the downstream connection byte-alive when the upstream sent
+// traffic that translates to no Anthropic event (keepalive comments,
+// unparseable chunks) — see responseBodyStreaming.
+func emitPing(out *[]byte) error {
+	data, err := json.Marshal(ssePing{Type: "ping"})
+	if err != nil {
+		return fmt.Errorf("failed to marshal ping: %w", err)
+	}
+	appendAnthropicSSEEvent(out, "ping", data)
+	return nil
+}
+
 // openAIStreamToAnthropicState tracks the state for converting OpenAI SSE chunks to Anthropic SSE events.
 type openAIStreamToAnthropicState struct {
 	buffer           bytes.Buffer
@@ -783,6 +801,12 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 		// Handle reasoning/thinking content (must come before text).
 		if delta.ReasoningContent != nil {
 			if err := s.handleReasoningDelta(delta.ReasoningContent, out); err != nil {
+				return err
+			}
+		} else if delta.Reasoning != nil && *delta.Reasoning != "" {
+			// OpenRouter's plain-string reasoning delta; same thinking-block
+			// machinery. reasoning_content wins if both are ever present.
+			if err := s.handleReasoningDelta(&openai.StreamReasoningContent{Text: *delta.Reasoning}, out); err != nil {
 				return err
 			}
 		}

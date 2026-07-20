@@ -1636,6 +1636,11 @@ type ChatCompletionResponseChunkChoiceDelta struct {
 	ToolCalls        []ChatCompletionChunkChoiceDeltaToolCall `json:"tool_calls,omitempty"`
 	Annotations      *[]Annotation                            `json:"annotations,omitempty"`
 	ReasoningContent *StreamReasoningContent                  `json:"reasoning_content,omitempty"`
+	// Reasoning is the plain-string reasoning delta emitted by OpenRouter (and the
+	// providers it normalizes, e.g. GLM): {"delta": {"reasoning": "..."}}. Distinct
+	// from ReasoningContent, the reasoning_content field used by vLLM/DeepSeek-style
+	// backends.
+	Reasoning *string `json:"reasoning,omitempty"`
 }
 
 // Error is described in the OpenAI API documentation
@@ -1983,6 +1988,25 @@ type StreamReasoningContent struct {
 	Text            string `json:"text,omitzero"`
 	Signature       string `json:"signature,omitzero"`
 	RedactedContent []byte `json:"redactedContent,omitzero"`
+}
+
+// UnmarshalJSON accepts both the object form ({"text": ..., "signature": ...})
+// and the bare-string form of reasoning_content that vLLM/DeepSeek-style
+// backends emit ({"delta": {"reasoning_content": "..."}}); a string maps to Text.
+func (s *StreamReasoningContent) UnmarshalJSON(data []byte) error {
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		s.Text = str
+		return nil
+	}
+
+	type streamReasoningContentObject StreamReasoningContent
+	var obj streamReasoningContentObject
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	*s = StreamReasoningContent(obj)
+	return nil
 }
 
 // CompletionRequest represents a request to the legacy /completions endpoint.

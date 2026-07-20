@@ -169,7 +169,8 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 	}
 
 	// Read body into streamState's buffer
-	if _, err = a.streamState.buffer.ReadFrom(body); err != nil {
+	consumed, err := a.streamState.buffer.ReadFrom(body)
+	if err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to read stream body: %w", err)
 	}
 
@@ -180,6 +181,21 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 	out := make([]byte, 0)
 	if err = a.streamState.processBuffer(&out, endOfStream); err != nil {
 		return nil, nil, tokenUsage, responseModel, err
+	}
+
+	// Never turn consumed upstream bytes into total downstream silence. If this call
+	// consumed bytes but emitted no Anthropic events — an SSE keepalive comment block
+	// (e.g. OpenRouter's ": OPENROUTER PROCESSING"), a skipped malformed chunk, or a
+	// delta the translator has nothing to say about — emit an Anthropic ping event
+	// instead of an empty body. Streams may include any number of ping events, and
+	// every rolling idle timer on the path (Cloudflare proxy read timeout, client
+	// stream-idle timers) resets only on response bytes; suppressing keepalives into
+	// silence is what wedges long-prefill /v1/messages requests (BLA-2721). The
+	// endOfStream call is exempt: processBuffer emits the closing events there.
+	if len(out) == 0 && consumed > 0 && !endOfStream {
+		if err = emitPing(&out); err != nil {
+			return nil, nil, tokenUsage, responseModel, err
+		}
 	}
 
 	// Update responseModel if updated in streamState or take requested model
