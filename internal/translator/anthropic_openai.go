@@ -178,8 +178,22 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 	// A non-nil empty body tells Envoy to replace the chunk with nothing, suppressing the
 	// raw upstream bytes instead of passing them through unchanged.
 	out := make([]byte, 0)
-	if err = a.streamState.processBuffer(&out, endOfStream); err != nil {
+	pingWorthy, err := a.streamState.processBuffer(&out, endOfStream)
+	if err != nil {
 		return nil, nil, tokenUsage, responseModel, err
+	}
+
+	// Never turn upstream keepalive traffic into total downstream silence. When this
+	// call consumed only keepalive comment blocks (e.g. OpenRouter's ": OPENROUTER
+	// PROCESSING") or undecodable data, emit an Anthropic ping event instead of an
+	// empty body. Streams may include any number of ping events, and every rolling
+	// idle timer on the path (Cloudflare proxy read timeout, client stream-idle
+	// timers) resets only on response bytes; suppressing keepalives into silence is
+	// what wedges long-prefill /v1/messages requests (BLA-2721).
+	if pingWorthy && len(out) == 0 {
+		if err = emitPing(&out); err != nil {
+			return nil, nil, tokenUsage, responseModel, err
+		}
 	}
 
 	// Update responseModel if updated in streamState or take requested model
