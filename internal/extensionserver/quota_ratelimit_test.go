@@ -2043,6 +2043,13 @@ func TestPatchRoutesWithQuotaRateLimits(t *testing.T) {
 		route := routeConfig.VirtualHosts[0].Routes[0]
 		require.NotNil(t, route.TypedPerFilterConfig)
 		require.Contains(t, route.TypedPerFilterConfig, quotaRateLimitFilterName)
+
+		// Patching the same route configuration again must not accumulate
+		// request-time entries (the hook can process a route twice).
+		entriesAfterFirst := len(route.GetRoute().GetRateLimits())
+		require.Positive(t, entriesAfterFirst)
+		s.patchRoutesWithQuotaRateLimits(context.Background(), routeConfig, quotaBackendPolicies)
+		require.Len(t, route.GetRoute().GetRateLimits(), entriesAfterFirst)
 	})
 
 	t.Run("skips route without AI gateway annotation", func(t *testing.T) {
@@ -2544,8 +2551,9 @@ func quotaRateLimitsOnRoute(t *testing.T, route *routev3.Route) []*routev3.RateL
 
 func TestEnableQuotaRateLimitOnRoute_PreservesExistingRouteRateLimits(t *testing.T) {
 	// A stage-0 route-level rate limit (as Envoy Gateway's BackendTrafficPolicy
-	// may emit) must survive the quota patching: entries are appended, and the
-	// quota entries carry stage 1 so the stage-0 filter never evaluates them.
+	// may emit) must survive the quota patching: only quota-stage entries are
+	// replaced, and the quota entries carry stage 1 so the stage-0 filter never
+	// evaluates them.
 	existing := &routev3.RateLimit{
 		Actions: []*routev3.RateLimit_Action{{
 			ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
@@ -2582,6 +2590,96 @@ func TestEnableQuotaRateLimitOnRoute_PreservesExistingRouteRateLimits(t *testing
 	require.Same(t, existing, rls[0])
 	require.Nil(t, rls[0].Stage)
 	require.Equal(t, uint32(quotaRequestRateLimitStage), rls[1].Stage.GetValue())
+}
+
+func TestEnableQuotaRateLimitOnRoute_IdempotentOnRepeatedCalls(t *testing.T) {
+	// The post-translate hook can mutate the same route proto more than once.
+	// The request-time quota entries must be replaced on the second pass, not
+	// accumulated — duplicated entries double-charge every bucket per request
+	// (each admitted request burns +2, so a limit of 3 admits one request).
+	existing := &routev3.RateLimit{
+		Actions: []*routev3.RateLimit_Action{{
+			ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
+				GenericKey: &routev3.RateLimit_Action_GenericKey{DescriptorKey: "btp", DescriptorValue: "btp"},
+			},
+		}},
+	}
+	route := &routev3.Route{
+		Name: "test-route",
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+			RateLimits: []*routev3.RateLimit{existing},
+		}},
+	}
+	policies := []aigv1a1.QuotaPolicy{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+			Spec: aigv1a1.QuotaPolicySpec{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: "be"}},
+				PerModelQuotas: []aigv1a1.PerModelQuota{
+					{
+						ModelName: ptr.To("gpt-4"),
+						Quota: aigv1a1.QuotaDefinition{
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							BucketRules: []aigv1a1.QuotaRule{
+								{Quota: aigv1a1.QuotaValue{Limit: 10, Duration: "1h"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	firstPass := route.GetRoute().GetRateLimits()
+	require.Same(t, existing, firstPass[0])
+	quotaEntries := len(firstPass) - 1
+	require.Positive(t, quotaEntries)
+
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	secondPass := route.GetRoute().GetRateLimits()
+	require.Len(t, secondPass, 1+quotaEntries)
+	require.Same(t, existing, secondPass[0])
+	require.Nil(t, secondPass[0].Stage)
+	for _, rl := range secondPass[1:] {
+		require.Equal(t, uint32(quotaRequestRateLimitStage), rl.Stage.GetValue())
+	}
+}
+
+func TestEnableQuotaRateLimitOnRoute_DedupesIdenticalEntriesAcrossPolicies(t *testing.T) {
+	// One QuotaPolicy exists per AIGatewayRoute, so a backend shared by two
+	// routes is targeted by two policies whose bucket matrices are identical.
+	// Both policies apply to the shared backend's Envoy routes; without
+	// deduplication every bucket entry appears twice and each request charges
+	// +2 (a limit of 3 admits one request). Entries identical in descriptors
+	// and limit override must collapse to one.
+	makePolicy := func(uid string) aigv1a1.QuotaPolicy {
+		return aigv1a1.QuotaPolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", UID: types.UID(uid)},
+			Spec: aigv1a1.QuotaPolicySpec{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: "be"}},
+				PerModelQuotas: []aigv1a1.PerModelQuota{
+					{
+						ModelName: ptr.To("gpt-4"),
+						Quota: aigv1a1.QuotaDefinition{
+							BucketRules: []aigv1a1.QuotaRule{
+								{Quota: aigv1a1.QuotaValue{Limit: 3, Duration: "1m"}},
+								{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1h"}},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	route := &routev3.Route{
+		Name:   "test-route",
+		Action: &routev3.Route_Route{Route: &routev3.RouteAction{}},
+	}
+	policies := []aigv1a1.QuotaPolicy{makePolicy("uid-a"), makePolicy("uid-b")}
+
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	require.Len(t, route.GetRoute().GetRateLimits(), 2)
 }
 
 func TestQuotaOverrideLuaFilter(t *testing.T) {
