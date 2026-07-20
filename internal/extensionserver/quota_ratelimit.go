@@ -26,6 +26,7 @@ import (
 	metadatav3 "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/go-logr/logr"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -690,15 +691,47 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 		return nil
 	}
 
+	// Identical request-time entries arise when several QuotaPolicies target
+	// the same backend (one policy per AIGatewayRoute, routes sharing a
+	// backend) or a policy lists a target more than once: every duplicate
+	// charges its bucket again per request, so a limit of N admits only
+	// floor(N/2) requests. Dedupe by full entry identity — same descriptors
+	// AND same limit override — the request-time counterpart of the
+	// stream-done seenStreamDoneKeys guard.
+	seenRequestTime := make(map[string]struct{}, len(rateLimitActions))
+	dedupedActions := rateLimitActions[:0]
+	for _, rl := range rateLimitActions {
+		keyBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(rl)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request-time rate limit entry: %w", err)
+		}
+		if _, dup := seenRequestTime[string(keyBytes)]; dup {
+			continue
+		}
+		seenRequestTime[string(keyBytes)] = struct{}{}
+		dedupedActions = append(dedupedActions, rl)
+	}
+	rateLimitActions = dedupedActions
+
 	// Request-time entries go on the route itself: only route-level rate limits
 	// support the per-request limit override, and the stage scopes them to the
 	// request-time quota filter (Envoy Gateway's stage-0 filter ignores them).
-	// Appended, never assigned, so entries emitted by Envoy Gateway survive.
+	// The post-translate hook can mutate the same route more than once, so any
+	// quota-stage entries already present are replaced — never accumulated —
+	// while entries emitted by Envoy Gateway (other stages) survive untouched,
+	// mirroring the assign semantics of the stream-done TypedPerFilterConfig
+	// path below.
 	if routeAction := route.GetRoute(); routeAction != nil && len(rateLimitActions) > 0 {
+		kept := routeAction.RateLimits[:0]
+		for _, rl := range routeAction.RateLimits {
+			if rl.GetStage().GetValue() != quotaRequestRateLimitStage {
+				kept = append(kept, rl)
+			}
+		}
 		for _, rl := range rateLimitActions {
 			rl.Stage = wrapperspb.UInt32(quotaRequestRateLimitStage)
 		}
-		routeAction.RateLimits = append(routeAction.RateLimits, rateLimitActions...)
+		routeAction.RateLimits = append(kept, rateLimitActions...)
 	}
 
 	// Stream-done charge entries go in the per-route config of the stream-done
