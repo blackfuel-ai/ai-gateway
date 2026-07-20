@@ -169,8 +169,7 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 	}
 
 	// Read body into streamState's buffer
-	consumed, err := a.streamState.buffer.ReadFrom(body)
-	if err != nil {
+	if _, err = a.streamState.buffer.ReadFrom(body); err != nil {
 		return nil, nil, tokenUsage, responseModel, fmt.Errorf("failed to read stream body: %w", err)
 	}
 
@@ -179,20 +178,19 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 	// A non-nil empty body tells Envoy to replace the chunk with nothing, suppressing the
 	// raw upstream bytes instead of passing them through unchanged.
 	out := make([]byte, 0)
-	if err = a.streamState.processBuffer(&out, endOfStream); err != nil {
+	pingWorthy, err := a.streamState.processBuffer(&out, endOfStream)
+	if err != nil {
 		return nil, nil, tokenUsage, responseModel, err
 	}
 
-	// Never turn consumed upstream bytes into total downstream silence. If this call
-	// consumed bytes but emitted no Anthropic events — an SSE keepalive comment block
-	// (e.g. OpenRouter's ": OPENROUTER PROCESSING"), a skipped malformed chunk, or a
-	// delta the translator has nothing to say about — emit an Anthropic ping event
-	// instead of an empty body. Streams may include any number of ping events, and
-	// every rolling idle timer on the path (Cloudflare proxy read timeout, client
-	// stream-idle timers) resets only on response bytes; suppressing keepalives into
-	// silence is what wedges long-prefill /v1/messages requests (BLA-2721). The
-	// endOfStream call is exempt: processBuffer emits the closing events there.
-	if len(out) == 0 && consumed > 0 && !endOfStream {
+	// Never turn upstream keepalive traffic into total downstream silence. When this
+	// call consumed only keepalive comment blocks (e.g. OpenRouter's ": OPENROUTER
+	// PROCESSING") or undecodable data, emit an Anthropic ping event instead of an
+	// empty body. Streams may include any number of ping events, and every rolling
+	// idle timer on the path (Cloudflare proxy read timeout, client stream-idle
+	// timers) resets only on response bytes; suppressing keepalives into silence is
+	// what wedges long-prefill /v1/messages requests (BLA-2721).
+	if pingWorthy && len(out) == 0 {
 		if err = emitPing(&out); err != nil {
 			return nil, nil, tokenUsage, responseModel, err
 		}
