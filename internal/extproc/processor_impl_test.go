@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"mime/multipart"
+	"strconv"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -2780,4 +2781,19 @@ func mustCompileCEL(t *testing.T, expr string) cel.Program {
 	prog, err := llmcostcel.NewProgram(expr)
 	require.NoError(t, err)
 	return prog
+}
+
+// The content_length metadata must be a string: the header_mutation filter renders it
+// verbatim into the content-length header, and Envoy renders NumberValue doubles in
+// shortest form (100000 -> "1e+05"), an invalid Content-Length that strict HTTP/2
+// peers reject with http2.invalid.header.field.
+func TestBuildContentLengthDynamicMetadataOnRequest_rendersDigits(t *testing.T) {
+	for _, contentLength := range []int{0, 99999, 100000, 1000000, 123456789} {
+		md := buildContentLengthDynamicMetadataOnRequest(contentLength)
+		ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.NotNil(t, ns)
+		v := ns.Fields["content_length"]
+		require.NotNil(t, v)
+		require.Equal(t, strconv.Itoa(contentLength), v.GetStringValue())
+	}
 }

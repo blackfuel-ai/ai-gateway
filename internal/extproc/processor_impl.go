@@ -800,8 +800,12 @@ func buildContentLengthDynamicMetadataOnRequest(contentLength int) *structpb.Str
 				Kind: &structpb.Value_StructValue{
 					StructValue: &structpb.Struct{
 						Fields: map[string]*structpb.Value{
+							// Stored as a string: the header_mutation filter renders this value verbatim
+							// into the content-length header, and Envoy's formatter renders NumberValue
+							// doubles in shortest form (100000 -> "1e+05"), which is an invalid
+							// Content-Length that strict HTTP/2 peers reject.
 							"content_length": {
-								Kind: &structpb.Value_NumberValue{NumberValue: float64(contentLength)},
+								Kind: &structpb.Value_StringValue{StringValue: strconv.Itoa(contentLength)},
 							},
 						},
 					},
