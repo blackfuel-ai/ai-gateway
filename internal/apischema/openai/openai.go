@@ -1887,6 +1887,10 @@ type EmbeddingUsage struct {
 
 	// TotalTokens: The total number of tokens used by the request.
 	TotalTokens int `json:"total_tokens"` //nolint:tagliatelle //follow openai api
+
+	// PromptTokensDetails: Breakdown of tokens used in the prompt.
+	// vLLM populates cached_tokens here when prefix caching is active.
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"` //nolint:tagliatelle //follow openai api
 }
 
 // JSONUNIXTime is a helper type to marshal/unmarshal time.Time UNIX timestamps.

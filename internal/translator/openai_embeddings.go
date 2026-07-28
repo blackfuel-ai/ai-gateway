@@ -80,9 +80,12 @@ func (o *openAIToOpenAITranslatorV1Embedding) ResponseBody(_ map[string]string, 
 		span.RecordResponse(&resp)
 	}
 
-	// Embeddings don't return output tokens; populate input and total when provided.
+	// Embeddings don't return output tokens; populate input, total, and cached input when provided.
 	tokenUsage.SetInputTokens(uint32(resp.Usage.PromptTokens)) //nolint:gosec
 	tokenUsage.SetTotalTokens(uint32(resp.Usage.TotalTokens))  //nolint:gosec
+	if resp.Usage.PromptTokensDetails != nil {
+		tokenUsage.SetCachedInputTokens(uint32(resp.Usage.PromptTokensDetails.CachedTokens)) //nolint:gosec
+	}
 	responseModel = resp.Model
 	return
 }

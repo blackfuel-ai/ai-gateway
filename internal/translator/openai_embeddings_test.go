@@ -116,6 +116,28 @@ func TestOpenAIToOpenAITranslatorV1EmbeddingResponseBody(t *testing.T) {
 			expTokenUsage: tokenUsageFrom(8, -1, -1, -1, 8, -1),
 		},
 		{
+			name: "response_with_prefix_cache_tokens",
+			responseBody: `{
+				"object": "list",
+				"data": [
+					{
+						"object": "embedding",
+						"embedding": [0.1, 0.2, 0.3],
+						"index": 0
+					}
+				],
+				"model": "BAAI/bge-multilingual-gemma2",
+				"usage": {
+					"prompt_tokens": 100,
+					"total_tokens": 100,
+					"prompt_tokens_details": {
+						"cached_tokens": 80
+					}
+				}
+			}`,
+			expTokenUsage: tokenUsageFrom(100, 80, -1, -1, 100, -1),
+		},
+		{
 			name:          "invalid_json",
 			responseBody:  `invalid json`,
 			expError:      true,
