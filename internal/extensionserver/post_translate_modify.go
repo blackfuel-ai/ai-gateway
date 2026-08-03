@@ -831,6 +831,13 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 	if defaultFC != nil {
 		filterChains = append(filterChains, defaultFC)
 	}
+	// The EPP filter is keyed by pool identity, so a pool referenced both as a mirror leg and
+	// as a primary backendRef must yield exactly one filter — the fail-open mirror variant —
+	// or the chain would carry two filters with the same name.
+	mirrorPoolKeys := make(map[string]struct{}, len(mirrorPools))
+	for _, pool := range mirrorPools {
+		mirrorPoolKeys[pool.GetNamespace()+"/"+pool.GetName()] = struct{}{}
+	}
 	// Go over all of the chains, and add the endpoint picker external processor filters.
 	for _, currChain := range filterChains {
 		httpConManager, hcmIndex, err := findHCM(currChain)
@@ -865,6 +872,10 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 			}
 		}
 		for _, pool := range inferencePools {
+			if _, isMirror := mirrorPoolKeys[pool.GetNamespace()+"/"+pool.GetName()]; isMirror {
+				// Already handled by the mirror loop above: the fail-open filter wins.
+				continue
+			}
 			_, baIndex, searchErr := searchInferencePoolInFilterChain(pool, httpConManager.HttpFilters)
 			if searchErr != nil {
 				s.log.Error(searchErr, "failed to find an inference pool ext proc filter")

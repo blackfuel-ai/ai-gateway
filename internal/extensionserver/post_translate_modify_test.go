@@ -813,3 +813,59 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 	require.Contains(t, plainRoute.TypedPerFilterConfig, primaryEPPName)
 }
+
+// Test_patchListenerWithInferencePoolFilters_sharedPool: a pool referenced both as a mirror leg
+// and as a primary backendRef (the mirror's deployment-id-pinned probe rule) yields exactly one
+// EPP filter — the fail-open mirror variant. The filter name is keyed by pool identity, so
+// without cross-list dedup the chain would carry two same-named filters.
+func Test_patchListenerWithInferencePoolFilters_sharedPool(t *testing.T) {
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "", 0, false)
+	require.NoError(t, err)
+
+	sharedPool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-pool", Namespace: "ns"},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: gwaiev1.EndpointPickerRef{Name: "shared-epp", Port: ptr.To(gwaiev1.Port{Number: 9002})},
+		},
+	}
+
+	routerFilter := &httpconnectionmanagerv3.HttpFilter{Name: "envoy.filters.http.router"}
+	hcmIn := &httpconnectionmanagerv3.HttpConnectionManager{
+		HttpFilters: []*httpconnectionmanagerv3.HttpFilter{routerFilter},
+	}
+	hcmAny, err := toAny(hcmIn)
+	require.NoError(t, err)
+	listener := &listenerv3.Listener{
+		Name: "test-listener",
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+			}},
+		}},
+	}
+	s.patchListenerWithInferencePoolFilters(listener,
+		[]*gwaiev1.InferencePool{sharedPool}, []*gwaiev1.InferencePool{sharedPool})
+
+	hcm, _, err := findHCM(listener.FilterChains[0])
+	require.NoError(t, err)
+	sharedName := httpFilterNameForInferencePool(sharedPool)
+	var matches []*httpconnectionmanagerv3.HttpFilter
+	for _, f := range hcm.HttpFilters {
+		if f.Name == sharedName {
+			matches = append(matches, f)
+		}
+	}
+	require.Len(t, matches, 1, "shared pool must yield exactly one EPP filter, got names: %v",
+		func() []string {
+			names := make([]string, 0, len(hcm.HttpFilters))
+			for _, f := range hcm.HttpFilters {
+				names = append(names, f.Name)
+			}
+			return names
+		}())
+	ep := &extprocv3.ExternalProcessor{}
+	require.NoError(t, matches[0].GetTypedConfig().UnmarshalTo(ep))
+	require.True(t, ep.FailureModeAllow, "shared pool filter must be the fail-open mirror variant")
+	require.True(t, ep.DisableImmediateResponse)
+}
