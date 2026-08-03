@@ -1058,6 +1058,20 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 	require.Less(t, idx(mirrorEndpointCopyFilterName), idx(primaryEPPName), "copy filter must precede the primary EPP")
 	require.Equal(t, "envoy.filters.http.router", names[len(names)-1])
 
+	// Failure semantics: the mirror EPP filter is fail-open (its failure drops the shadow
+	// clone, never the primary request), the primary EPP filter fail-closed.
+	extProcOf := func(i int) *extprocv3.ExternalProcessor {
+		ep := &extprocv3.ExternalProcessor{}
+		require.NoError(t, hcm.HttpFilters[i].GetTypedConfig().UnmarshalTo(ep))
+		return ep
+	}
+	mirrorEP := extProcOf(idx(mirrorEPPName))
+	require.True(t, mirrorEP.FailureModeAllow, "mirror EPP must be fail-open")
+	require.True(t, mirrorEP.DisableImmediateResponse, "mirror EPP ImmediateResponse must not reach the caller")
+	primaryEP := extProcOf(idx(primaryEPPName))
+	require.False(t, primaryEP.FailureModeAllow, "primary EPP must stay fail-closed")
+	require.False(t, primaryEP.DisableImmediateResponse)
+
 	// Virtual host per-route config: the mirror rule's route keeps the mirror filters enabled;
 	// a plain route gets everything disabled including the copy filter.
 	mirrorRuleCluster := "httproute/ns/myroute/rule/0"
