@@ -281,9 +281,11 @@ func buildExtProcClusterForInferencePoolEndpointPicker(pool *gwaiev1.InferencePo
 	return c, nil
 }
 
-// buildInferencePoolHTTPFilter returns a HTTP filter for InferencePool.
-func buildInferencePoolHTTPFilter(pool *gwaiev1.InferencePool) (*httpconnectionmanagerv3.HttpFilter, error) {
-	poolFilter := buildHTTPFilterForInferencePool(pool)
+// buildInferencePoolHTTPFilter returns a HTTP filter for InferencePool. mirror marks a pool
+// referenced by a request-mirror leg, whose EPP filter is fail-open (see
+// buildHTTPFilterForInferencePool).
+func buildInferencePoolHTTPFilter(pool *gwaiev1.InferencePool, mirror bool) (*httpconnectionmanagerv3.HttpFilter, error) {
+	poolFilter := buildHTTPFilterForInferencePool(pool, mirror)
 	a, err := toAny(poolFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build HTTP filter for InferencePool %s/%s: %w", pool.GetNamespace(), pool.GetName(), err)
@@ -295,12 +297,28 @@ func buildInferencePoolHTTPFilter(pool *gwaiev1.InferencePool) (*httpconnectionm
 }
 
 // buildHTTPFilterForInferencePool returns the HTTP filter for the given InferencePool.
-func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool) *extprocv3.ExternalProcessor {
+//
+// A mirror pool's EPP runs inline on the primary request stream (its endpoint pick must be
+// settled in headers before the router creates the shadow clone), yet mirror traffic is
+// best-effort by definition. Mirror EPP filters are therefore fail-open: any EPP failure —
+// zero-endpoint ImmediateResponse 503, crash, or timeout — degrades to an unset mirror
+// endpoint-picker header and a dropped shadow clone, never a caller-facing error.
+// DisableImmediateResponse turns the EPP's ImmediateResponse (a valid ext_proc exchange that
+// FailureModeAllow alone would honor) into a processing error that FailureModeAllow then
+// converts to "continue". The short MessageTimeout bounds how long an unresponsive mirror EPP
+// can stall the primary request. Primary pool EPP filters stay fail-closed: a request that
+// cannot be routed to an endpoint must fail.
+func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool, mirror bool) *extprocv3.ExternalProcessor {
 	// Read processing body mode from annotations, default to "duplex" (FULL_DUPLEX_STREAMED)
 	processingBodyMode := getProcessingBodyModeFromAnnotations(pool)
 
 	// Read allow mode override from annotations, default to false
 	allowModeOverride := getAllowModeOverrideFromAnnotations(pool)
+
+	messageTimeout := 300 * time.Second
+	if mirror {
+		messageTimeout = 10 * time.Second
+	}
 
 	return &extprocv3.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
@@ -319,9 +337,10 @@ func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool) *extprocv3.Ext
 			ResponseHeaderMode:  extprocv3.ProcessingMode_SEND,
 			ResponseTrailerMode: extprocv3.ProcessingMode_SEND,
 		},
-		AllowModeOverride: allowModeOverride,
-		MessageTimeout:    durationpb.New(300 * time.Second),
-		FailureModeAllow:  false,
+		AllowModeOverride:        allowModeOverride,
+		MessageTimeout:           durationpb.New(messageTimeout),
+		FailureModeAllow:         mirror,
+		DisableImmediateResponse: mirror,
 	}
 }
 
