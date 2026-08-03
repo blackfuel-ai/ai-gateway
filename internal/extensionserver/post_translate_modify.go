@@ -677,12 +677,25 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 // the mirror header, then the primary pools' filters: the shadow clone is created in the router
 // from the finalized downstream headers, so the mirror header must be settled before any
 // primary EPP writes the standard header for the real upstream.
+//
+// Mirror pool filters are fail-open by construction (buildHTTPFilterForInferencePool): they run
+// inline on the primary request stream, so their failure must never terminate it. The filter is
+// keyed by pool, so a pool referenced both as a mirror leg and as a primary backendRef (the
+// mirror's deployment-id-pinned probe rule) gets the fail-open filter — a probe to an empty
+// pool still fails, from the unresolvable ORIGINAL_DST cluster instead of the EPP.
 func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.Listener, inferencePools, mirrorPools []*gwaiev1.InferencePool) {
 	// First, get the filter chains from the listener.
 	filterChains := listener.GetFilterChains()
 	defaultFC := listener.DefaultFilterChain
 	if defaultFC != nil {
 		filterChains = append(filterChains, defaultFC)
+	}
+	// The EPP filter is keyed by pool identity, so a pool referenced both as a mirror leg and
+	// as a primary backendRef must yield exactly one filter — the fail-open mirror variant —
+	// or the chain would carry two filters with the same name.
+	mirrorPoolKeys := make(map[string]struct{}, len(mirrorPools))
+	for _, pool := range mirrorPools {
+		mirrorPoolKeys[pool.GetNamespace()+"/"+pool.GetName()] = struct{}{}
 	}
 	// Go over all of the chains, and add the endpoint picker external processor filters.
 	for _, currChain := range filterChains {
@@ -701,7 +714,7 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 			if baIndex == -1 {
 				s.log.Info("adding mirror inference pool ext proc filter", "pool", pool.Name)
 				var eppExtProc *httpconnectionmanagerv3.HttpFilter
-				eppExtProc, err = buildInferencePoolHTTPFilter(pool)
+				eppExtProc, err = buildInferencePoolHTTPFilter(pool, true)
 				if err != nil {
 					s.log.Error(err, "failed to build mirror inference pool ext proc filter", "pool", pool.Name)
 					continue
@@ -718,6 +731,10 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 			}
 		}
 		for _, pool := range inferencePools {
+			if _, isMirror := mirrorPoolKeys[pool.GetNamespace()+"/"+pool.GetName()]; isMirror {
+				// Already handled by the mirror loop above: the fail-open filter wins.
+				continue
+			}
 			_, baIndex, searchErr := searchInferencePoolInFilterChain(pool, httpConManager.HttpFilters)
 			if searchErr != nil {
 				s.log.Error(searchErr, "failed to find an inference pool ext proc filter")
@@ -726,7 +743,7 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 			if baIndex == -1 {
 				s.log.Info("adding inference pool ext proc filter", "pool", pool.Name)
 				var eppExtProc *httpconnectionmanagerv3.HttpFilter
-				eppExtProc, err = buildInferencePoolHTTPFilter(pool)
+				eppExtProc, err = buildInferencePoolHTTPFilter(pool, false)
 				if err != nil {
 					s.log.Error(err, "failed to build inference pool ext proc filter", "pool", pool.Name)
 					continue
