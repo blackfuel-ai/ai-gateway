@@ -1878,7 +1878,7 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 			},
 		}
 
-		filter := buildHTTPFilterForInferencePool(pool)
+		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
 		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.RequestBodyMode)
 		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.ResponseBodyMode)
@@ -1901,7 +1901,7 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 			},
 		}
 
-		filter := buildHTTPFilterForInferencePool(pool)
+		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
 		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.RequestBodyMode)
 		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.ResponseBodyMode)
@@ -1924,7 +1924,7 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 			},
 		}
 
-		filter := buildHTTPFilterForInferencePool(pool)
+		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
 		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.RequestBodyMode)
 		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.ResponseBodyMode)
@@ -1948,7 +1948,7 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 			},
 		}
 
-		filter := buildHTTPFilterForInferencePool(pool)
+		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
 		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.RequestBodyMode)
 		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.ResponseBodyMode)
