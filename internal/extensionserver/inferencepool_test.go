@@ -7,6 +7,7 @@ package extensionserver
 
 import (
 	"testing"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
@@ -145,10 +146,34 @@ func TestBuildHTTPFilterForInferencePool_Defaults(t *testing.T) {
 		},
 	}
 
-	filter := buildHTTPFilterForInferencePool(pool)
+	filter := buildHTTPFilterForInferencePool(pool, false)
 	assert.NotNil(t, filter)
 	// Expect duplex by default
 	assert.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.RequestBodyMode)
 	assert.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.ResponseBodyMode)
 	assert.False(t, filter.AllowModeOverride)
+	// Primary pool filters are fail-closed.
+	assert.False(t, filter.FailureModeAllow)
+	assert.False(t, filter.DisableImmediateResponse)
+	assert.Equal(t, 300*time.Second, filter.MessageTimeout.AsDuration())
+}
+
+// TestBuildHTTPFilterForInferencePool_Mirror: a mirror pool's EPP filter is fail-open — its
+// failure must degrade to a dropped shadow clone, never a caller-facing error.
+func TestBuildHTTPFilterForInferencePool_Mirror(t *testing.T) {
+	pool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mirror-pool",
+			Namespace: "default",
+		},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: gwaiev1.EndpointPickerRef{Name: "mirror-picker"},
+		},
+	}
+
+	filter := buildHTTPFilterForInferencePool(pool, true)
+	assert.NotNil(t, filter)
+	assert.True(t, filter.FailureModeAllow)
+	assert.True(t, filter.DisableImmediateResponse)
+	assert.Equal(t, 10*time.Second, filter.MessageTimeout.AsDuration())
 }

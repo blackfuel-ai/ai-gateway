@@ -13,6 +13,7 @@ import (
 	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
@@ -762,6 +763,20 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 	require.Less(t, idx(mirrorEPPName), idx(mirrorEndpointCopyFilterName), "mirror EPP must precede the copy filter")
 	require.Less(t, idx(mirrorEndpointCopyFilterName), idx(primaryEPPName), "copy filter must precede the primary EPP")
 	require.Equal(t, "envoy.filters.http.router", names[len(names)-1])
+
+	// Failure semantics: the mirror EPP filter is fail-open (its failure drops the shadow
+	// clone, never the primary request), the primary EPP filter fail-closed.
+	extProcOf := func(i int) *extprocv3.ExternalProcessor {
+		ep := &extprocv3.ExternalProcessor{}
+		require.NoError(t, hcm.HttpFilters[i].GetTypedConfig().UnmarshalTo(ep))
+		return ep
+	}
+	mirrorEP := extProcOf(idx(mirrorEPPName))
+	require.True(t, mirrorEP.FailureModeAllow, "mirror EPP must be fail-open")
+	require.True(t, mirrorEP.DisableImmediateResponse, "mirror EPP ImmediateResponse must not reach the caller")
+	primaryEP := extProcOf(idx(primaryEPPName))
+	require.False(t, primaryEP.FailureModeAllow, "primary EPP must stay fail-closed")
+	require.False(t, primaryEP.DisableImmediateResponse)
 
 	// Virtual host per-route config: the mirror rule's route keeps the mirror filters enabled;
 	// a plain route gets everything disabled including the copy filter.
