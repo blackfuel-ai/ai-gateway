@@ -992,17 +992,30 @@ func mirrorPoolForRoute(route *routev3.Route, mirrorPoolsByRuleCluster map[strin
 }
 
 // buildMirrorEndpointCopyFilter builds the downstream header_mutation filter that isolates a
-// mirror pool EPP's endpoint selection: it copies the standard endpoint-picker header into the
-// mirror header and removes the original, so a primary pool's EPP (which runs after this
-// filter) owns the standard header while the shadow clone resolves its ORIGINAL_DST cluster
-// through the mirror header. The filter runs on every route (see
-// patchVirtualHostWithInferencePool for why it is never per-route disabled): on routes without
-// a mirror leg the source header is absent at this position, so the append is skipped and the
-// remove only strips a client-spoofed value.
+// mirror pool EPP's endpoint selection: it copies the standard endpoint-picker header — which
+// at this position can only hold a mirror pool's pick — into the mirror header, so the shadow
+// clone resolves its ORIGINAL_DST cluster through the mirror header while a primary pool's EPP
+// (which runs after this filter) overwrites the standard header for the real upstream. The
+// filter runs on every route (see patchVirtualHostWithInferencePool for why it is never
+// per-route disabled): on routes without a mirror leg the source header is absent at this
+// position, so the copy is skipped and only a spoofed mirror header gets stripped.
 func buildMirrorEndpointCopyFilter() (*httpconnectionmanagerv3.HttpFilter, error) {
 	hmAny, err := toAny(&header_mutationv3.HeaderMutation{
 		Mutations: &header_mutationv3.Mutations{
+			// Mutations evaluate in order: first strip any client-supplied mirror header (a
+			// forged value would otherwise survive on routes where no mirror EPP writes the
+			// source header and steer the shadow clone to an arbitrary address), then copy the
+			// standard endpoint-picker header — the mirror EPP's pick at this position — into
+			// the mirror header. The standard header is deliberately KEPT: on a catch-all rule
+			// the primary pool's EPP overwrites it right after this filter, and on a mirror's
+			// deployment-id-pinned rule (where the mirror pool serves as the rule's primary and
+			// no further EPP runs) it must survive for the rule cluster's ORIGINAL_DST lookup.
 			RequestMutations: []*mutation_rulesv3.HeaderMutation{
+				{
+					Action: &mutation_rulesv3.HeaderMutation_Remove{
+						Remove: internalapi.MirrorEndpointPickerHeaderKey,
+					},
+				},
 				{
 					Action: &mutation_rulesv3.HeaderMutation_Append{
 						Append: &corev3.HeaderValueOption{
@@ -1012,11 +1025,6 @@ func buildMirrorEndpointCopyFilter() (*httpconnectionmanagerv3.HttpFilter, error
 								Value: `%REQ(` + internalapi.EndpointPickerHeaderKey + `)%`,
 							},
 						},
-					},
-				},
-				{
-					Action: &mutation_rulesv3.HeaderMutation_Remove{
-						Remove: internalapi.EndpointPickerHeaderKey,
 					},
 				},
 			},
