@@ -911,10 +911,22 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 }
 
 // patchVirtualHostWithInferencePool adds the necessary per-route configuration to disable
-// inference pool filters (and the mirror endpoint copy filter) on routes they do not belong to.
-// A route keeps enabled: its primary pool's EPP filter (route metadata), plus — when one of its
-// rule's request-mirror legs targets a pool — that mirror pool's EPP filter and the shared copy
-// filter. Everything else is explicitly disabled per route.
+// inference pool filters on routes they do not belong to. A route keeps enabled: its primary
+// pool's EPP filter (route metadata), plus — when one of its rule's request-mirror legs targets
+// a pool — that mirror pool's EPP filter. Every other EPP filter is explicitly disabled per
+// route via ExtProcPerRoute, which the ext_proc filter re-evaluates AFTER the aigateway extproc
+// injects x-ai-eg-model and the route re-matches.
+//
+// The mirror endpoint copy filter is enabled on every route, on purpose. It is safe by
+// position: it sits after all mirror EPP filters and before all primary EPP filters, and on a
+// route without a mirror leg nothing before it sets the standard endpoint-picker header
+// (foreign mirror EPPs are ExtProcPerRoute-disabled), so its %REQ()% append evaluates empty
+// and is skipped while its remove strips any client-spoofed value. It must NOT be disabled via
+// the generic route FilterConfig: Envoy evaluates that once, at filter-chain creation, against
+// the INITIAL route match — which on this listener is never the real route, because every
+// request re-matches only after the aigateway extproc injects the model header. A generic
+// disable therefore removes the filter from every real request stream permanently and no
+// shadow clone can ever resolve its ORIGINAL_DST cluster.
 func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, inferencePools, mirrorPools []*gwaiev1.InferencePool, mirrorPoolsByRuleCluster map[string]*gwaiev1.InferencePool) error {
 	inferenceMatrix := make(map[string]*gwaiev1.InferencePool)
 	for _, pool := range inferencePools {
@@ -923,7 +935,6 @@ func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, infe
 	for _, pool := range mirrorPools {
 		inferenceMatrix[httpFilterNameForInferencePool(pool)] = pool
 	}
-	hasMirrorFilters := len(mirrorPools) > 0
 	for _, route := range vh.Routes {
 		override := &extprocv3.ExtProcPerRoute{
 			Override: &extprocv3.ExtProcPerRoute_Disabled{
@@ -951,18 +962,6 @@ func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, infe
 				route.TypedPerFilterConfig = make(map[string]*anypb.Any)
 			}
 			route.TypedPerFilterConfig[key] = overrideAny
-		}
-		// The copy filter must only act on mirror routes: anywhere else it would strip the
-		// primary endpoint-picker header before the router reads it.
-		if hasMirrorFilters && mirrorPool == nil {
-			disabledAny, derr := toAny(&routev3.FilterConfig{Disabled: true})
-			if derr != nil {
-				return fmt.Errorf("failed to marshal FilterConfig to Any: %w", derr)
-			}
-			if route.TypedPerFilterConfig == nil {
-				route.TypedPerFilterConfig = make(map[string]*anypb.Any)
-			}
-			route.TypedPerFilterConfig[mirrorEndpointCopyFilterName] = disabledAny
 		}
 	}
 	return nil
@@ -996,7 +995,10 @@ func mirrorPoolForRoute(route *routev3.Route, mirrorPoolsByRuleCluster map[strin
 // mirror pool EPP's endpoint selection: it copies the standard endpoint-picker header into the
 // mirror header and removes the original, so a primary pool's EPP (which runs after this
 // filter) owns the standard header while the shadow clone resolves its ORIGINAL_DST cluster
-// through the mirror header.
+// through the mirror header. The filter runs on every route (see
+// patchVirtualHostWithInferencePool for why it is never per-route disabled): on routes without
+// a mirror leg the source header is absent at this position, so the append is skipped and the
+// remove only strips a client-spoofed value.
 func buildMirrorEndpointCopyFilter() (*httpconnectionmanagerv3.HttpFilter, error) {
 	hmAny, err := toAny(&header_mutationv3.HeaderMutation{
 		Mutations: &header_mutationv3.Mutations{
