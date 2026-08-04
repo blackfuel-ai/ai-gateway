@@ -14,6 +14,7 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
@@ -738,21 +739,46 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 
 	mirrorRoute := vh.Routes[0]
 	plainRoute := vh.Routes[1]
-	// Mirror route: mirror EPP + copy filter enabled (no disable override), primary EPP
-	// disabled (route metadata carries no primary pool in this synthetic setup).
+	// Mirror route: mirror EPP enabled (no disable override), primary EPP disabled (route
+	// metadata carries no primary pool in this synthetic setup).
 	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEPPName)
-	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 	require.Contains(t, mirrorRoute.TypedPerFilterConfig, primaryEPPName)
-	// Plain route: everything disabled.
+	// Plain route: every foreign EPP filter disabled.
 	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEPPName)
-	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 	require.Contains(t, plainRoute.TypedPerFilterConfig, primaryEPPName)
+	// The copy filter is never per-route disabled — a generic FilterConfig disable is evaluated
+	// against the INITIAL route match, which on this listener precedes the aigateway extproc's
+	// model-header injection, so it would strip the filter from every real request stream.
+	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
+	require.NotContains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 }
 
 // Test_patchListenerWithInferencePoolFilters_sharedPool: a pool referenced both as a mirror leg
 // and as a primary backendRef (the mirror's deployment-id-pinned probe rule) yields exactly one
 // EPP filter — the fail-open mirror variant. The filter name is keyed by pool identity, so
 // without cross-list dedup the chain would carry two same-named filters.
+// Test_buildMirrorEndpointCopyFilter_copiesWithoutRemovingSource: the copy filter strips a
+// spoofed mirror header first, then copies the standard endpoint-picker header WITHOUT removing
+// it — the standard header must survive for the mirror's deployment-id-pinned rule, whose
+// cluster keys ORIGINAL_DST on it with no later EPP to re-set it.
+func Test_buildMirrorEndpointCopyFilter_copiesWithoutRemovingSource(t *testing.T) {
+	f, err := buildMirrorEndpointCopyFilter()
+	require.NoError(t, err)
+	hm := &header_mutationv3.HeaderMutation{}
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(hm))
+	muts := hm.GetMutations().GetRequestMutations()
+	require.Len(t, muts, 2)
+	require.Equal(t, internalapi.MirrorEndpointPickerHeaderKey, muts[0].GetRemove(),
+		"first mutation must strip a client-supplied mirror header")
+	appendMut := muts[1].GetAppend()
+	require.NotNil(t, appendMut)
+	require.Equal(t, internalapi.MirrorEndpointPickerHeaderKey, appendMut.GetHeader().GetKey())
+	for _, m := range muts {
+		require.NotEqual(t, internalapi.EndpointPickerHeaderKey, m.GetRemove(),
+			"the standard endpoint-picker header must never be removed")
+	}
+}
+
 func Test_patchListenerWithInferencePoolFilters_sharedPool(t *testing.T) {
 	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "", 0, false)
 	require.NoError(t, err)
