@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
@@ -128,6 +129,11 @@ type (
 		handler   filterapi.BackendAuthHandler
 		// cost is the cost of the request that is accumulated during the processing of the response.
 		costs metrics.TokenUsage
+		// lastCostMetadataAt is when cost dynamic metadata was last written, and
+		// lastCostMetadataOutputTokens the output token count it carried. Together they
+		// throttle the mid-stream writes described on [costMetadataMinInterval].
+		lastCostMetadataAt           time.Time
+		lastCostMetadataOutputTokens uint32
 		// metrics tracking.
 		metrics metrics.Metrics
 	}
@@ -562,7 +568,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	// Mirror (shadow) backends must not emit LLMRequestCost dynamic metadata: the primary
 	// leg already emitted it and the downstream access-log / billing pipeline would
 	// otherwise double-count tokens for every mirrored request.
-	if body.EndOfStream && !u.isMirror && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
+	if !u.isMirror && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) && u.shouldWriteCostMetadata(body.EndOfStream) {
 		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build dynamic metadata: %w", err)
@@ -671,6 +677,43 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	}
 
 	return
+}
+
+// costMetadataMinInterval is the shortest gap between two mid-stream cost
+// dynamic-metadata writes. Every write re-evaluates the configured cost CEL
+// expressions and rebuilds a protobuf struct, so writing on every SSE chunk would
+// put that work on the per-token path; a stream severed between two writes bills
+// at most this much delivered output short.
+const costMetadataMinInterval = 5 * time.Second
+
+// shouldWriteCostMetadata reports whether this response body chunk should carry
+// LLMRequestCost dynamic metadata, and records the write when it does.
+//
+// End-of-stream always writes: that is the authoritative usage the access log and
+// the stream-done quota burndown bill against. A streaming response also writes
+// periodically before then, because Envoy keeps the last dynamic metadata ext_proc
+// wrote on the stream — so a stream severed mid-flight (client abort, idle timeout,
+// request backstop, pod drain) logs the output delivered up to the last write
+// instead of logging nothing and billing zero. Writes are throttled by
+// [costMetadataMinInterval] and skipped while the output token count is unchanged.
+func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) shouldWriteCostMetadata(endOfStream bool) bool {
+	if endOfStream {
+		return true
+	}
+	if !u.parent.stream {
+		return false
+	}
+	out, ok := u.costs.OutputTokens()
+	if !ok || out == u.lastCostMetadataOutputTokens {
+		return false
+	}
+	now := time.Now()
+	if !u.lastCostMetadataAt.IsZero() && now.Sub(u.lastCostMetadataAt) < costMetadataMinInterval {
+		return false
+	}
+	u.lastCostMetadataAt = now
+	u.lastCostMetadataOutputTokens = out
+	return true
 }
 
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) mergeWithTokenLatencyMetadata(metadata *structpb.Struct) {

@@ -1410,3 +1410,49 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_ReasoningContentStri
 	}
 	assert.True(t, sawThinkingDelta, "expected a thinking_delta from string-form reasoning_content")
 }
+
+// An Anthropic-native client streaming from an OpenAI-compatible upstream must also
+// report the output it delivered when the stream is severed before the usage frame,
+// or the request bills zero (BLA-3335).
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_SeveredBeforeUsage(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Three content deltas and no usage frame: the role-only opening delta carries no
+	// output, and the stream never reaches finish_reason.
+	input := "data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"!\"}}],\"model\":\"gpt-4o\"}\n\n"
+
+	_, _, tokenUsage, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	require.True(t, outputSet, "a severed stream must report the output it delivered, not nothing")
+	assert.Equal(t, uint32(3), outputTokens)
+
+	// The usage frame, when it does arrive, is authoritative over the delta count.
+	_, _, tokenUsage, _, err = translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader("data: {\"id\":\"chatcmpl-xyz\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":47,\"total_tokens\":57}}\n\n"),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	outputTokens, outputSet = tokenUsage.OutputTokens()
+	require.True(t, outputSet)
+	assert.Equal(t, uint32(47), outputTokens)
+}

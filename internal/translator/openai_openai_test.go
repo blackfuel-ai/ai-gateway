@@ -333,15 +333,79 @@ data: [DONE]
 `)
 
 		o := &openAIToOpenAITranslatorV1ChatCompletion{stream: true}
+		// Output tokens are reported from the running delta count until the usage
+		// frame arrives, so they climb monotonically and land on the usage frame's
+		// completion_tokens. The stream carries 12 content deltas and the usage frame
+		// reports 12 completion tokens, so the approximation is exact here.
+		var last uint32
 		for i := range wholeBody {
 			hm, bm, tokenUsage, _, err := o.ResponseBody(nil, bytes.NewReader(wholeBody[i:i+1]), false, nil)
 			require.NoError(t, err)
 			require.Nil(t, hm)
 			require.Nil(t, bm)
-			if outputTokens, ok := tokenUsage.OutputTokens(); ok && outputTokens > 0 {
-				require.Equal(t, uint32(12), outputTokens)
+			if outputTokens, ok := tokenUsage.OutputTokens(); ok {
+				require.GreaterOrEqual(t, outputTokens, last)
+				last = outputTokens
 			}
 		}
+		require.Equal(t, uint32(12), last)
+	})
+
+	// A stream severed mid-flight never delivers the usage frame. It must still report
+	// the output it delivered, counted from the deltas, or the request bills zero.
+	t.Run("streaming severed before the usage frame", func(t *testing.T) {
+		const delivered = `data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"This"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":" is"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":" a"},"finish_reason":null}]}
+
+`
+		o := &openAIToOpenAITranslatorV1ChatCompletion{stream: true}
+		_, _, tokenUsage, responseModel, err := o.ResponseBody(nil, bytes.NewReader([]byte(delivered)), false, nil)
+		require.NoError(t, err)
+		require.Equal(t, "gpt-4o-mini", responseModel)
+
+		// Three content deltas; the role-only opening delta carries no output.
+		outputTokens, ok := tokenUsage.OutputTokens()
+		require.True(t, ok, "a severed stream must report the output it delivered, not nothing")
+		require.Equal(t, uint32(3), outputTokens)
+
+		// Input is only ever reported by the usage frame, so a severed stream cannot
+		// know it. Leaving it unset keeps the cost expressions from reading a fabricated
+		// value.
+		_, ok = tokenUsage.InputTokens()
+		require.False(t, ok)
+	})
+
+	// A stream that completes normally bills the usage frame verbatim; the delta count
+	// is an approximation and must never override the backend's own numbers.
+	t.Run("the usage frame overrides the delta count", func(t *testing.T) {
+		const wholeBody = `data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[],"usage":{"prompt_tokens":13,"completion_tokens":47,"total_tokens":60}}
+
+data: [DONE]
+
+`
+		o := &openAIToOpenAITranslatorV1ChatCompletion{stream: true}
+		_, _, tokenUsage, _, err := o.ResponseBody(nil, bytes.NewReader([]byte(wholeBody)), true, nil)
+		require.NoError(t, err)
+		require.Equal(t, tokenUsageFrom(13, -1, -1, 47, 60, -1), tokenUsage)
+
+		// A trailing content chunk after the usage frame must not walk the
+		// authoritative count back down to the approximation.
+		const trailing = `data: {"id":"chatcmpl-foo","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}
+
+`
+		_, _, tokenUsage, _, err = o.ResponseBody(nil, bytes.NewReader([]byte(trailing)), true, nil)
+		require.NoError(t, err)
+		outputTokens, ok := tokenUsage.OutputTokens()
+		require.False(t, ok || outputTokens != 0, "the delta count must not be reported once usage is known")
 	})
 
 	t.Run("streaming read error", func(t *testing.T) {

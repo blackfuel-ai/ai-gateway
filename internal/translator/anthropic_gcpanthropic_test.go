@@ -475,10 +475,13 @@ func TestAnthropicToGCPAnthropicTranslator_ResponseBody_StreamingTokenUsage(t *t
 		expectedUsage metrics.TokenUsage
 	}{
 		{
+			// A content delta reports one output token under the one-delta-one-token
+			// approximation, so a stream severed before message_delta still bills the
+			// output it delivered.
 			name:          "regular streaming chunk without usage",
 			chunk:         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" to me.\"}}\n\n",
 			endOfStream:   false,
-			expectedUsage: tokenUsageFrom(-1, -1, -1, -1, -1, -1),
+			expectedUsage: tokenUsageFrom(0, 0, 0, 1, 1, -1),
 		},
 		{
 			name:          "message_delta chunk with token usage",

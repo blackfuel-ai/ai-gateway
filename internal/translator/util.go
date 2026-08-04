@@ -86,6 +86,55 @@ func setOpenAIStreamUsage(tu *metrics.TokenUsage, usage *openai.Usage) {
 	}
 }
 
+// streamedDeltaTokens reports how many output tokens the deltas in one OpenAI
+// streaming chunk account for, under the one-delta-one-token approximation:
+// OpenAI-compatible backends (vLLM, and the providers OpenRouter normalizes)
+// emit one SSE chunk per generated token, so counting content-bearing deltas
+// approximates the output token count to within a chunk.
+//
+// This is the fallback output count for streams severed before the authoritative
+// usage frame arrives — without it such a stream reports no usage at all and
+// bills zero despite having delivered output. The usage frame always wins when
+// it does arrive.
+//
+// Role-only and finish_reason-only deltas carry no generated text and are not
+// counted. A tool-call delta counts once per choice however many fragments it
+// carries, matching the one-chunk-one-token shape.
+func streamedDeltaTokens(chunk *openai.ChatCompletionResponseChunk) uint32 {
+	var n uint32
+	for i := range chunk.Choices {
+		if deltaCarriesOutput(chunk.Choices[i].Delta) {
+			n++
+		}
+	}
+	return n
+}
+
+// deltaCarriesOutput reports whether a streaming delta carries model-generated
+// output: text, reasoning in either the reasoning_content (vLLM/DeepSeek) or the
+// plain reasoning (OpenRouter) framing, or a tool-call fragment.
+func deltaCarriesOutput(delta *openai.ChatCompletionResponseChunkChoiceDelta) bool {
+	if delta == nil {
+		return false
+	}
+	if delta.Content != nil && *delta.Content != "" {
+		return true
+	}
+	if delta.Reasoning != nil && *delta.Reasoning != "" {
+		return true
+	}
+	if delta.ReasoningContent != nil && delta.ReasoningContent.Text != "" {
+		return true
+	}
+	for i := range delta.ToolCalls {
+		fn := delta.ToolCalls[i].Function
+		if fn.Name != "" || fn.Arguments != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // serialize a ChatCompletionResponseChunk, this is common for all chat completion request
 func serializeOpenAIChatCompletionChunk(chunk *openai.ChatCompletionResponseChunk, buf *[]byte) error {
 	var chunkBytes []byte

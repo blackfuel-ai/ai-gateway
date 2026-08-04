@@ -43,6 +43,14 @@ type openAIToOpenAITranslatorV1ChatCompletion struct {
 	streamingResponseModel internalapi.ResponseModel
 	stream                 bool
 	buffered               []byte
+	// deltaOutputTokens is the running one-delta-one-token count of the output
+	// delivered so far, used to report usage on a stream severed before the
+	// authoritative usage frame arrives. See [streamedDeltaTokens].
+	deltaOutputTokens uint32
+	// usageFrameSeen records that a chunk carrying usage has been parsed, after
+	// which deltaOutputTokens is no longer reported: the backend's own count is
+	// authoritative and must not be walked back to an approximation.
+	usageFrameSeen bool
 	// The path of the chat completions endpoint to be used for the request. It is prefixed with the OpenAI path prefix.
 	path string
 	// Redaction configuration for debug logging
@@ -183,7 +191,22 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]str
 // It scans complete lines and returns the latest usage found in this batch. At
 // endOfStream the final line is flushed even without a trailing newline, because a
 // provider may close the stream immediately after the usage chunk.
+//
+// Until a usage frame arrives it reports the incrementally counted deltas instead,
+// so a stream severed mid-flight still carries the output it delivered into the
+// access-log / billing pipeline rather than reporting nothing at all.
 func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(endOfStream bool, span tracingapi.ChatCompletionSpan) (tokenUsage metrics.TokenUsage) {
+	o.scanBufferedEvents(&tokenUsage, endOfStream, span)
+	if !o.usageFrameSeen && o.deltaOutputTokens > 0 {
+		tokenUsage.SetOutputTokens(o.deltaOutputTokens)
+	}
+	return
+}
+
+// scanBufferedEvents consumes the complete SSE lines buffered so far, recording
+// the latest usage found into tokenUsage and accumulating the delta-based output
+// count.
+func (o *openAIToOpenAITranslatorV1ChatCompletion) scanBufferedEvents(tokenUsage *metrics.TokenUsage, endOfStream bool, span tracingapi.ChatCompletionSpan) {
 	for {
 		var line []byte
 		if i := bytes.IndexByte(o.buffered, '\n'); i >= 0 {
@@ -214,9 +237,13 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(e
 			// Store the response model for future batches
 			o.streamingResponseModel = event.Model
 		}
+		o.deltaOutputTokens += streamedDeltaTokens(event)
 		// Capture usage from any chunk that carries it; keep scanning so the latest
 		// usage in this batch wins (do not mark buffering done).
-		setOpenAIStreamUsage(&tokenUsage, event.Usage)
+		if event.Usage != nil {
+			o.usageFrameSeen = true
+		}
+		setOpenAIStreamUsage(tokenUsage, event.Usage)
 	}
 }
 

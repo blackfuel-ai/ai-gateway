@@ -410,6 +410,106 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 			"mirror backends must not emit DynamicMetadata to avoid double-counting LLMRequestCost")
 	})
 
+	// A streaming response writes cost dynamic metadata before end-of-stream so a
+	// stream severed mid-flight still bills the output it delivered: Envoy keeps the
+	// last metadata ext_proc wrote on the stream, and without a mid-stream write the
+	// access-log entry carries no tokens at all.
+	t.Run("streaming_writes_cost_metadata_before_end_of_stream", func(t *testing.T) {
+		newProcessor := func(mt *mockTranslator) *chatCompletionProcessorUpstreamFilter {
+			return &chatCompletionProcessorUpstreamFilter{
+				translator: mt,
+				metrics:    &mockMetrics{},
+				parent: &chatCompletionProcessorRouterFilter{
+					stream: true,
+					config: &filterapi.RuntimeConfig{
+						RequestCosts: []filterapi.RuntimeRequestCost{
+							{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeOutputToken, MetadataKey: "output_token_usage"}},
+						},
+					},
+				},
+				requestHeaders:  map[string]string{internalapi.ModelNameHeaderKeyDefault: "ai_gateway_llm"},
+				responseHeaders: map[string]string{":status": "200"},
+				backendName:     "some_backend",
+				routeName:       "some_route",
+			}
+		}
+		outputTokenUsage := func(t *testing.T, res *extprocv3.ProcessingResponse) float64 {
+			t.Helper()
+			require.NotNil(t, res.DynamicMetadata)
+			return res.DynamicMetadata.Fields[internalapi.AIGatewayFilterMetadataNamespace].
+				GetStructValue().Fields["output_token_usage"].GetNumberValue()
+		}
+
+		t.Run("first mid-stream chunk writes immediately", func(t *testing.T) {
+			mt := &mockTranslator{t: t}
+			mt.retUsedToken.SetOutputTokens(7)
+			p := newProcessor(mt)
+
+			res, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+			require.Equal(t, float64(7), outputTokenUsage(t, res))
+		})
+
+		t.Run("further chunks are throttled until the interval elapses", func(t *testing.T) {
+			mt := &mockTranslator{t: t}
+			mt.retUsedToken.SetOutputTokens(7)
+			p := newProcessor(mt)
+			_, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+
+			mt.retUsedToken.SetOutputTokens(9)
+			res, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+			require.Nil(t, res.DynamicMetadata, "CEL evaluation must not run on the per-token path")
+
+			// Age the last write past the throttle window.
+			p.lastCostMetadataAt = p.lastCostMetadataAt.Add(-costMetadataMinInterval)
+			mt.retUsedToken.SetOutputTokens(11)
+			res, err = p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+			require.Equal(t, float64(11), outputTokenUsage(t, res))
+		})
+
+		t.Run("an unchanged token count writes nothing", func(t *testing.T) {
+			mt := &mockTranslator{t: t}
+			mt.retUsedToken.SetOutputTokens(7)
+			p := newProcessor(mt)
+			_, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+
+			p.lastCostMetadataAt = p.lastCostMetadataAt.Add(-costMetadataMinInterval)
+			res, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+			require.Nil(t, res.DynamicMetadata)
+		})
+
+		t.Run("end of stream always writes the final totals", func(t *testing.T) {
+			mt := &mockTranslator{t: t}
+			mt.retUsedToken.SetOutputTokens(7)
+			p := newProcessor(mt)
+			_, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+
+			// Within the throttle window, but end-of-stream is never throttled: this is
+			// the authoritative usage the access log and quota burndown bill against.
+			mt.retUsedToken.SetOutputTokens(12)
+			res, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk"), EndOfStream: true})
+			require.NoError(t, err)
+			require.Equal(t, float64(12), outputTokenUsage(t, res))
+		})
+
+		t.Run("non-streaming responses only write at end of stream", func(t *testing.T) {
+			mt := &mockTranslator{t: t}
+			mt.retUsedToken.SetOutputTokens(7)
+			p := newProcessor(mt)
+			p.parent.stream = false
+
+			res, err := p.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("chunk")})
+			require.NoError(t, err)
+			require.Nil(t, res.DynamicMetadata)
+		})
+	})
+
 	// Verify we record failure for non-2xx responses and do it exactly once (defer suppressed).
 	t.Run("non-2xx status failure once", func(t *testing.T) {
 		inBody := &extprocv3.HttpBody{Body: []byte("error-body"), EndOfStream: true}

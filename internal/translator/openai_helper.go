@@ -675,9 +675,16 @@ type openAIStreamToAnthropicState struct {
 	inputTokens      int
 	outputTokens     int
 	tokenUsage       metrics.TokenUsage
-	blockIndex       int                       // current Anthropic content block index
-	activeTools      map[int64]*streamToolCall // keyed by OpenAI tool_call index
-	requestModel     string
+	// deltaOutputTokens is the running one-delta-one-token count of the output
+	// delivered so far, reported as usage until a chunk carrying the backend's own
+	// usage arrives. See [streamedDeltaTokens].
+	deltaOutputTokens uint32
+	// usageFrameSeen records that a chunk carrying usage has been parsed, after
+	// which deltaOutputTokens is no longer reported.
+	usageFrameSeen bool
+	blockIndex     int                       // current Anthropic content block index
+	activeTools    map[int64]*streamToolCall // keyed by OpenAI tool_call index
+	requestModel   string
 }
 
 type streamToolCall struct {
@@ -788,7 +795,16 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 	if chunk.Usage != nil {
 		s.inputTokens = chunk.Usage.PromptTokens
 		s.outputTokens = chunk.Usage.CompletionTokens
+		s.usageFrameSeen = true
 		setOpenAIStreamUsage(&s.tokenUsage, chunk.Usage)
+	}
+
+	// Report the deltas delivered so far until the backend's own usage arrives, so a
+	// stream severed mid-flight still carries its output tokens into the access-log /
+	// billing pipeline instead of reporting nothing at all.
+	s.deltaOutputTokens += streamedDeltaTokens(chunk)
+	if !s.usageFrameSeen && s.deltaOutputTokens > 0 {
+		s.tokenUsage.SetOutputTokens(s.deltaOutputTokens)
 	}
 
 	// A usage-only chunk (empty choices, emitted when stream_options.include_usage=true)

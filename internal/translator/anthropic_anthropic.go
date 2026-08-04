@@ -44,6 +44,15 @@ type anthropicToAnthropicTranslator struct {
 	buffered               []byte
 	streamingResponseModel internalapi.ResponseModel
 	streamingTokenUsage    metrics.TokenUsage
+	// deltaOutputTokens counts the content_block_delta events delivered so far,
+	// one per token under the one-delta-one-token approximation. It stands in for
+	// output_tokens until message_delta reports the authoritative cumulative count,
+	// so a stream severed mid-flight still bills the output it delivered rather
+	// than the near-zero baseline message_start establishes.
+	deltaOutputTokens uint32
+	// messageDeltaSeen records that a message_delta event has been parsed, after
+	// which deltaOutputTokens is no longer reported.
+	messageDeltaSeen bool
 	// Redaction configuration for debug logging
 	debugLogEnabled bool
 	enableRedaction bool
@@ -187,7 +196,16 @@ func (a *anthropicToAnthropicTranslator) reflectStreamingEvent(eventUnion *anthr
 			// Override with message_start usage (contains input tokens and initial state)
 			a.streamingTokenUsage.Override(messageStartUsage)
 		}
+	case eventUnion.ContentBlockDelta != nil:
+		d := &eventUnion.ContentBlockDelta.Delta
+		if d.Text != "" || d.PartialJSON != "" || d.Thinking != "" {
+			a.deltaOutputTokens++
+			if !a.messageDeltaSeen {
+				a.streamingTokenUsage.SetOutputTokens(a.deltaOutputTokens)
+			}
+		}
 	case eventUnion.MessageDelta != nil:
+		a.messageDeltaSeen = true
 		u := eventUnion.MessageDelta.Usage
 		// message_delta carries the FINAL cumulative usage per Anthropic docs:
 		// https://docs.claude.com/en/docs/build-with-claude/streaming

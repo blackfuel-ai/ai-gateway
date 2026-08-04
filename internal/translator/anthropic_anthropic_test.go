@@ -182,7 +182,10 @@ data: {"type":"message_stop"       }`
 	require.NoError(t, err)
 	require.Nil(t, headerMutation)
 	require.Nil(t, bodyMutation)
-	expected := tokenUsageFrom(10, 1, 0, 0, 10, -1)
+	// The head delivered two content_block_deltas and no message_delta, so output is
+	// reported from the delta count: a stream severed here bills the two tokens it
+	// delivered rather than the zero message_start established.
+	expected := tokenUsageFrom(10, 1, 0, 2, 12, -1)
 	require.Equal(t, expected, tokenUsage)
 	require.Equal(t, "claude-sonnet-4-5-20250929", responseModel)
 
