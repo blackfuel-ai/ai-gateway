@@ -738,15 +738,18 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 
 	mirrorRoute := vh.Routes[0]
 	plainRoute := vh.Routes[1]
-	// Mirror route: mirror EPP + copy filter enabled (no disable override), primary EPP
-	// disabled (route metadata carries no primary pool in this synthetic setup).
+	// Mirror route: mirror EPP enabled (no disable override), primary EPP disabled (route
+	// metadata carries no primary pool in this synthetic setup).
 	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEPPName)
-	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 	require.Contains(t, mirrorRoute.TypedPerFilterConfig, primaryEPPName)
-	// Plain route: everything disabled.
+	// Plain route: every foreign EPP filter disabled.
 	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEPPName)
-	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 	require.Contains(t, plainRoute.TypedPerFilterConfig, primaryEPPName)
+	// The copy filter is never per-route disabled — a generic FilterConfig disable is evaluated
+	// against the INITIAL route match, which on this listener precedes the aigateway extproc's
+	// model-header injection, so it would strip the filter from every real request stream.
+	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
+	require.NotContains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 }
 
 // Test_patchListenerWithInferencePoolFilters_sharedPool: a pool referenced both as a mirror leg
