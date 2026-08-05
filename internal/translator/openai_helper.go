@@ -130,19 +130,23 @@ func appendAnthropicAssistantMessage(messages []openai.ChatCompletionMessagePara
 	for _, block := range msg.Content.Array {
 		switch {
 		case block.Thinking != nil:
+			// vLLM's CustomThinkCompletionContentParam requires the reasoning
+			// under a "thinking" key; the Anthropic signature cannot round-trip
+			// through an OpenAI backend and is dropped.
 			hasThinking = true
 			thinking := block.Thinking.Thinking
-			signature := block.Thinking.Signature
 			contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-				Type:      openai.ChatCompletionAssistantMessageParamContentTypeThinking,
-				Text:      &thinking,
-				Signature: &signature,
+				Type:     openai.ChatCompletionAssistantMessageParamContentTypeThinking,
+				Thinking: &thinking,
 			})
 		case block.RedactedThinking != nil:
+			// Redacted thinking has no OpenAI equivalent; replay the opaque data
+			// through the same vLLM-native thinking shape so the part validates.
 			hasThinking = true
+			data := block.RedactedThinking.Data
 			contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-				Type:            openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking,
-				RedactedContent: &openai.RedactedContentUnion{Value: block.RedactedThinking.Data},
+				Type:     openai.ChatCompletionAssistantMessageParamContentTypeThinking,
+				Thinking: &data,
 			})
 		case block.Text != nil:
 			text := block.Text.Text
