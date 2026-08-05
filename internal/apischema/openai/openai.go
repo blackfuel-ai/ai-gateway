@@ -616,6 +616,11 @@ type ChatCompletionAssistantMessageParamContent struct {
 	// The text content.
 	Text *string `json:"text,omitempty"`
 
+	// The reasoning content for a thinking block, using vLLM's
+	// CustomThinkCompletionContentParam key so reasoning replay reaches
+	// the backend chat template.
+	Thinking *string `json:"thinking,omitempty"`
+
 	// The signature for a thinking block.
 	Signature               *string               `json:"signature,omitempty"`
 	RedactedContent         *RedactedContentUnion `json:"redactedContent,omitempty"`
