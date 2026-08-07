@@ -381,9 +381,10 @@ func anthropicToolChoiceToOpenAI(tc anthropic.ToolChoice, hasTools bool) *openai
 // The following are helper functions that convert an OpenAI ChatCompletionResponse to an Anthropic MessagesRepsonse
 
 // openAIResponseToAnthropic converts an OpenAI ChatCompletionResponse to an Anthropic MessagesResponse.
-func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string) *anthropic.MessagesResponse {
+func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string, requestStopSequences ...string) *anthropic.MessagesResponse {
 	var content []anthropic.MessagesContentBlock
 	var stopReason *anthropic.StopReason
+	var stopSequence *string
 
 	if len(resp.Choices) > 0 {
 		choice := &resp.Choices[0]
@@ -424,13 +425,13 @@ func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string
 			})
 		}
 
-		sr := openAIFinishReasonToAnthropic(choice.FinishReason)
-		// When the backend omits finish_reason, infer from the content: a response
-		// containing tool calls must report stop_reason=tool_use. BLA-3506.
-		if choice.FinishReason == "" && len(msg.ToolCalls) > 0 {
-			sr = anthropic.StopReasonToolUse
+		text := ""
+		if msg.Content != nil {
+			text = *msg.Content
 		}
+		sr, ss := resolveAnthropicStopReason(choice.FinishReason, choice.StopReason, requestStopSequences, text, len(msg.ToolCalls) > 0)
 		stopReason = &sr
+		stopSequence = ss
 	}
 
 	usage := &anthropic.Usage{
@@ -439,13 +440,14 @@ func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string
 	}
 
 	return &anthropic.MessagesResponse{
-		ID:         resp.ID,
-		Type:       anthropic.ConstantMessagesResponseTypeMessages("message"),
-		Role:       anthropic.ConstantMessagesResponseRoleAssistant("assistant"),
-		Content:    content,
-		Model:      model,
-		StopReason: stopReason,
-		Usage:      usage,
+		ID:           resp.ID,
+		Type:         anthropic.ConstantMessagesResponseTypeMessages("message"),
+		Role:         anthropic.ConstantMessagesResponseRoleAssistant("assistant"),
+		Content:      content,
+		Model:        model,
+		StopReason:   stopReason,
+		StopSequence: stopSequence,
+		Usage:        usage,
 	}
 }
 
@@ -518,6 +520,57 @@ func openAIFinishReasonToAnthropic(reason openai.ChatCompletionChoicesFinishReas
 	default:
 		return anthropic.StopReasonEndTurn
 	}
+}
+
+// resolveAnthropicStopReason determines the Anthropic stop_reason (and, when the
+// generation was terminated by a request stop sequence, the matched stop sequence).
+//
+// An explicit OpenAI finish_reason always wins: it is mapped via
+// openAIFinishReasonToAnthropic, with natural "stop" refined to stop_sequence when a
+// request stop sequence provably fired (vendor stop_reason field or output text
+// suffix). When the backend reports no finish_reason at all (e.g. some vLLM tool
+// call responses), the reason is inferred from the emitted content so that
+// Anthropic-compliant clients can drive their tool loop. BLA-3506.
+func resolveAnthropicStopReason(
+	finishReason openai.ChatCompletionChoicesFinishReason,
+	vendorStopReason any,
+	requestStopSequences []string,
+	outputTail string,
+	sawToolUse bool,
+) (anthropic.StopReason, *string) {
+	if finishReason != "" {
+		stopReason := openAIFinishReasonToAnthropic(finishReason)
+		if stopReason == anthropic.StopReasonEndTurn && len(requestStopSequences) > 0 {
+			if seq, ok := matchRequestStopSequence(vendorStopReason, outputTail, requestStopSequences); ok {
+				return anthropic.StopReasonStopSequence, &seq
+			}
+		}
+		return stopReason, nil
+	}
+	if sawToolUse {
+		return anthropic.StopReasonToolUse, nil
+	}
+	return anthropic.StopReasonEndTurn, nil
+}
+
+// matchRequestStopSequence reports whether the stop signal provably matches one of
+// the request's stop sequences, either via the backend's raw stop_reason vendor
+// field (vLLM reports the matched string there) or as a suffix of the generated
+// text (some backends include the matched sequence in the output; vLLM strips it).
+func matchRequestStopSequence(vendorStopReason any, outputTail string, requestStopSequences []string) (string, bool) {
+	if s, ok := vendorStopReason.(string); ok {
+		for _, seq := range requestStopSequences {
+			if s == seq {
+				return seq, true
+			}
+		}
+	}
+	for _, seq := range requestStopSequences {
+		if seq != "" && strings.HasSuffix(outputTail, seq) {
+			return seq, true
+		}
+	}
+	return "", false
 }
 
 // The following are helpers that convert an OpenAI Stream to an Anthropic Stream (SSE conversion)
@@ -678,13 +731,22 @@ type openAIStreamToAnthropicState struct {
 	closingEmitted   bool // flag indicating emitted content_block_stop + message_delta + message_stop
 	messageID        string
 	model            string
-	stopReason       string // Anthropic stop_reason, mapped from OpenAI finish_reason
-	inputTokens      int
-	outputTokens     int
-	tokenUsage       metrics.TokenUsage
-	blockIndex       int                       // current Anthropic content block index
-	activeTools      map[int64]*streamToolCall // keyed by OpenAI tool_call index
-	requestModel     string
+	// finishReason is the OpenAI finish_reason from the last chunk that carried one.
+	finishReason openai.ChatCompletionChoicesFinishReason
+	// vendorStopReason is the raw stop signal from the chunk's stop_reason vendor
+	// field (vLLM): the matched request stop sequence (string) or a stop token id.
+	vendorStopReason any
+	// requestStopSequences are the stop sequences from the Anthropic request.
+	requestStopSequences []string
+	// textTail is the trailing end of the streamed text, used to detect stop
+	// sequences that backends leave in (rather than strip from) the output.
+	textTail     string
+	inputTokens  int
+	outputTokens int
+	tokenUsage   metrics.TokenUsage
+	blockIndex   int                       // current Anthropic content block index
+	activeTools  map[int64]*streamToolCall // keyed by OpenAI tool_call index
+	requestModel string
 }
 
 type streamToolCall struct {
@@ -864,9 +926,12 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 		}
 	}
 
-	// Store finish_reason for use in the closing events.
+	// Store finish_reason and the backend's raw stop signal for use in the closing events.
 	if choice.FinishReason != "" {
-		s.stopReason = string(openAIFinishReasonToAnthropic(choice.FinishReason))
+		s.finishReason = choice.FinishReason
+	}
+	if choice.StopReason != nil {
+		s.vendorStopReason = choice.StopReason
 	}
 
 	return nil
@@ -916,6 +981,18 @@ func (s *openAIStreamToAnthropicState) emitTextBlockStart(out *[]byte) error {
 
 // emitTextDelta emits a content_block_delta SSE event with text content.
 func (s *openAIStreamToAnthropicState) emitTextDelta(text string, out *[]byte) error {
+	// Keep the trailing text for stop-sequence suffix detection at closing.
+	s.textTail += text
+	keep := 256
+	for _, seq := range s.requestStopSequences {
+		if len(seq) > keep {
+			keep = len(seq)
+		}
+	}
+	if len(s.textTail) > keep {
+		s.textTail = s.textTail[len(s.textTail)-keep:]
+	}
+
 	payload := sseContentBlockDeltaText{
 		Type:  "content_block_delta",
 		Index: s.blockIndex,
@@ -1113,16 +1190,11 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		s.hasOpenBlock = false
 	}
 
-	stopReason := s.stopReason
-	if stopReason == "" {
-		// The upstream never reported a finish_reason (e.g. some OpenAI-compatible
-		// backends omit it on the final chunk). Infer from the emitted content:
-		// tool_use when tool calls were streamed, end_turn otherwise. BLA-3506.
-		if len(s.activeTools) > 0 {
-			stopReason = string(anthropic.StopReasonToolUse)
-		} else {
-			stopReason = string(anthropic.StopReasonEndTurn)
-		}
+	stopReason, stopSequence := resolveAnthropicStopReason(
+		s.finishReason, s.vendorStopReason, s.requestStopSequences, s.textTail, len(s.activeTools) > 0)
+	var stopSequenceAny any
+	if stopSequence != nil {
+		stopSequenceAny = *stopSequence
 	}
 
 	// Backfill input_tokens here (not message_start): OpenAI doesn't report it until now.
@@ -1131,7 +1203,7 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 	// forward them here to avoid double-counting.
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
-		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil},
+		Delta: sseMessageDeltaBody{StopReason: string(stopReason), StopSequence: stopSequenceAny},
 		Usage: sseOutputUsage{
 			InputTokens:  s.inputTokens,
 			OutputTokens: s.outputTokens,
