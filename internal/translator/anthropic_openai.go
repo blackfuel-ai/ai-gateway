@@ -43,6 +43,10 @@ type anthropicToOpenAIV1ChatCompletionTranslator struct {
 	requestModel          internalapi.RequestModel
 	stream                bool
 	streamState           *openAIStreamToAnthropicState
+	// requestStopSequences are the stop sequences from the Anthropic request, kept
+	// for non-streaming responses so the stop_reason resolution can distinguish a
+	// stop-sequence hit from a natural stop.
+	requestStopSequences []string
 	// The path of the chat completions endpoint, prefixed with the OpenAI path prefix.
 	path string
 	// Redaction configuration for debug logging
@@ -79,9 +83,12 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) RequestBody(_ []byte, body
 
 	if body.Stream {
 		a.streamState = &openAIStreamToAnthropicState{
-			activeTools:  make(map[int64]*streamToolCall),
-			requestModel: a.requestModel,
+			activeTools:          make(map[int64]*streamToolCall),
+			requestModel:         a.requestModel,
+			requestStopSequences: body.StopSequences,
 		}
+	} else {
+		a.requestStopSequences = body.StopSequences
 	}
 
 	newHeaders = []internalapi.Header{
@@ -136,7 +143,7 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyNonStreaming(b
 		nil,
 	)
 
-	anthropicResp := openAIResponseToAnthropic(openAIResp, responseModel)
+	anthropicResp := openAIResponseToAnthropic(openAIResp, responseModel, a.requestStopSequences...)
 
 	// Redact and log response when enabled
 	if a.debugLogEnabled && a.enableRedaction && a.logger != nil {
