@@ -454,7 +454,68 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_UsageOnFinishReasonC
 	events := parseSSEEventsFromBytes(body)
 	require.Len(t, events, 6)
 	assert.Equal(t, "message_delta", events[4].eventType)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":6,"cache_read_input_tokens":4,"output_tokens":5}}`, events[4].data)
+	assert.Equal(t, "message_stop", events[5].eventType)
+}
+
+// TestAnthropicToOpenAITranslator_ResponseBody_Streaming_MessageStartUsage covers
+// BLA-3507: backends such as vLLM attach cumulative usage to every streamed chunk, so
+// the prompt token count is known before streaming starts and message_start must carry
+// it — agentic clients read usage there for live context accounting. RED before the
+// emitMessageStart fix (usage hardcoded to zeros), GREEN after. The usage captured by
+// handleChunk feeds both message_start and the billing tokenUsage, so both agree.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_MessageStartUsage(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "hi"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Every chunk carries cumulative usage (prompt constant, completion grows).
+	input := "data: {\"id\":\"chatcmpl-early\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}],\"model\":\"deepseek-ai/DeepSeek-V4-Flash\",\"usage\":{\"prompt_tokens\":249,\"completion_tokens\":1,\"total_tokens\":250}}\n\n" +
+		"data: {\"id\":\"chatcmpl-early\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":249,\"completion_tokens\":10,\"total_tokens\":259}}\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, tokenUsage, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	// Billing parity: the tokenUsage reported for metrics/billing matches what
+	// message_start advertised, since both come from the same upstream usage.
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	require.True(t, inputSet)
+	require.True(t, outputSet)
+	assert.Equal(t, uint32(249), inputTokens)
+	assert.Equal(t, uint32(10), outputTokens)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	assert.Equal(t, "message_start", events[0].eventType)
+	require.JSONEq(t, `{
+		"type":"message_start",
+		"message":{
+			"id":"chatcmpl-early",
+			"type":"message",
+			"role":"assistant",
+			"content":[],
+			"model":"deepseek-ai/DeepSeek-V4-Flash",
+			"stop_reason":null,
+			"stop_sequence":null,
+			"usage":{"input_tokens":249,"output_tokens":1}
+		}
+	}`, events[0].data)
+	assert.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":249,"output_tokens":10}}`, events[4].data)
 	assert.Equal(t, "message_stop", events[5].eventType)
 }
 

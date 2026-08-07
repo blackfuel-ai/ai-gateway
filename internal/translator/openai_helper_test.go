@@ -812,7 +812,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_CachedTokens(t *testing.T) {
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	msg := accumulateAnthropicMessage(t, out)
@@ -826,6 +826,59 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_CachedTokens(t *testing.T) {
 	require.True(t, ok)
 	assert.LessOrEqual(t, total, uint32(promptTokens),
 		"internal TokenUsage must not inflate the input token count beyond the real prompt size")
+}
+
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_EarlyUsageInMessageStart(t *testing.T) {
+	// Backends such as vLLM attach cumulative usage to every streamed chunk, so the
+	// real prompt token count is known before streaming starts (BLA-3507). The
+	// message_start event must carry it instead of the placeholder zeros so agentic
+	// clients can account for context from the start of the turn.
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "claude-3",
+	}
+
+	// Chunk 1: first delta WITH usage → message_start carries the real prompt count.
+	// Chunk 2: text delta with cumulative usage → no new usage events, counts update.
+	// Chunk 3: finish_reason → stores stop reason.
+	// [DONE]: stream ends without a dedicated usage-only chunk; closing events are
+	// emitted at endOfStream with the last cumulative counts.
+	input := "data: {\"id\":\"chatcmpl-early\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}],\"model\":\"deepseek-ai/DeepSeek-V4-Flash\",\"usage\":{\"prompt_tokens\":249,\"completion_tokens\":1,\"total_tokens\":250,\"prompt_tokens_details\":{\"cached_tokens\":200,\"cache_creation_input_tokens\":30}}}\n\n" +
+		"data: {\"id\":\"chatcmpl-early\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}],\"model\":\"deepseek-ai/DeepSeek-V4-Flash\",\"usage\":{\"prompt_tokens\":249,\"completion_tokens\":12,\"total_tokens\":261}}\n\n" +
+		"data: {\"id\":\"chatcmpl-early\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":249,\"completion_tokens\":13,\"total_tokens\":262}}\n\n" +
+		"data: [DONE]\n\n"
+
+	state.buffer.WriteString(input)
+
+	var out []byte
+	_, err := state.processBuffer(&out, true)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(out)
+	// 7 events: message_start, content_block_start, content_block_delta x2,
+	// content_block_stop, message_delta, message_stop → closing events emitted
+	// exactly once even though no dedicated usage-only chunk arrived.
+	require.Len(t, events, 7)
+
+	assert.Equal(t, "message_start", events[0].eventType)
+	require.JSONEq(t, `{
+		"type":"message_start",
+		"message":{
+			"id":"chatcmpl-early",
+			"type":"message",
+			"role":"assistant",
+			"content":[],
+			"model":"deepseek-ai/DeepSeek-V4-Flash",
+			"stop_reason":null,
+			"stop_sequence":null,
+			"usage":{"input_tokens":19,"output_tokens":1,"cache_read_input_tokens":200,"cache_creation_input_tokens":30}
+		}
+	}`, events[0].data)
+
+	assert.Equal(t, "message_delta", events[5].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":19,"output_tokens":13,"cache_read_input_tokens":200,"cache_creation_input_tokens":30}}`, events[5].data)
+
+	assert.Equal(t, "message_stop", events[6].eventType)
 }
 
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallStreaming(t *testing.T) {
@@ -1073,7 +1126,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_EndOfStreamClosing(t *testin
 		}
 	}
 	require.NotEmpty(t, msgDeltaData)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`, msgDeltaData)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}`, msgDeltaData)
 }
 
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_EmptyInput(t *testing.T) {
@@ -1831,7 +1884,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ThinkingBlocks(t *testing.T)
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
