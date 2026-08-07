@@ -511,6 +511,48 @@ func TestOpenAIResponseToAnthropic(t *testing.T) {
 		assert.Equal(t, anthropic.StopReasonToolUse, *result.StopReason)
 	})
 
+	t.Run("length finish reason maps to max_tokens", func(t *testing.T) {
+		content := "truncated"
+		resp := &openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					FinishReason: openai.ChatCompletionChoicesFinishReasonLength,
+					Message:      openai.ChatCompletionResponseChoiceMessage{Content: &content},
+				},
+			},
+		}
+		result := openAIResponseToAnthropic(resp, "test-model")
+		require.NotNil(t, result.StopReason)
+		assert.Equal(t, anthropic.StopReasonMaxTokens, *result.StopReason)
+	})
+
+	t.Run("tool call response without finish reason infers tool_use", func(t *testing.T) {
+		// Regression test (BLA-3506): backends that omit finish_reason must still
+		// produce stop_reason=tool_use when tool calls are present.
+		callID := "call-abc"
+		resp := &openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					FinishReason: "",
+					Message: openai.ChatCompletionResponseChoiceMessage{
+						ToolCalls: []openai.ChatCompletionMessageToolCallParam{
+							{
+								ID: &callID,
+								Function: openai.ChatCompletionMessageToolCallFunctionParam{
+									Name:      "get_weather",
+									Arguments: `{"city":"Berlin"}`,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		result := openAIResponseToAnthropic(resp, "test-model")
+		require.NotNil(t, result.StopReason)
+		assert.Equal(t, anthropic.StopReasonToolUse, *result.StopReason)
+	})
+
 	t.Run("malformed tool call arguments becomes empty map", func(t *testing.T) {
 		resp := &openai.ChatCompletionResponse{
 			Choices: []openai.ChatCompletionResponseChoice{
@@ -694,6 +736,90 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallStreaming(t *testing
 
 	assert.Equal(t, "message_stop", events[5].eventType)
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)
+}
+
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_MaxTokensFinishReason(t *testing.T) {
+	// finish_reason=length must surface as stop_reason=max_tokens so clients can
+	// detect and continue truncated responses. BLA-3506.
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "claude-3",
+	}
+
+	input := "data: {\"id\":\"chatcmpl-len\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-len\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-len\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":256}}\n\n" +
+		"data: [DONE]\n\n"
+
+	state.buffer.WriteString(input)
+
+	var out []byte
+	_, err := state.processBuffer(&out, true)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(out)
+	require.Equal(t, "message_delta", events[len(events)-2].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":256}}`, events[len(events)-2].data)
+}
+
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallWithoutFinishReason(t *testing.T) {
+	// Regression test: some OpenAI-compatible backends (e.g. vLLM) stream tool calls
+	// without ever setting finish_reason in a chunk. The closing message_delta must
+	// still report stop_reason=tool_use instead of falling back to end_turn, otherwise
+	// Anthropic-compliant agent clients never execute the tool loop. BLA-3506.
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "claude-3",
+	}
+
+	// Chunk 1-2: tool call deltas; chunk 3: usage only; [DONE]. No finish_reason anywhere.
+	input := "data: {\"id\":\"chatcmpl-def\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-xyz\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"},\"type\":\"function\"}]}}],\"model\":\"deepseek-ai/DeepSeek-V4-Flash\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-def\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"city\\\":\\\"Berlin\\\"}\"}}]}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-def\",\"choices\":[],\"usage\":{\"prompt_tokens\":274,\"completion_tokens\":45}}\n\n" +
+		"data: [DONE]\n\n"
+
+	state.buffer.WriteString(input)
+
+	var out []byte
+	_, err := state.processBuffer(&out, true)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(out)
+	// 6 events: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop
+	require.Len(t, events, 6)
+
+	assert.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":274,"output_tokens":45}}`, events[4].data)
+}
+
+func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallEndOfStreamWithoutFinishReason(t *testing.T) {
+	// Same inference as above, but closing is triggered by endOfStream rather than a
+	// usage-only chunk.
+	state := &openAIStreamToAnthropicState{
+		activeTools:  make(map[int64]*streamToolCall),
+		requestModel: "test-model",
+	}
+
+	input := "data: {\"id\":\"chatcmpl-eos\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{}\"},\"type\":\"function\"}]}}],\"model\":\"test-model\"}\n\n" +
+		"data: [DONE]\n\n"
+
+	state.buffer.WriteString(input)
+
+	var out []byte
+	_, err := state.processBuffer(&out, true)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(out)
+	require.Equal(t, "message_stop", events[len(events)-1].eventType)
+	var msgDeltaData string
+	for _, e := range events {
+		if e.eventType == "message_delta" {
+			msgDeltaData = e.data
+			break
+		}
+	}
+	require.NotEmpty(t, msgDeltaData)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":0}}`, msgDeltaData)
 }
 
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_EndOfStreamClosing(t *testing.T) {

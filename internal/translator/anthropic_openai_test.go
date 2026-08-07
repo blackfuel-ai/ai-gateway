@@ -503,6 +503,42 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_CompactDataPrefix(t 
 	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
 }
 
+func TestAnthropicToOpenAITranslator_ResponseBody_StreamingToolCallWithoutFinishReason(t *testing.T) {
+	// Reproduces the BLA-3506 repro: forced tool choice against a backend that streams
+	// tool calls without ever setting finish_reason. The final message_delta must report
+	// stop_reason=tool_use so Anthropic-compliant clients run the tool loop.
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "deepseek-ai/DeepSeek-V4-Flash")
+
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "deepseek-ai/DeepSeek-V4-Flash",
+		MaxTokens: 256,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "weather in Berlin?"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Tool call deltas, usage-only chunk, [DONE] — and no finish_reason chunk at all.
+	input := "data: {\"id\":\"chatcmpl-rtc\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"},\"type\":\"function\"}]}}],\"model\":\"deepseek-ai/DeepSeek-V4-Flash\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-rtc\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"city\\\": \\\"Berlin\\\"}\"}}]}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-rtc\",\"choices\":[],\"usage\":{\"prompt_tokens\":274,\"completion_tokens\":45}}\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	require.JSONEq(t, `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"get_weather","input":{}}}`, events[1].data)
+	require.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":274,"output_tokens":45}}`, events[4].data)
+}
+
 func TestAnthropicToOpenAITranslator_ResponseBody_StreamingRequestModelFallback(t *testing.T) {
 	// When the OpenAI chunk has no model, responseModel should fall back to requestModel.
 	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "my-override")
