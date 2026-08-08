@@ -29,6 +29,13 @@ For example, `make precommit test` will run the precommit checks and the unit te
 These are the must-run commands before you submit or pushing commits to a PR.
 If anything goes wrong, please try to run `make clean` and then run the command again.
 
+### Blackfuel fork: validating translator changes end-to-end
+
+For changes to the extproc/translator (`internal/extproc/`, `internal/translator/`),
+see `CLAUDE.md` for the test-first e2e loop against the ai-platform local-dev
+minikube cluster (programmable mock upstream, xfail guards, local image swap).
+It is the required validation step before merging such changes to `bf/v0.7`.
+
 You can make `make precommit` a git pre-commit hook by moving this file.
 
 ```shell
