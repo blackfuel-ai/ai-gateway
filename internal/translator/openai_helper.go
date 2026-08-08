@@ -596,8 +596,10 @@ type sseMessageBody struct {
 }
 
 type sseMessageUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens"`
 }
 
 type sseContentBlockStartText struct {
@@ -939,6 +941,10 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 // emitMessageStart emits the Anthropic message_start SSE event.
 func (s *openAIStreamToAnthropicState) emitMessageStart(out *[]byte) error {
 	s.messageStarted = true
+	// Cache counts come from s.tokenUsage, populated by setOpenAIStreamUsage on usage
+	// capture — same source as the message_delta usage, so both agree with billing.
+	cacheRead, _ := s.tokenUsage.CachedInputTokens()
+	cacheCreation, _ := s.tokenUsage.CacheCreationInputTokens()
 	payload := sseMessageStart{
 		Type: "message_start",
 		Message: sseMessageBody{
@@ -949,9 +955,17 @@ func (s *openAIStreamToAnthropicState) emitMessageStart(out *[]byte) error {
 			Model:        cmp.Or(s.model, s.requestModel),
 			StopReason:   nil,
 			StopSequence: nil,
-			// Input and cache token counts are not yet known here; they are reported on
-			// the message_delta event once the upstream usage chunk arrives.
-			Usage: sseMessageUsage{InputTokens: 0, OutputTokens: 0},
+			// Backends that attach cumulative usage to every chunk (e.g. vLLM) make the
+			// real prompt token count known before streaming starts — report it so agentic
+			// clients can account for context from the start of the turn (BLA-3507).
+			// Backends that only send a terminal usage chunk keep the zero placeholder
+			// here; the final counts always ride on message_delta.
+			Usage: sseMessageUsage{
+				InputTokens:              s.inputTokens,
+				CacheReadInputTokens:     int(cacheRead),
+				CacheCreationInputTokens: int(cacheCreation),
+				OutputTokens:             s.outputTokens,
+			},
 		},
 	}
 	data, err := json.Marshal(payload)
@@ -1196,9 +1210,9 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		stopSequenceAny = *stopSequence
 	}
 
-	// Emit message_delta with stop_reason and the final token usage. input_tokens and the
-	// cache fields ride message_delta because for OpenAI-backed streams the usage is not
-	// known until the terminal (or finish_reason) chunk, after message_start was emitted.
+	// Emit message_delta with stop_reason and the final token usage. message_delta always
+	// carries the final counts; message_start already carries them too when the backend
+	// attaches usage to early chunks (BLA-3507).
 	// Cache counts come from s.tokenUsage, populated by setOpenAIStreamUsage on capture.
 	cacheRead, _ := s.tokenUsage.CachedInputTokens()
 	cacheCreation, _ := s.tokenUsage.CacheCreationInputTokens()
