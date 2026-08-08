@@ -458,6 +458,67 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_UsageOnFinishReasonC
 	assert.Equal(t, "message_stop", events[5].eventType)
 }
 
+// TestAnthropicToOpenAITranslator_ResponseBody_Streaming_MessageStartUsage covers
+// BLA-3507: backends such as vLLM attach cumulative usage to every streamed chunk, so
+// the prompt token count is known before streaming starts and message_start must carry
+// it — agentic clients read usage there for live context accounting. RED before the
+// emitMessageStart fix (usage hardcoded to zeros), GREEN after. The usage captured by
+// handleChunk feeds both message_start and the billing tokenUsage, so both agree.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_MessageStartUsage(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "hi"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Every chunk carries cumulative usage (prompt constant, completion grows).
+	input := "data: {\"id\":\"chatcmpl-early\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}],\"model\":\"deepseek-ai/DeepSeek-V4-Flash\",\"usage\":{\"prompt_tokens\":249,\"completion_tokens\":1,\"total_tokens\":250}}\n\n" +
+		"data: {\"id\":\"chatcmpl-early\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":249,\"completion_tokens\":10,\"total_tokens\":259}}\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, tokenUsage, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	// Billing parity: the tokenUsage reported for metrics/billing matches what
+	// message_start advertised, since both come from the same upstream usage.
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	require.True(t, inputSet)
+	require.True(t, outputSet)
+	assert.Equal(t, uint32(249), inputTokens)
+	assert.Equal(t, uint32(10), outputTokens)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	assert.Equal(t, "message_start", events[0].eventType)
+	require.JSONEq(t, `{
+		"type":"message_start",
+		"message":{
+			"id":"chatcmpl-early",
+			"type":"message",
+			"role":"assistant",
+			"content":[],
+			"model":"deepseek-ai/DeepSeek-V4-Flash",
+			"stop_reason":null,
+			"stop_sequence":null,
+			"usage":{"input_tokens":249,"output_tokens":1}
+		}
+	}`, events[0].data)
+	assert.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":249,"output_tokens":10}}`, events[4].data)
+	assert.Equal(t, "message_stop", events[5].eventType)
+}
+
 // The space after "data:" is optional per the SSE spec, so a backend emitting the
 // compact "data:{…}" framing must still have its usage-only chunk extracted rather
 // than silently dropped (BLA-2215).
@@ -501,6 +562,42 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_CompactDataPrefix(t 
 	require.Len(t, events, 6)
 	assert.Equal(t, "message_delta", events[4].eventType)
 	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
+}
+
+func TestAnthropicToOpenAITranslator_ResponseBody_StreamingToolCallWithoutFinishReason(t *testing.T) {
+	// Reproduces the BLA-3506 repro: forced tool choice against a backend that streams
+	// tool calls without ever setting finish_reason. The final message_delta must report
+	// stop_reason=tool_use so Anthropic-compliant clients run the tool loop.
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "deepseek-ai/DeepSeek-V4-Flash")
+
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "deepseek-ai/DeepSeek-V4-Flash",
+		MaxTokens: 256,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "weather in Berlin?"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Tool call deltas, usage-only chunk, [DONE] — and no finish_reason chunk at all.
+	input := "data: {\"id\":\"chatcmpl-rtc\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"},\"type\":\"function\"}]}}],\"model\":\"deepseek-ai/DeepSeek-V4-Flash\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-rtc\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"city\\\": \\\"Berlin\\\"}\"}}]}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-rtc\",\"choices\":[],\"usage\":{\"prompt_tokens\":274,\"completion_tokens\":45}}\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	require.JSONEq(t, `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"get_weather","input":{}}}`, events[1].data)
+	require.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":274,"output_tokens":45}}`, events[4].data)
 }
 
 func TestAnthropicToOpenAITranslator_ResponseBody_StreamingRequestModelFallback(t *testing.T) {
