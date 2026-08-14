@@ -425,11 +425,6 @@ func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string
 		}
 
 		sr := openAIFinishReasonToAnthropic(choice.FinishReason)
-		// When the backend omits finish_reason, infer from the content: a response
-		// containing tool calls must report stop_reason=tool_use. BLA-3506.
-		if choice.FinishReason == "" && len(msg.ToolCalls) > 0 {
-			sr = anthropic.StopReasonToolUse
-		}
 		stopReason = &sr
 	}
 
@@ -1128,14 +1123,7 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 
 	stopReason := s.stopReason
 	if stopReason == "" {
-		// The upstream never reported a finish_reason (e.g. some OpenAI-compatible
-		// backends omit it on the final chunk). Infer from the emitted content:
-		// tool_use when tool calls were streamed, end_turn otherwise. BLA-3506.
-		if len(s.activeTools) > 0 {
-			stopReason = string(anthropic.StopReasonToolUse)
-		} else {
-			stopReason = string(anthropic.StopReasonEndTurn)
-		}
+		stopReason = string(anthropic.StopReasonEndTurn)
 	}
 
 	// Emit message_delta with stop_reason and the final token usage. message_delta always
