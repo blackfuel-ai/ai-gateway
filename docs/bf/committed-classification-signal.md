@@ -31,10 +31,14 @@ Selector and overrides alike are stamped by the authorization service and
 stripped before the request leaves the gateway; a client-supplied value never
 survives. All three buckets sit on the same selector, so one subscription's three
 counters move together. The fresh-input bucket charges
-`input_tokens - cached_input_tokens`: the `input_tokens` variable carries the
-provider's prompt-token count, which includes cached input, so charging it
-directly would bill a cache hit against the budget that bucket exists to keep
-free of them — the same expression the organization and key scopes already use.
+`input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)`
+— the same expression the organization and key scopes use. The subtraction is
+there because `input_tokens` carries the provider's prompt-token count, which
+includes cached input; charging it directly would bill a cache hit against the
+budget the bucket exists to keep free of them. The guard is there because the
+counters are unsigned: a runtime reporting more cached input than input makes the
+bare subtraction fail to evaluate, and that drops the entire stream-done charge
+for the request — every bucket, not just this one. Neither term is redundant.
 `tests/crdcel/testdata/quotapolicies/subscription-shadow-buckets.yaml` is the
 worked example.
 

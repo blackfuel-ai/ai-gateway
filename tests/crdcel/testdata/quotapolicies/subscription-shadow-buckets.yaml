@@ -27,6 +27,11 @@
 # counts cached input too. Charging it as-is would bill a cache hit against the
 # budget the bucket exists to keep free of them. This matches what the
 # organization and key scopes already charge on their own input bucket.
+#
+# The ternary is not redundant. These counters are unsigned, and a runtime that
+# reports more cached input than input makes the bare subtraction fail to
+# evaluate — which drops the whole stream-done charge for the request, not just
+# this bucket's. Flooring at zero keeps the other buckets charged.
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: QuotaPolicy
 metadata:
@@ -62,7 +67,7 @@ spec:
             quota:
               limit: 4294967295
               duration: 1m
-              costExpression: "input_tokens - cached_input_tokens"
+              costExpression: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
               dynamicOverride:
                 fromHeader: x-bf-subscription-quota-intok-1m
           - name: subscription-output-tpm
