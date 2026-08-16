@@ -21,6 +21,12 @@
 # existing x-bf-*-quota-<metric>-<window> grammar. The pairing below is the
 # contract — the global bucket counts requests, so it is fed by the req header
 # and carries the Requests cost metric.
+#
+# The fresh-input bucket subtracts cached input rather than charging
+# input_tokens: that variable maps to the provider's prompt-token count, which
+# counts cached input too. Charging it as-is would bill a cache hit against the
+# budget the bucket exists to keep free of them. This matches what the
+# organization and key scopes already charge on their own input bucket.
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: QuotaPolicy
 metadata:
@@ -56,7 +62,7 @@ spec:
             quota:
               limit: 4294967295
               duration: 1m
-              costExpression: input_tokens
+              costExpression: "input_tokens - cached_input_tokens"
               dynamicOverride:
                 fromHeader: x-bf-subscription-quota-intok-1m
           - name: subscription-output-tpm

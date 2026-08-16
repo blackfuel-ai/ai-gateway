@@ -21,16 +21,20 @@ read alike. The names below are the signal's vocabulary, chosen for what a
 recorded outcome should say; the headers follow the authorization service's
 existing `x-bf-*-quota-<metric>-<window>` grammar. The pairing is the contract:
 
-| Bucket name                    | Override header                     | Counts        |
-| ------------------------------ | ----------------------------------- | ------------- |
-| `subscription-global`          | `x-bf-subscription-quota-req-1m`    | requests      |
-| `subscription-fresh-input-tpm` | `x-bf-subscription-quota-intok-1m`  | input tokens  |
-| `subscription-output-tpm`      | `x-bf-subscription-quota-outtok-1m` | output tokens |
+| Bucket name                    | Override header                     | Counts                              |
+| ------------------------------ | ----------------------------------- | ----------------------------------- |
+| `subscription-global`          | `x-bf-subscription-quota-req-1m`    | requests                            |
+| `subscription-fresh-input-tpm` | `x-bf-subscription-quota-intok-1m`  | input tokens, cached input excluded |
+| `subscription-output-tpm`      | `x-bf-subscription-quota-outtok-1m` | output tokens                       |
 
 Selector and overrides alike are stamped by the authorization service and
 stripped before the request leaves the gateway; a client-supplied value never
 survives. All three buckets sit on the same selector, so one subscription's three
-counters move together.
+counters move together. The fresh-input bucket charges
+`input_tokens - cached_input_tokens`: the `input_tokens` variable carries the
+provider's prompt-token count, which includes cached input, so charging it
+directly would bill a cache hit against the budget that bucket exists to keep
+free of them — the same expression the organization and key scopes already use.
 `tests/crdcel/testdata/quotapolicies/subscription-shadow-buckets.yaml` is the
 worked example.
 
