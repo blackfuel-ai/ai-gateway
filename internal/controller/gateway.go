@@ -1014,7 +1014,10 @@ func quotaCostBuckets(quota *aigv1a1.QuotaDefinition) []quotaCostBucket {
 		if v.CostMetric == aigv1a1.QuotaCostMetricRequests {
 			continue
 		}
-		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostRuleBucketKey(i), expr: resolveExpr(v)})
+		buckets = append(buckets, quotaCostBucket{
+			key:  translator.QuotaCostRuleBucketKey(translator.BucketID(quota.BucketRules[i].Name, i)),
+			expr: resolveExpr(v),
+		})
 	}
 	return buckets
 }

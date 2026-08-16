@@ -644,20 +644,21 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 					if rule.Quota.CostMetric == aigv1a1.QuotaCostMetricRequests {
 						continue
 					}
+					bucketID := translator.BucketID(rule.Name, rIdx)
 					headers := flattenAndSortClientSelectorHeaders(rule.ClientSelectors)
 					var dupKey string
 					for mIdx, hdr := range headers {
-						dupKey += "|" + translator.BucketRuleDescriptorKey(rIdx, mIdx, hdr.Name, headerMatchKeyValue(hdr))
+						dupKey += "|" + translator.BucketRuleDescriptorKey(bucketID, mIdx, hdr.Name, headerMatchKeyValue(hdr))
 					}
 					if len(headers) == 0 {
-						dupKey += "|" + translator.BucketRuleDescriptorKey(rIdx, 0, "", "")
+						dupKey += "|" + translator.BucketRuleDescriptorKey(bucketID, 0, "", "")
 					}
 					if !seenStreamDoneKeys[dupKey] {
 						seenStreamDoneKeys[dupKey] = true
-						clientActions := buildClientSelectorStreamDoneActions(rIdx, rule.ClientSelectors)
+						clientActions := buildClientSelectorStreamDoneActions(bucketID, rule.ClientSelectors)
 						streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
 							Actions:           append(baseDescriptorActions(), clientActions...),
-							HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostRuleBucketKey(rIdx))),
+							HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostRuleBucketKey(bucketID))),
 							ApplyOnStreamDone: true,
 						})
 					}
@@ -857,8 +858,9 @@ type quotaOverrideSpec struct {
 
 // collectQuotaOverrideSpecs gathers the distinct (header, unit) dynamic
 // override sources across all policies, sorted for deterministic Lua script
-// generation. Shadow rules are skipped: the rate limit service's override path
-// bypasses shadow mode, and the CRD CEL validation forbids the combination.
+// generation. Shadow rules are included: a shadow bucket reads its per-request
+// limit from the same header parsing as an enforcing one — only its outcome
+// differs, and that outcome is decided in the rate limit service.
 func collectQuotaOverrideSpecs(policies []aigv1a1.QuotaPolicy) []quotaOverrideSpec {
 	seen := make(map[quotaOverrideSpec]bool)
 	addValue := func(v *aigv1a1.QuotaValue) {
@@ -875,11 +877,7 @@ func collectQuotaOverrideSpecs(policies []aigv1a1.QuotaPolicy) []quotaOverrideSp
 		for _, pmq := range policies[i].Spec.PerModelQuotas {
 			addValue(pmq.Quota.DefaultBucket)
 			for j := range pmq.Quota.BucketRules {
-				rule := &pmq.Quota.BucketRules[j]
-				if rule.ShadowMode != nil && *rule.ShadowMode {
-					continue
-				}
-				addValue(&rule.Quota)
+				addValue(&pmq.Quota.BucketRules[j].Quota)
 			}
 		}
 	}
@@ -1046,16 +1044,19 @@ func buildBucketRuleLimitEntries(modelName, policyNamespace string, quota *aigv1
 		resolvedModel := resolveModelName(string(target.Name), modelName, routeModelNames)
 
 		for rIdx, rule := range quota.BucketRules {
-			clientActions := buildClientSelectorActions(rIdx, rule.ClientSelectors)
+			clientActions := buildClientSelectorActions(translator.BucketID(rule.Name, rIdx), rule.ClientSelectors)
 			actions := requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
 			actions = append(actions, clientActions...)
-			entry := &routev3.RateLimit{Actions: actions}
-			// Shadow rules never enforce, and the rate limit service's override path
-			// bypasses shadow mode; the CRD CEL validation forbids the combination.
-			if rule.ShadowMode == nil || !*rule.ShadowMode {
-				entry.Limit = buildQuotaLimitOverride(&rule.Quota)
-			}
-			entries = append(entries, entry)
+			// A shadow rule gets its per-request limit override like any other:
+			// the override supplies the value the bucket is measured against,
+			// while shadow mode decides that exceeding it does not reject. The
+			// rate limit service carries shadow mode through its override path,
+			// so a shadow bucket with a dynamic limit classifies the request and
+			// still answers OK.
+			entries = append(entries, &routev3.RateLimit{
+				Actions: actions,
+				Limit:   buildQuotaLimitOverride(&rule.Quota),
+			})
 		}
 
 		if quota.DefaultBucket != nil && quota.DefaultBucket.Limit > 0 {
@@ -1123,12 +1124,12 @@ func requestTimeBaseActions(namespace, backendName, modelName string) []*routev3
 // separate action. The sort order matches the nested descriptor tree in the rate
 // limit service config. If no selectors are specified, a GenericKey action is used.
 func buildClientSelectorActions(
-	ruleIndex int, selectors []egv1a1.RateLimitSelectCondition,
+	bucketID string, selectors []egv1a1.RateLimitSelectCondition,
 ) []*routev3.RateLimit_Action {
 	headers := flattenAndSortClientSelectorHeaders(selectors)
 
 	if len(headers) == 0 {
-		key := translator.BucketRuleDescriptorKey(ruleIndex, 0, "", "")
+		key := translator.BucketRuleDescriptorKey(bucketID, 0, "", "")
 		return []*routev3.RateLimit_Action{
 			{
 				ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
@@ -1143,7 +1144,7 @@ func buildClientSelectorActions(
 
 	var actions []*routev3.RateLimit_Action
 	for mIdx, header := range headers {
-		actions = append(actions, buildHeaderMatchAction(ruleIndex, mIdx, header))
+		actions = append(actions, buildHeaderMatchAction(bucketID, mIdx, header))
 	}
 	return actions
 }
@@ -1152,12 +1153,12 @@ func buildClientSelectorActions(
 // always uses ExpectMatch=true on HeaderValueMatch actions. Distinct headers fall
 // back to GenericKey because per-value bucketing is not applicable at stream-done time.
 func buildClientSelectorStreamDoneActions(
-	ruleIndex int, selectors []egv1a1.RateLimitSelectCondition,
+	bucketID string, selectors []egv1a1.RateLimitSelectCondition,
 ) []*routev3.RateLimit_Action {
 	headers := flattenAndSortClientSelectorHeaders(selectors)
 
 	if len(headers) == 0 {
-		key := translator.BucketRuleDescriptorKey(ruleIndex, 0, "", "")
+		key := translator.BucketRuleDescriptorKey(bucketID, 0, "", "")
 		return []*routev3.RateLimit_Action{
 			{
 				ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
@@ -1172,7 +1173,7 @@ func buildClientSelectorStreamDoneActions(
 
 	var actions []*routev3.RateLimit_Action
 	for mIdx, header := range headers {
-		actions = append(actions, buildStreamDoneHeaderMatchAction(ruleIndex, mIdx, header))
+		actions = append(actions, buildStreamDoneHeaderMatchAction(bucketID, mIdx, header))
 	}
 	return actions
 }
@@ -1194,9 +1195,9 @@ func flattenAndSortClientSelectorHeaders(selectors []egv1a1.RateLimitSelectCondi
 // buildStreamDoneHeaderMatchAction is like buildHeaderMatchAction but always uses
 // ExpectMatch=true. Distinct headers are treated as GenericKey.
 func buildStreamDoneHeaderMatchAction(
-	ruleIndex, matchIndex int, header egv1a1.HeaderMatch,
+	bucketID string, matchIndex int, header egv1a1.HeaderMatch,
 ) *routev3.RateLimit_Action {
-	descriptorKey := translator.BucketRuleDescriptorKey(ruleIndex, matchIndex, header.Name, headerMatchKeyValue(header))
+	descriptorKey := translator.BucketRuleDescriptorKey(bucketID, matchIndex, header.Name, headerMatchKeyValue(header))
 
 	if header.Type != nil && *header.Type == egv1a1.HeaderMatchDistinct {
 		// Request headers are not available on the stream-done path, so the
@@ -1247,9 +1248,9 @@ func buildStreamDoneHeaderMatchAction(
 //   - Distinct: RateLimit_Action_RequestHeaders_ (each unique value gets its own bucket)
 //   - Exact/RegularExpression: RateLimit_Action_HeaderValueMatch_ with StringMatcher
 func buildHeaderMatchAction(
-	ruleIndex, matchIndex int, header egv1a1.HeaderMatch,
+	bucketID string, matchIndex int, header egv1a1.HeaderMatch,
 ) *routev3.RateLimit_Action {
-	descriptorKey := translator.BucketRuleDescriptorKey(ruleIndex, matchIndex, header.Name, headerMatchKeyValue(header))
+	descriptorKey := translator.BucketRuleDescriptorKey(bucketID, matchIndex, header.Name, headerMatchKeyValue(header))
 
 	// Distinct: use RequestHeaders action.
 	if header.Type != nil && *header.Type == egv1a1.HeaderMatchDistinct {

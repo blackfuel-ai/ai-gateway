@@ -281,6 +281,19 @@ spec:
                                       has(self.path) || has(self.sourceCIDR) || has(self.queryParams)
                                 maxItems: 8
                                 type: array
+                              name:
+                                description: |-
+                                  Name is this bucket's stable identifier. It is the token that prefixes the
+                                  rule's rendered rate limit descriptor keys, so an outcome reported for the
+                                  bucket names the bucket rather than its position in BucketRules: inserting
+                                  or reordering rules does not change what a previously recorded outcome
+                                  refers to. When unset the bucket is identified by its position ("rule-N").
+
+                                  Must be unique within a QuotaDefinition, and must not collide with the
+                                  positional form of another bucket in the same definition.
+                                maxLength: 63
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
                               quota:
                                 description: |-
                                   Quota value for given client selectors.
@@ -351,14 +364,15 @@ spec:
                                   When enabled, all quota checks are performed (cache lookups,
                                   counter updates, telemetry generation), but the outcome is never enforced.
                                   The request always succeeds, even if the configured quota is exceeded.
+
+                                  A shadow bucket may carry a DynamicOverride: the override supplies the
+                                  bucket's per-request limit value, while shadow mode decides that exceeding
+                                  it does not reject. The pair is what makes a bucket classify traffic as
+                                  in-budget or over-budget without ever returning 429.
                                 type: boolean
                             required:
                             - quota
                             type: object
-                            x-kubernetes-validations:
-                            - message: dynamicOverride cannot be combined with shadowMode
-                              rule: '!(has(self.shadowMode) && self.shadowMode &&
-                                has(self.quota.dynamicOverride))'
                           type: array
                         costExpression:
                           description: |-

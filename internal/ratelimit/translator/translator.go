@@ -68,17 +68,30 @@ func headerComparableValue(header egv1a1.HeaderMatch) string {
 	return ""
 }
 
+// BucketID returns a bucket rule's stable identifier: its configured Name when
+// set, otherwise its position in BucketRules. It prefixes every descriptor key
+// the rule renders and names the rule's stream-done cost bucket, so a named
+// bucket keeps its identity across rule insertions and reorderings — an outcome
+// reported for it names the bucket rather than a rule position.
+func BucketID(name *string, ruleIndex int) string {
+	if name != nil && *name != "" {
+		return *name
+	}
+	return fmt.Sprintf("rule-%d", ruleIndex)
+}
+
 // BucketRuleDescriptorKey returns the descriptor key for a bucket rule's header match.
-// The "|" separator between header name and value prevents ambiguity ("|" is illegal in
-// HTTP header names per RFC 7230). For catch-all rules, headerName and headerValue are empty.
-func BucketRuleDescriptorKey(ruleIndex, matchIndex int, headerName, headerValue string) string {
+// bucketID comes from BucketID. The "|" separator between header name and value prevents
+// ambiguity ("|" is illegal in HTTP header names per RFC 7230). For catch-all rules,
+// headerName and headerValue are empty.
+func BucketRuleDescriptorKey(bucketID string, matchIndex int, headerName, headerValue string) string {
 	if headerName == "" {
-		return fmt.Sprintf("rule-%d-match-%d", ruleIndex, matchIndex)
+		return fmt.Sprintf("%s-match-%d", bucketID, matchIndex)
 	}
 	if headerValue == "" {
-		return fmt.Sprintf("rule-%d-%s-match-%d", ruleIndex, headerName, matchIndex)
+		return fmt.Sprintf("%s-%s-match-%d", bucketID, headerName, matchIndex)
 	}
-	return fmt.Sprintf("rule-%d-%s|%s-match-%d", ruleIndex, headerName, headerValue, matchIndex)
+	return fmt.Sprintf("%s-%s|%s-match-%d", bucketID, headerName, headerValue, matchIndex)
 }
 
 // DefaultBucketDescriptorKey returns the descriptor key for a model's default bucket.
@@ -88,10 +101,15 @@ func DefaultBucketDescriptorKey(numRules int) string {
 	return fmt.Sprintf("rule-%d-match--1", numRules)
 }
 
-// QuotaCostRuleBucketKey identifies a bucket rule's cost bucket by rule index.
-func QuotaCostRuleBucketKey(ruleIndex int) string {
-	return fmt.Sprintf("rule-%d", ruleIndex)
+// QuotaCostRuleBucketKey identifies a bucket rule's stream-done cost bucket.
+// bucketID comes from BucketID, so a named bucket's cost key carries its name.
+func QuotaCostRuleBucketKey(bucketID string) string {
+	return bucketID
 }
+
+// ServiceQuotaBucketName is the bucket name of a policy's service-wide quota,
+// the one bucket that has no position in BucketRules to fall back on.
+const ServiceQuotaBucketName = "service"
 
 // QuotaCostDefaultBucketKey identifies a model's default cost bucket.
 func QuotaCostDefaultBucketKey() string {
@@ -248,6 +266,7 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 		if err != nil {
 			return nil, nil, err
 		}
+		policy.Name = QuotaCostDefaultBucketKey()
 		desc.RateLimit = policy
 		desc.QuotaMode = true
 		return desc, []KeyedDescriptor{{
@@ -258,8 +277,17 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 
 	var nested []*rlsconfv3.RateLimitDescriptor
 	var keyed []KeyedDescriptor
+	// Two buckets sharing an identifier would render the same descriptor key and
+	// silently meter as one bucket, and an outcome reported for that key could
+	// not be attributed. "default" is taken by the model's default cost bucket.
+	seenBucketIDs := map[string]bool{QuotaCostDefaultBucketKey(): true}
 	for rIdx, rule := range quota.BucketRules {
-		ruleDescs, err := buildBucketRuleDescriptors(rIdx, &rule)
+		bucketID := BucketID(rule.Name, rIdx)
+		if seenBucketIDs[bucketID] {
+			return nil, nil, fmt.Errorf("bucket rule %d: duplicate bucket identifier %q", rIdx, bucketID)
+		}
+		seenBucketIDs[bucketID] = true
+		ruleDescs, err := buildBucketRuleDescriptors(bucketID, &rule)
 		if err != nil {
 			return nil, nil, fmt.Errorf("bucket rule %d: %w", rIdx, err)
 		}
@@ -288,6 +316,7 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 		if err != nil {
 			return nil, nil, err
 		}
+		defaultPolicy.Name = QuotaCostDefaultBucketKey()
 		defaultKey := DefaultBucketDescriptorKey(len(quota.BucketRules))
 		defaultDesc := &rlsconfv3.RateLimitDescriptor{
 			Key:       defaultKey,
@@ -322,6 +351,7 @@ func buildServiceQuotaDescriptor(sq *aigv1a1.ServiceQuotaDefinition) (*rlsconfv3
 	if err != nil {
 		return nil, err
 	}
+	policy.Name = ServiceQuotaBucketName
 	return &rlsconfv3.RateLimitDescriptor{
 		Key:       ModelNameDescriptorKey,
 		RateLimit: policy,
@@ -340,11 +370,12 @@ func buildServiceQuotaDescriptor(sq *aigv1a1.ServiceQuotaDefinition) (*rlsconfv3
 //   - Exact / Regex: key and value both set to the BucketRuleDescriptorKey. The
 //     HeaderValueMatch action sends the fixed DescriptorValue (not the actual header
 //     value), so the service config must match that same fixed string.
-func buildBucketRuleDescriptors(ruleIndex int, rule *aigv1a1.QuotaRule) ([]*rlsconfv3.RateLimitDescriptor, error) {
+func buildBucketRuleDescriptors(bucketID string, rule *aigv1a1.QuotaRule) ([]*rlsconfv3.RateLimitDescriptor, error) {
 	policy, err := quotaValueToPolicy(&rule.Quota)
 	if err != nil {
 		return nil, err
 	}
+	policy.Name = bucketID
 	shadowMode := rule.ShadowMode != nil && *rule.ShadowMode
 
 	// Flatten and sort all header matches across all ClientSelectors.
@@ -352,7 +383,7 @@ func buildBucketRuleDescriptors(ruleIndex int, rule *aigv1a1.QuotaRule) ([]*rlsc
 
 	// No headers: single catch-all descriptor for this rule.
 	if len(allHeaders) == 0 {
-		key := BucketRuleDescriptorKey(ruleIndex, 0, "", "")
+		key := BucketRuleDescriptorKey(bucketID, 0, "", "")
 		return []*rlsconfv3.RateLimitDescriptor{{
 			Key:        key,
 			Value:      key,
@@ -368,7 +399,7 @@ func buildBucketRuleDescriptors(ruleIndex int, rule *aigv1a1.QuotaRule) ([]*rlsc
 	var root *rlsconfv3.RateLimitDescriptor
 	var leaf *rlsconfv3.RateLimitDescriptor
 	for mIdx, header := range allHeaders {
-		key := BucketRuleDescriptorKey(ruleIndex, mIdx, header.Name, headerMatchValue(header))
+		key := BucketRuleDescriptorKey(bucketID, mIdx, header.Name, headerMatchValue(header))
 		desc := &rlsconfv3.RateLimitDescriptor{Key: key}
 		if header.Type == nil || *header.Type != egv1a1.HeaderMatchDistinct {
 			desc.Value = key
@@ -414,7 +445,8 @@ func flattenAndSortHeaders(selectors []egv1a1.RateLimitSelectCondition) []egv1a1
 }
 
 // quotaValueToPolicy converts a QuotaValue to the static rate limit policy in the
-// rate limit service config. When the QuotaValue has a dynamicOverride, the
+// rate limit service config. Callers set Name to the bucket's stable identifier,
+// which is what the rate limit service reports an outcome against. When the QuotaValue has a dynamicOverride, the
 // per-request limit carried in the descriptor takes precedence in the rate limit
 // service; the static value here remains the fallback.
 func quotaValueToPolicy(qv *aigv1a1.QuotaValue) (*rlsconfv3.RateLimitPolicy, error) {

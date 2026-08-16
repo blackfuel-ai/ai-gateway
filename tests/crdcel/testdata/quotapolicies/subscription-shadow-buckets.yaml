@@ -1,0 +1,65 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+# Three named buckets on a subscription scope. Each keys off the same
+# trusted subscription selector header with a Distinct match, so every
+# subscription gets its own counters, and each takes its limit from its own
+# per-request override header. All three are shadow buckets: they measure the
+# request against the subscription's budget and report the outcome, and they
+# never reject — a caller over budget is served and classified, not throttled.
+#
+# The static limit is the protocol maximum on purpose: it is only reached when
+# the subscription id is present but its override header is not, and a low
+# fallback there would report a request as over budget on a propagation failure
+# rather than on real consumption.
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: QuotaPolicy
+metadata:
+  name: subscription-shadow-buckets
+  namespace: default
+spec:
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: backend
+  perModelQuotas:
+    - modelName: kimi-k3
+      quota:
+        bucketRules:
+          - name: subscription-global
+            shadowMode: true
+            clientSelectors:
+              - headers:
+                  - name: x-bf-subscription-id
+                    type: Distinct
+            quota:
+              limit: 4294967295
+              duration: 1m
+              dynamicOverride:
+                fromHeader: x-bf-subscription-quota-global
+          - name: subscription-fresh-input-tpm
+            shadowMode: true
+            clientSelectors:
+              - headers:
+                  - name: x-bf-subscription-id
+                    type: Distinct
+            quota:
+              limit: 4294967295
+              duration: 1m
+              costExpression: input_tokens
+              dynamicOverride:
+                fromHeader: x-bf-subscription-quota-fresh-input-tpm
+          - name: subscription-output-tpm
+            shadowMode: true
+            clientSelectors:
+              - headers:
+                  - name: x-bf-subscription-id
+                    type: Distinct
+            quota:
+              limit: 4294967295
+              duration: 1m
+              costExpression: output_tokens
+              dynamicOverride:
+                fromHeader: x-bf-subscription-quota-output-tpm
