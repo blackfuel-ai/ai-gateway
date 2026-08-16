@@ -37,8 +37,10 @@ there because `input_tokens` carries the provider's prompt-token count, which
 includes cached input; charging it directly would bill a cache hit against the
 budget the bucket exists to keep free of them. The guard is there because the
 counters are unsigned: a runtime reporting more cached input than input makes the
-bare subtraction fail to evaluate, and that drops the entire stream-done charge
-for the request — every bucket, not just this one. Neither term is redundant.
+bare subtraction fail to evaluate, and a cost expression that fails to evaluate
+aborts the request's whole dynamic-metadata struct — every bucket's charge, the
+routing context and the served model with it, so the usage record for that
+request goes missing rather than arriving wrong. Neither term is redundant.
 `tests/crdcel/testdata/quotapolicies/subscription-shadow-buckets.yaml` is the
 worked example.
 

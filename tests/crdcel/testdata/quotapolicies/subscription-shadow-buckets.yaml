@@ -30,8 +30,10 @@
 #
 # The ternary is not redundant. These counters are unsigned, and a runtime that
 # reports more cached input than input makes the bare subtraction fail to
-# evaluate — which drops the whole stream-done charge for the request, not just
-# this bucket's. Flooring at zero keeps the other buckets charged.
+# evaluate. A cost expression that fails to evaluate aborts the request's whole
+# dynamic-metadata struct, so the loss is not this bucket's charge: it is every
+# bucket's charge plus the routing context and the served model, and the usage
+# record for that request goes missing entirely. Flooring at zero keeps it.
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: QuotaPolicy
 metadata:
