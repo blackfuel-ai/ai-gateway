@@ -16,12 +16,23 @@ prefix, both expressed in an ordinary `QuotaPolicy` bucket rule.
 - Per-bucket limits: `x-bf-subscription-quota-*`, read through
   `quota.dynamicOverride.fromHeader`.
 
-Both are stamped by the authorization service and stripped before the request
-leaves the gateway; a client-supplied value never survives. Three buckets are
-configured per subscription — a global one plus fresh-input and output token
-rates — each on the same selector with its own override header and cost
-expression. `tests/crdcel/testdata/quotapolicies/subscription-shadow-buckets.yaml`
-is the worked example.
+A bucket's name and its override header are two different vocabularies and do not
+read alike. The names below are the signal's vocabulary, chosen for what a
+recorded outcome should say; the headers follow the authorization service's
+existing `x-bf-*-quota-<metric>-<window>` grammar. The pairing is the contract:
+
+| Bucket name                    | Override header                     | Counts        |
+| ------------------------------ | ----------------------------------- | ------------- |
+| `subscription-global`          | `x-bf-subscription-quota-req-1m`    | requests      |
+| `subscription-fresh-input-tpm` | `x-bf-subscription-quota-intok-1m`  | input tokens  |
+| `subscription-output-tpm`      | `x-bf-subscription-quota-outtok-1m` | output tokens |
+
+Selector and overrides alike are stamped by the authorization service and
+stripped before the request leaves the gateway; a client-supplied value never
+survives. All three buckets sit on the same selector, so one subscription's three
+counters move together.
+`tests/crdcel/testdata/quotapolicies/subscription-shadow-buckets.yaml` is the
+worked example.
 
 **These buckets classify and never reject.** Each carries `shadowMode: true`, so
 exceeding its limit is recorded and the request is still served. A caller past
@@ -42,13 +53,8 @@ what an already-recorded outcome refers to.
 Names are unique within one model's quota definition; `default` is reserved for
 the model's default bucket and `service` for the policy's service-wide quota.
 
-The names the subscription scope uses:
-
-| Bucket                        | Name                           |
-| ----------------------------- | ------------------------------ |
-| Global                        | `subscription-global`          |
-| Fresh-input tokens per minute | `subscription-fresh-input-tpm` |
-| Output tokens per minute      | `subscription-output-tpm`      |
+The subscription scope's three names are listed with their override headers
+above.
 
 ## The classification signal
 
@@ -100,7 +106,7 @@ owns the bucket-level outcome, and the lane is derived from it downstream.
 
 ## Headers that must survive to be worth producing
 
-`x-bf-subscription-id` and every `x-bf-subscription-quota-*` header have to reach
+`x-bf-subscription-id` and the three override headers above have to reach
 Envoy's rate limit filter for these buckets to work. If one is dropped in between
 — an authorization filter that does not forward it, a tier that strips it — the
 failure is silent and asymmetric:
@@ -123,4 +129,8 @@ shadow bucket's over-limit result to allowed inside its limiter, before the laye
 that assembles response metadata can see it, so the fact is destroyed at its
 source. Recording it there is a change to the rate limit service, which this
 fork consumes as a pinned upstream image and does not build. Until that lands,
-requests are correctly served and classified as unknown rather than misclassified.
+requests are correctly served and classified as unknown rather than
+misclassified.
+
+That change is tracked as BLA-3691, which builds to the field names and
+vocabulary above rather than defining its own.

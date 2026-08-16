@@ -14,6 +14,13 @@
 # the subscription id is present but its override header is not, and a low
 # fallback there would report a request as over budget on a propagation failure
 # rather than on real consumption.
+#
+# A bucket's name and its override header are two different vocabularies and do
+# not have to read alike. The names are the signal's vocabulary, chosen for what
+# a recorded outcome should say; the headers follow the authorization service's
+# existing x-bf-*-quota-<metric>-<window> grammar. The pairing below is the
+# contract — the global bucket counts requests, so it is fed by the req header
+# and carries the Requests cost metric.
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: QuotaPolicy
 metadata:
@@ -37,8 +44,9 @@ spec:
             quota:
               limit: 4294967295
               duration: 1m
+              costMetric: Requests
               dynamicOverride:
-                fromHeader: x-bf-subscription-quota-global
+                fromHeader: x-bf-subscription-quota-req-1m
           - name: subscription-fresh-input-tpm
             shadowMode: true
             clientSelectors:
@@ -50,7 +58,7 @@ spec:
               duration: 1m
               costExpression: input_tokens
               dynamicOverride:
-                fromHeader: x-bf-subscription-quota-fresh-input-tpm
+                fromHeader: x-bf-subscription-quota-intok-1m
           - name: subscription-output-tpm
             shadowMode: true
             clientSelectors:
@@ -62,4 +70,4 @@ spec:
               duration: 1m
               costExpression: output_tokens
               dynamicOverride:
-                fromHeader: x-bf-subscription-quota-output-tpm
+                fromHeader: x-bf-subscription-quota-outtok-1m
