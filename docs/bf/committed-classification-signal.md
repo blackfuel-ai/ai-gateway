@@ -90,6 +90,32 @@ commercial lane happens where the usage event is assembled, not here. The
 client-facing response carries neither: it keeps only the numeric remaining-budget
 headers.
 
+### What this file does not name
+
+The lane is not named here. The authorization service stamps it on `x-bf-lane`,
+already in production, and that header is the one lane name — degraded traffic
+carries lane `4` on it today. Nothing in the quota path introduces a second lane
+header or a second spelling of the concept, and nothing here reads one: this file
+owns the bucket-level outcome, and the lane is derived from it downstream.
+
+## Headers that must survive to be worth producing
+
+`x-bf-subscription-id` and every `x-bf-subscription-quota-*` header have to reach
+Envoy's rate limit filter for these buckets to work. If one is dropped in between
+— an authorization filter that does not forward it, a tier that strips it — the
+failure is silent and asymmetric:
+
+- selector missing → the descriptor is never generated, the bucket does not
+  apply, and no outcome is reported: the request classifies unknown.
+- override missing but selector present → the bucket silently falls back to its
+  static limit, which is why the worked example sets that fallback to the
+  protocol maximum. A low fallback there would report a request as over budget on
+  a propagation failure rather than on real consumption.
+
+Neither case rejects a request. Both are worth alerting on, because a bucket that
+is configured, produced and consumed but dropped in transit looks exactly like a
+subscription with no traffic.
+
 ### Not yet shipped
 
 `shadowModeViolations` does not exist yet. The rate limit service rewrites a
