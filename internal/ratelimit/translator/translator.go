@@ -472,7 +472,7 @@ func parseDuration(s string) (rlsconfv3.RateLimitUnit, error) {
 	case "1d":
 		return rlsconfv3.RateLimitUnit_DAY, nil
 	default:
-		return 0, fmt.Errorf("unsupported duration %q: must be one of 1s, 1m, 1h", s)
+		return 0, fmt.Errorf("unsupported duration %q: must be one of 1s, 1m, 1h, 1d", s)
 	}
 }
 
