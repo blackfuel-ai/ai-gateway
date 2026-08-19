@@ -1,55 +1,53 @@
-# Committed-subscription quota buckets and the classification signal
+# Classifying quota buckets and the classification signal
 
-Fork-local contract. Two things live here: how a subscription's quota buckets are
-configured so they classify traffic without ever rejecting it, and the wire form
-of the outcome they report.
+Two things live here: how a quota scope's buckets are configured so they classify
+traffic without ever rejecting it, and the wire form of the outcome they report.
+The worked example is a per-subscription scope, but the mechanism is generic: any
+selector header and any override-header prefix make a scope.
 
-## Subscription-scope buckets
+## Classifying buckets
 
-A subscription is a third quota scope beside the organization and the API key. It
-needs no new CRD field: a scope is a selector header plus an override-header
-prefix, both expressed in an ordinary `QuotaPolicy` bucket rule.
+A scope needs no dedicated CRD field. It is a selector header plus an
+override-header prefix, both expressed in an ordinary `QuotaPolicy` bucket rule.
 
-- Selector: `x-bf-subscription-id`, matched `Distinct`, carrying the
-  subscription's billing-keyed external id. Every subscription gets its own
+- Selector: a request header (for a subscription scope, one carrying the
+  subscription's id), matched `Distinct`, so every distinct value gets its own
   counters.
-- Per-bucket limits: `x-bf-subscription-quota-*`, read through
-  `quota.dynamicOverride.fromHeader`.
+- Per-bucket limits: headers read through `quota.dynamicOverride.fromHeader`,
+  one per bucket.
 
-A bucket's name and its override header are two different vocabularies and do not
-read alike. The names below are the signal's vocabulary, chosen for what a
-recorded outcome should say; the headers follow the authorization service's
-existing `x-bf-*-quota-<metric>-<window>` grammar. The pairing is the contract:
+A bucket's name and its override header are two different vocabularies. The name
+is the signal's vocabulary, chosen for what a recorded outcome should say; the
+header follows whatever grammar the upstream authorization component uses to
+stamp limits. The pairing is the contract between the two. The worked example:
 
-| Bucket name                    | Override header                     | Counts                              |
-| ------------------------------ | ----------------------------------- | ----------------------------------- |
-| `subscription-global`          | `x-bf-subscription-quota-req-1m`    | requests                            |
-| `subscription-fresh-input-tpm` | `x-bf-subscription-quota-intok-1m`  | input tokens, cached input excluded |
-| `subscription-output-tpm`      | `x-bf-subscription-quota-outtok-1m` | output tokens                       |
+| Bucket name                    | Override header                  | Counts                              |
+| ------------------------------ | -------------------------------- | ----------------------------------- |
+| `subscription-global`          | `<prefix>-subscription-req-1m`    | requests                            |
+| `subscription-fresh-input-tpm` | `<prefix>-subscription-intok-1m`  | input tokens, cached input excluded |
+| `subscription-output-tpm`      | `<prefix>-subscription-outtok-1m` | output tokens                       |
 
-Selector and overrides alike are stamped by the authorization service and
-stripped before the request leaves the gateway; a client-supplied value never
-survives. All three buckets sit on the same selector, so one subscription's three
-counters move together. The fresh-input bucket charges
-`input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)`
-— the same expression the organization and key scopes use. The subtraction is
-there because `input_tokens` carries the provider's prompt-token count, which
-includes cached input; charging it directly would bill a cache hit against the
-budget the bucket exists to keep free of them. The guard is there because the
-counters are unsigned: a runtime reporting more cached input than input makes the
-bare subtraction fail to evaluate, and a cost expression that fails to evaluate
-aborts the request's whole dynamic-metadata struct — every bucket's charge, the
-routing context and the served model with it, so the usage record for that
-request goes missing rather than arriving wrong. Neither term is redundant.
-`tests/crdcel/testdata/quotapolicies/subscription-shadow-buckets.yaml` is the
-worked example.
+Selector and overrides alike are stamped by a trusted upstream component and
+stripped before the request leaves the gateway; a client-supplied value must
+never survive. All buckets of one scope sit on the same selector, so one
+subject's counters move together. The fresh-input bucket charges
+`input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)`.
+The subtraction is there because `input_tokens` carries the provider's
+prompt-token count, which includes cached input; charging it directly would bill
+a cache hit against the budget the bucket exists to keep free of them. The guard
+is there because the counters are unsigned: a runtime reporting more cached input
+than input makes the bare subtraction fail to evaluate, and a cost expression that
+fails to evaluate aborts the request's whole dynamic-metadata struct — every
+bucket's charge, the routing context and the served model with it, so the usage
+record for that request goes missing rather than arriving wrong. Neither term is
+redundant. `tests/crdcel/testdata/quotapolicies/subscription-shadow-buckets.yaml`
+is the worked example.
 
-**These buckets classify and never reject.** Each carries `shadowMode: true`, so
-exceeding its limit is recorded and the request is still served. A caller past
-its committed budget spills over; it is never answered 429 by these buckets.
-Shadow mode and a per-request limit override are usable together: the override
-supplies the value the bucket is measured against, shadow mode decides that
-exceeding it does not reject.
+**Classifying buckets never reject.** Each carries `shadowMode: true`, so
+exceeding its limit is recorded and the request is still served. Shadow mode and
+a per-request limit override are usable together: the override supplies the value
+the bucket is measured against, shadow mode decides that exceeding it does not
+reject.
 
 ## Bucket names
 
@@ -63,9 +61,6 @@ what an already-recorded outcome refers to.
 Names are unique within one model's quota definition; `default` is reserved for
 the model's default bucket and `service` for the policy's service-wide quota.
 
-The subscription scope's three names are listed with their override headers
-above.
-
 ## The classification signal
 
 The signal rides the **request-time** quota filter
@@ -74,8 +69,9 @@ filter is fire-and-forget and unordered against the access log, so an outcome
 reported there may not reach the record.
 
 The rate limit service returns it in `RateLimitResponse.dynamic_metadata`, which
-Envoy stores in the dynamic metadata namespace `envoy.filters.http.ratelimit`.
-The service must run with `RESPONSE_DYNAMIC_METADATA=true`.
+Envoy stores verbatim in the dynamic metadata namespace
+`envoy.filters.http.ratelimit`. The service must run with
+`RESPONSE_DYNAMIC_METADATA=true`.
 
 Fields in that struct:
 
@@ -97,29 +93,29 @@ the comma-joined `shadowModeViolations` list:
 
 | Value                          | Meaning                                                            |
 | ------------------------------ | ------------------------------------------------------------------ |
-| `""` (present, empty)          | every subscription bucket within budget — in-plan                  |
-| e.g. `subscription-output-tpm` | that bucket was over budget — spillover                            |
+| `""` (present, empty)          | every classifying bucket within budget                             |
+| e.g. `subscription-output-tpm` | that bucket was over budget                                        |
 | absent / null                  | no signal arrived — the event is classified unknown, never guessed |
 
 The gateway reports bucket names only. Mapping a set of bucket names onto a
-commercial lane happens where the usage event is assembled, not here. The
-client-facing response carries neither: it keeps only the numeric remaining-budget
-headers.
+commercial meaning happens where the usage event is assembled, not here.
 
-### What this file does not name
+### Bucket names on the client response
 
-The lane is not named here. The authorization service stamps it on `x-bf-lane`,
-already in production, and that header is the one lane name — degraded traffic
-carries lane `4` on it today. Nothing in the quota path introduces a second lane
-header or a second spelling of the concept, and nothing here reads one: this file
-owns the bucket-level outcome, and the lane is derived from it downstream.
+The rate limit service echoes each policy's `name` in
+`descriptor_statuses[].current_limit.name`, and the quota filters enable
+`X-RateLimit-*` headers (draft version 03), so Envoy renders every bucket with a
+current limit — shadow buckets included — into the response's
+`X-RateLimit-Limit` quota-policy list as `<limit>;w=<window>;name="<bucket>"`.
+Bucket names are therefore visible to the client unless a downstream layer strips
+those headers. Choose names that are acceptable to expose, or strip the headers.
 
 ## Headers that must survive to be worth producing
 
-`x-bf-subscription-id` and the three override headers above have to reach
-Envoy's rate limit filter for these buckets to work. If one is dropped in between
-— an authorization filter that does not forward it, a tier that strips it — the
-failure is silent and asymmetric:
+The selector and the override headers have to reach Envoy's rate limit filter for
+these buckets to work. If one is dropped in between — an authorization filter
+that does not forward it, a tier that strips it — the failure is silent and
+asymmetric:
 
 - selector missing → the descriptor is never generated, the bucket does not
   apply, and no outcome is reported: the request classifies unknown.
@@ -130,17 +126,14 @@ failure is silent and asymmetric:
 
 Neither case rejects a request. Both are worth alerting on, because a bucket that
 is configured, produced and consumed but dropped in transit looks exactly like a
-subscription with no traffic.
+subject with no traffic.
 
 ### Not yet shipped
 
 `shadowModeViolations` does not exist yet. The rate limit service rewrites a
 shadow bucket's over-limit result to allowed inside its limiter, before the layer
 that assembles response metadata can see it, so the fact is destroyed at its
-source. Recording it there is a change to the rate limit service, which this
-fork consumes as a pinned upstream image and does not build. Until that lands,
+source. Recording it is a change to the rate limit service, which this repository
+consumes as a pinned upstream image and does not build. Until that lands,
 requests are correctly served and classified as unknown rather than
 misclassified.
-
-That change is tracked as BLA-3691, which builds to the field names and
-vocabulary above rather than defining its own.
