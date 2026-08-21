@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Run Claudish code review
-        uses: blackfuel-ai/code-review@v1.0.3
+        uses: blackfuel-ai/code-review@613c4291b9939cd0f644a0f3479c9ab4a2e8f32e
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           github-token: ${{ github.token }}
