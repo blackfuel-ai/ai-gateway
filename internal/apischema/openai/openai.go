@@ -1464,11 +1464,6 @@ type ChatCompletionResponseChoice struct {
 	// Message is described in the OpenAI API documentation:
 	// https://platform.openai.com/docs/api-reference/chat/object#chat/object-choices
 	Message ChatCompletionResponseChoiceMessage `json:"message,omitempty"`
-
-	// StopReason holds non-standard vendor fields, the raw stop signal reported by
-	// backends such as vLLM: the matched request stop sequence (string) or a stop
-	// token id (number). OpenAI omits this field entirely.
-	StopReason any `json:"stop_reason,omitempty"`
 }
 
 // ChatCompletionResponseChoiceMessage is described in the OpenAI API documentation:
@@ -1632,10 +1627,6 @@ type ChatCompletionResponseChunkChoice struct {
 	Delta        *ChatCompletionResponseChunkChoiceDelta `json:"delta,omitzero"`
 	Logprobs     *ChatCompletionChoicesLogprobs          `json:"logprobs,omitzero"`
 	FinishReason ChatCompletionChoicesFinishReason       `json:"finish_reason,omitempty"`
-	// StopReason holds non-standard vendor fields, the raw stop signal reported by
-	// backends such as vLLM: the matched request stop sequence (string) or a stop
-	// token id (number). OpenAI omits this field entirely.
-	StopReason any `json:"stop_reason,omitempty"`
 }
 
 type ChatCompletionChunkChoiceDeltaToolCall struct {
