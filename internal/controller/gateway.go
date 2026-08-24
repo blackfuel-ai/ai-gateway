@@ -592,9 +592,9 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 				}
 
 				backendNamespace := mirrorBR.GetNamespace(aiGatewayRoute.Namespace)
-				backendObj, bsp, err := c.backendWithMaybeBSP(ctx, backendNamespace, mirrorBR.Name)
-				if err != nil {
-					c.logger.Error(err, "failed to get mirror backend or backend security policy. Skipping this mirror.",
+				backendObj, bsp, mirrorErr := c.backendWithMaybeBSP(ctx, backendNamespace, mirrorBR.Name)
+				if mirrorErr != nil {
+					c.logger.Error(mirrorErr, "failed to get mirror backend or backend security policy. Skipping this mirror.",
 						"backend_name", mirrorBR.Name, "aigatewayroute", aiGatewayRoute.Name,
 						"namespace", backendNamespace)
 					continue

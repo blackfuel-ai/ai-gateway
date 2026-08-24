@@ -34,9 +34,9 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # post sticky comment + push fixes if asked
-      pull-requests: write  # post sticky comment + submit PR review
-      issues: read          # read prior comments for previous-review carry-forward
+      contents: write # post sticky comment + push fixes if asked
+      pull-requests: write # post sticky comment + submit PR review
+      issues: read # read prior comments for previous-review carry-forward
 
     steps:
       - name: Run Claudish code review
