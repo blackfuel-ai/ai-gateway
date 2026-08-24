@@ -874,7 +874,7 @@ func TestNamedBucketsAreIdentifiedByName(t *testing.T) {
 			}},
 			Quota: aigv1a1.QuotaValue{
 				Limit: 100, Duration: "1m",
-				DynamicOverride: &aigv1a1.QuotaLimitOverride{FromHeader: "x-bf-subscription-quota-output-tpm"},
+				DynamicOverride: &aigv1a1.QuotaLimitOverride{FromHeader: "x-bf-ratelimit-sub-outtok-1m"},
 			},
 		}
 	}

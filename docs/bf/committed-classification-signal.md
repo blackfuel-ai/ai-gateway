@@ -18,14 +18,16 @@ override-header prefix, both expressed in an ordinary `QuotaPolicy` bucket rule.
 
 A bucket's name and its override header are two different vocabularies. The name
 is the signal's vocabulary, chosen for what a recorded outcome should say; the
-header follows whatever grammar the upstream authorization component uses to
-stamp limits. The pairing is the contract between the two. The worked example:
+header follows the upstream authorization component's grammar,
+`<prefix>-ratelimit-<scope>-<attrib>-<period>`: an explicit scope segment, an
+attribute, and a period suffix that alone says what the mechanism needs to know.
+The pairing is the contract between the two. The worked example, scope `sub`:
 
-| Bucket name                    | Override header                  | Counts                              |
-| ------------------------------ | -------------------------------- | ----------------------------------- |
-| `subscription-global`          | `<prefix>-subscription-req-1m`    | requests                            |
-| `subscription-fresh-input-tpm` | `<prefix>-subscription-intok-1m`  | input tokens, cached input excluded |
-| `subscription-output-tpm`      | `<prefix>-subscription-outtok-1m` | output tokens                       |
+| Bucket name                    | Override header                    | Counts                              |
+| ------------------------------ | ---------------------------------- | ----------------------------------- |
+| `subscription-global`          | `<prefix>-ratelimit-sub-req-1m`    | requests                            |
+| `subscription-fresh-input-tpm` | `<prefix>-ratelimit-sub-intok-1m`  | input tokens, cached input excluded |
+| `subscription-output-tpm`      | `<prefix>-ratelimit-sub-outtok-1m` | output tokens                       |
 
 Selector and overrides alike are stamped by a trusted upstream component and
 stripped before the request leaves the gateway; a client-supplied value must

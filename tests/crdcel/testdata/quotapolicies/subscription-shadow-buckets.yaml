@@ -18,9 +18,10 @@
 # A bucket's name and its override header are two different vocabularies and do
 # not have to read alike. The names are the signal's vocabulary, chosen for what
 # a recorded outcome should say; the headers follow the authorization service's
-# existing x-bf-*-quota-<metric>-<window> grammar. The pairing below is the
-# contract — the global bucket counts requests, so it is fed by the req header
-# and carries the Requests cost metric.
+# x-bf-ratelimit-<scope>-<attrib>-<period> grammar, in which the scope segment
+# is explicit ("sub" here) and the period suffix alone says what the mechanism
+# needs to know. The pairing below is the contract — the global bucket counts
+# requests, so it is fed by the req header and carries the Requests cost metric.
 #
 # The fresh-input bucket subtracts cached input rather than charging
 # input_tokens: that variable maps to the provider's prompt-token count, which
@@ -59,7 +60,7 @@ spec:
               duration: 1m
               costMetric: Requests
               dynamicOverride:
-                fromHeader: x-bf-subscription-quota-req-1m
+                fromHeader: x-bf-ratelimit-sub-req-1m
           - name: subscription-fresh-input-tpm
             shadowMode: true
             clientSelectors:
@@ -71,7 +72,7 @@ spec:
               duration: 1m
               costExpression: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
               dynamicOverride:
-                fromHeader: x-bf-subscription-quota-intok-1m
+                fromHeader: x-bf-ratelimit-sub-intok-1m
           - name: subscription-output-tpm
             shadowMode: true
             clientSelectors:
@@ -83,4 +84,4 @@ spec:
               duration: 1m
               costExpression: output_tokens
               dynamicOverride:
-                fromHeader: x-bf-subscription-quota-outtok-1m
+                fromHeader: x-bf-ratelimit-sub-outtok-1m
