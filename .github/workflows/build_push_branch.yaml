@@ -4,17 +4,17 @@ on:
   push:
     branches:
       - bf/v0.7
+      - bf/v1.1
   workflow_dispatch:
     inputs:
       tag_suffix:
-        description: 'Override bf tag suffix (e.g. "2" produces v0.7.0+bf2). Omit to auto-increment from latest tag.'
+        description: 'Override bf tag suffix (e.g. "2" produces <base>+bf2, where <base> derives from the branch: bf/v1.1 -> v1.1.0). Omit to auto-increment from latest tag.'
         required: false
         type: string
 
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/ai-gateway
-  BASE_VERSION: "0.7.0"
 
 jobs:
   resolve_version:
@@ -32,12 +32,20 @@ jobs:
 
       - name: Resolve tag
         id: version
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
+          # Derive the base version from the trunk branch name: bf/vX.Y -> X.Y.0.
+          if [[ ! "$BRANCH" =~ ^bf/v[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported ref '$BRANCH': expected a bf/vX.Y trunk branch" >&2
+            exit 1
+          fi
+          BASE_VERSION="${BRANCH#bf/v}.0"
           if [[ -n "${{ inputs.tag_suffix }}" ]]; then
             SUFFIX="${{ inputs.tag_suffix }}"
           else
-            # Find latest v0.7.0+bf* git tag and increment
-            LAST=$(git tag --list "v${{ env.BASE_VERSION }}+bf*" --sort=-v:refname | head -1)
+            # Find latest v<base>+bf* git tag and increment
+            LAST=$(git tag --list "v${BASE_VERSION}+bf*" --sort=-v:refname | head -1)
             if [[ -z "$LAST" ]]; then
               SUFFIX=1
             else
@@ -48,9 +56,9 @@ jobs:
           # git tag uses + (semver build metadata)
           # OCI/Docker tag uses - (Docker does not support +)
           echo "suffix=${SUFFIX}" >> $GITHUB_OUTPUT
-          echo "git_tag=v${{ env.BASE_VERSION }}+bf${SUFFIX}" >> $GITHUB_OUTPUT
-          echo "oci_tag=v${{ env.BASE_VERSION }}-bf${SUFFIX}" >> $GITHUB_OUTPUT
-          echo "Resolved: git=v${{ env.BASE_VERSION }}+bf${SUFFIX} oci=v${{ env.BASE_VERSION }}-bf${SUFFIX}"
+          echo "git_tag=v${BASE_VERSION}+bf${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "oci_tag=v${BASE_VERSION}-bf${SUFFIX}" >> $GITHUB_OUTPUT
+          echo "Resolved: git=v${BASE_VERSION}+bf${SUFFIX} oci=v${BASE_VERSION}-bf${SUFFIX}"
 
   docker_builds:
     name: ${{ matrix.command_name }}
