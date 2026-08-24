@@ -116,3 +116,25 @@ func TestQuotaBucketExpressions(t *testing.T) {
 		require.Equal(t, uint64(42), v)
 	})
 }
+
+// TestFreshInputCostExpression pins the expression the committed-subscription
+// fresh-input bucket is charged by. Cached input is free, and the guard is
+// load-bearing: these counters are unsigned, so a runtime that reports more
+// cached input than input would make a bare subtraction wrap to an enormous
+// number and exhaust the bucket on a single request.
+func TestFreshInputCostExpression(t *testing.T) {
+	const expr = "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+	prog, err := NewProgram(expr)
+	require.NoError(t, err)
+
+	eval := func(input, cached uint32) uint64 {
+		v, err := EvaluateProgram(prog, "m", "b", "r", input, cached, 0, 0, 0, 0)
+		require.NoError(t, err)
+		return v
+	}
+
+	require.Equal(t, uint64(700), eval(1000, 300), "cached input is not charged")
+	require.Equal(t, uint64(1000), eval(1000, 0), "no cache hit charges the full input")
+	require.Equal(t, uint64(0), eval(1000, 1000), "a fully cached prompt is free")
+	require.Equal(t, uint64(0), eval(300, 1000), "cached above input floors at zero, never wraps")
+}

@@ -50,8 +50,8 @@ func TestBackendNameFromDomain(t *testing.T) {
 }
 
 func TestBucketRuleDescriptorKey(t *testing.T) {
-	require.Equal(t, "rule-0-match-0", BucketRuleDescriptorKey(0, 0, "", ""))
-	require.Equal(t, "rule-2-match-1", BucketRuleDescriptorKey(2, 1, "", ""))
+	require.Equal(t, "rule-0-match-0", BucketRuleDescriptorKey(BucketID(nil, 0), 0, "", ""))
+	require.Equal(t, "rule-2-match-1", BucketRuleDescriptorKey(BucketID(nil, 2), 1, "", ""))
 }
 
 func TestDefaultBucketDescriptorKey(t *testing.T) {
@@ -237,7 +237,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 		rule := &aigv1a1.QuotaRule{
 			Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 		require.Equal(t, "rule-0-match-0", descs[0].Key)
@@ -257,7 +257,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			},
 			Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 		require.Equal(t, "rule-0-x-api-key-match-0", descs[0].Key)
@@ -277,7 +277,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			},
 			Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 
@@ -311,7 +311,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			},
 			Quota: aigv1a1.QuotaValue{Limit: 50, Duration: "1h"},
 		}
-		descs, err := buildBucketRuleDescriptors(1, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 1), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 
@@ -339,7 +339,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			Quota:      aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 			ShadowMode: ptr.To(true),
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 		require.True(t, descs[0].ShadowMode)
@@ -350,7 +350,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			Quota:      aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 			ShadowMode: ptr.To(false),
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 		require.False(t, descs[0].ShadowMode)
@@ -360,7 +360,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 		rule := &aigv1a1.QuotaRule{
 			Quota: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 		require.False(t, descs[0].ShadowMode)
@@ -374,7 +374,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			Quota:      aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 			ShadowMode: ptr.To(true),
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 		// Shadow mode only on leaf.
@@ -394,10 +394,10 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			},
 			Quota: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
-		require.Equal(t, BucketRuleDescriptorKey(0, 0, "x-user-id", ""), descs[0].Key)
+		require.Equal(t, BucketRuleDescriptorKey(BucketID(nil, 0), 0, "x-user-id", ""), descs[0].Key)
 		require.Empty(t, descs[0].Value) // key-only: matches any value
 		require.NotNil(t, descs[0].RateLimit)
 	})
@@ -413,10 +413,10 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			},
 			Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
-		descs, err := buildBucketRuleDescriptors(0, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
-		key := BucketRuleDescriptorKey(0, 0, "x-api-key", "premium")
+		key := BucketRuleDescriptorKey(BucketID(nil, 0), 0, "x-api-key", "premium")
 		require.Equal(t, key, descs[0].Key)
 		require.Equal(t, key, descs[0].Value) // fixed value matches HeaderValueMatch DescriptorValue
 	})
@@ -431,19 +431,19 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 			},
 			Quota: aigv1a1.QuotaValue{Limit: 75, Duration: "1h"},
 		}
-		descs, err := buildBucketRuleDescriptors(2, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 2), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 
 		// Root: x-tier sorted first (match-0), exact → key+value.
-		require.Equal(t, BucketRuleDescriptorKey(2, 0, "x-tier", "premium"), descs[0].Key)
-		require.Equal(t, BucketRuleDescriptorKey(2, 0, "x-tier", "premium"), descs[0].Value)
+		require.Equal(t, BucketRuleDescriptorKey(BucketID(nil, 2), 0, "x-tier", "premium"), descs[0].Key)
+		require.Equal(t, BucketRuleDescriptorKey(BucketID(nil, 2), 0, "x-tier", "premium"), descs[0].Value)
 		require.Nil(t, descs[0].RateLimit)
 		require.Len(t, descs[0].Descriptors, 1)
 
 		// Leaf: x-user-id sorted second (match-1), distinct → key-only.
 		leaf := descs[0].Descriptors[0]
-		require.Equal(t, BucketRuleDescriptorKey(2, 1, "x-user-id", ""), leaf.Key)
+		require.Equal(t, BucketRuleDescriptorKey(BucketID(nil, 2), 1, "x-user-id", ""), leaf.Key)
 		require.Empty(t, leaf.Value)
 		require.NotNil(t, leaf.RateLimit)
 	})
@@ -452,7 +452,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 		rule := &aigv1a1.QuotaRule{
 			Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "bad"},
 		}
-		_, err := buildBucketRuleDescriptors(0, rule)
+		_, err := buildBucketRuleDescriptors(BucketID(nil, 0), rule)
 		require.Error(t, err)
 	})
 
@@ -460,7 +460,7 @@ func TestBuildBucketRuleDescriptors(t *testing.T) {
 		rule := &aigv1a1.QuotaRule{
 			Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
-		descs, err := buildBucketRuleDescriptors(5, rule)
+		descs, err := buildBucketRuleDescriptors(BucketID(nil, 5), rule)
 		require.NoError(t, err)
 		require.Len(t, descs, 1)
 		require.Equal(t, "rule-5-match-0", descs[0].Key)
@@ -849,10 +849,69 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 }
 
 func TestQuotaCostMetadataKeyHelpers(t *testing.T) {
-	require.Equal(t, "rule-0", QuotaCostRuleBucketKey(0))
-	require.Equal(t, "rule-7", QuotaCostRuleBucketKey(7))
+	require.Equal(t, "rule-0", QuotaCostRuleBucketKey(BucketID(nil, 0)))
+	require.Equal(t, "rule-7", QuotaCostRuleBucketKey(BucketID(nil, 7)))
 	require.Equal(t, "default", QuotaCostDefaultBucketKey())
-	require.Equal(t, "quota_cost_rule-3", QuotaCostMetadataKey(QuotaCostRuleBucketKey(3)))
+	require.Equal(t, "quota_cost_rule-3", QuotaCostMetadataKey(QuotaCostRuleBucketKey(BucketID(nil, 3))))
 	require.Equal(t, "quota_cost_default", QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
-	require.NotEqual(t, QuotaCostMetadataKey(QuotaCostRuleBucketKey(0)), QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
+	require.NotEqual(t, QuotaCostMetadataKey(QuotaCostRuleBucketKey(BucketID(nil, 0))), QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
+}
+
+func TestBucketID(t *testing.T) {
+	require.Equal(t, "rule-2", BucketID(nil, 2))
+	require.Equal(t, "rule-2", BucketID(ptr.To(""), 2))
+	require.Equal(t, "subscription-output-tpm", BucketID(ptr.To("subscription-output-tpm"), 2))
+}
+
+func TestNamedBucketsAreIdentifiedByName(t *testing.T) {
+	distinct := egv1a1.HeaderMatchDistinct
+	subscriptionRule := func(name string) aigv1a1.QuotaRule {
+		return aigv1a1.QuotaRule{
+			Name:       ptr.To(name),
+			ShadowMode: ptr.To(true),
+			ClientSelectors: []egv1a1.RateLimitSelectCondition{{
+				Headers: []egv1a1.HeaderMatch{{Name: "x-bf-subscription-id", Type: &distinct}},
+			}},
+			Quota: aigv1a1.QuotaValue{
+				Limit: 100, Duration: "1m",
+				DynamicOverride: &aigv1a1.QuotaLimitOverride{FromHeader: "x-bf-ratelimit-sub-outtok-1m"},
+			},
+		}
+	}
+
+	t.Run("descriptor key and cost key carry the name", func(t *testing.T) {
+		descs, err := buildBucketRuleDescriptors(BucketID(ptr.To("subscription-output-tpm"), 1), ptr.To(subscriptionRule("subscription-output-tpm")))
+		require.NoError(t, err)
+		require.Len(t, descs, 1)
+		require.Equal(t, "subscription-output-tpm-x-bf-subscription-id-match-0", descs[0].Key)
+		// Distinct match: the value is the per-request header value, so the
+		// config carries no fixed value.
+		require.Empty(t, descs[0].Value)
+		require.True(t, descs[0].ShadowMode, "a classifying bucket must never reject")
+		require.Equal(t, "subscription-output-tpm", descs[0].RateLimit.Name,
+			"the rendered limit carries the bucket name the outcome is reported against")
+		require.Equal(t, "quota_cost_subscription-output-tpm",
+			QuotaCostMetadataKey(QuotaCostRuleBucketKey(BucketID(ptr.To("subscription-output-tpm"), 1))))
+	})
+
+	t.Run("a rule inserted above a named bucket does not change its key", func(t *testing.T) {
+		named := subscriptionRule("subscription-output-tpm")
+		before := BucketID(named.Name, 0)
+		after := BucketID(named.Name, 5)
+		require.Equal(t, before, after)
+	})
+
+	t.Run("duplicate bucket identifiers are rejected", func(t *testing.T) {
+		_, _, err := buildPerModelDescriptorKeyed("kimi-k3", &aigv1a1.QuotaDefinition{
+			BucketRules: []aigv1a1.QuotaRule{subscriptionRule("subscription-global"), subscriptionRule("subscription-global")},
+		}, "")
+		require.ErrorContains(t, err, `duplicate bucket identifier "subscription-global"`)
+	})
+
+	t.Run("a name colliding with the default cost bucket is rejected", func(t *testing.T) {
+		_, _, err := buildPerModelDescriptorKeyed("kimi-k3", &aigv1a1.QuotaDefinition{
+			BucketRules: []aigv1a1.QuotaRule{subscriptionRule("default")},
+		}, "")
+		require.ErrorContains(t, err, `duplicate bucket identifier "default"`)
+	})
 }

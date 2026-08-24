@@ -129,8 +129,20 @@ const (
 	QuotaBucketModeShared QuotaBucketMode = "Shared"
 )
 
-// +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.dynamicOverride))",message="dynamicOverride cannot be combined with shadowMode"
 type QuotaRule struct {
+	// Name is this bucket's stable identifier. It is the token that prefixes the
+	// rule's rendered rate limit descriptor keys, so an outcome reported for the
+	// bucket names the bucket rather than its position in BucketRules: inserting
+	// or reordering rules does not change what a previously recorded outcome
+	// refers to. When unset the bucket is identified by its position ("rule-N").
+	//
+	// Must be unique within a QuotaDefinition, and must not collide with the
+	// positional form of another bucket in the same definition.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name *string `json:"name,omitempty"`
 	// ClientSelectors holds the list of conditions to select
 	// specific clients using attributes from the traffic flow.
 	// All individual select conditions must hold True for this rule
@@ -153,6 +165,11 @@ type QuotaRule struct {
 	// When enabled, all quota checks are performed (cache lookups,
 	// counter updates, telemetry generation), but the outcome is never enforced.
 	// The request always succeeds, even if the configured quota is exceeded.
+	//
+	// A shadow bucket may carry a DynamicOverride: the override supplies the
+	// bucket's per-request limit value, while shadow mode decides that exceeding
+	// it does not reject. The pair is what makes a bucket classify traffic as
+	// in-budget or over-budget without ever returning 429.
 	//
 	// +optional
 	ShadowMode *bool `json:"shadowMode,omitempty"`

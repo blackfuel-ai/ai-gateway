@@ -2439,6 +2439,11 @@ QuotaPolicyStatus contains the conditions by the reconciliation result.
 
 
 <ApiField
+  name="name"
+  type="string"
+  required="false"
+  description="Name is this bucket's stable identifier. It is the token that prefixes the<br />rule's rendered rate limit descriptor keys, so an outcome reported for the<br />bucket names the bucket rather than its position in BucketRules: inserting<br />or reordering rules does not change what a previously recorded outcome<br />refers to. When unset the bucket is identified by its position (`rule-N`).<br />Must be unique within a QuotaDefinition, and must not collide with the<br />positional form of another bucket in the same definition."
+/><ApiField
   name="clientSelectors"
   type="RateLimitSelectCondition array"
   required="false"
@@ -2452,7 +2457,7 @@ QuotaPolicyStatus contains the conditions by the reconciliation result.
   name="shadowMode"
   type="boolean"
   required="false"
-  description="ShadowMode indicates whether this quota rule runs in shadow mode.<br />When enabled, all quota checks are performed (cache lookups,<br />counter updates, telemetry generation), but the outcome is never enforced.<br />The request always succeeds, even if the configured quota is exceeded."
+  description="ShadowMode indicates whether this quota rule runs in shadow mode.<br />When enabled, all quota checks are performed (cache lookups,<br />counter updates, telemetry generation), but the outcome is never enforced.<br />The request always succeeds, even if the configured quota is exceeded.<br />A shadow bucket may carry a DynamicOverride: the override supplies the<br />bucket's per-request limit value, while shadow mode decides that exceeding<br />it does not reject. The pair is what makes a bucket classify traffic as<br />in-budget or over-budget without ever returning 429."
 />
 
 
