@@ -35,7 +35,6 @@ import (
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	"sigs.k8s.io/yaml"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller"
@@ -854,6 +853,13 @@ func TestGatewayConfigAnnotationChangePropagation(t *testing.T) {
 		EnableLeaderElection:   false,
 		DisableMutatingWebhook: true,
 		ExtProcMaxRecvMsgSize:  512 * 1024 * 1024,
+		// Match the test's own gateway namespace ("default", set below): production
+		// always defaults this to a real namespace (cmd/controller's envoyGatewayNamespace
+		// flag defaults to "envoy-gateway-system"), so leaving it empty here spuriously
+		// adds a second, mismatched candidate namespace to listPodsDeploymentsDaemonSets'
+		// gateway-labeled-object discovery, which client-go/envtest interpret as "all
+		// namespaces" and re-match the same Pod, tripping the multi-namespace guard.
+		EnvoyGatewayNamespace: "default",
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: controller.Scheme,
@@ -919,9 +925,22 @@ func TestGatewayConfigAnnotationChangePropagation(t *testing.T) {
 		if getErr != nil {
 			return false, false
 		}
-		var fc filterapi.Config
-		// On a real apiserver, StringData is write-only; read back from Data.
-		if uErr := yaml.Unmarshal(s.Data[controller.FilterConfigKeyInSecret], &fc); uErr != nil {
+		indexRaw, ok := s.Data[controller.FilterConfigBundleIndexKey]
+		if !ok {
+			return false, false
+		}
+		index, uErr := filterapi.UnmarshalConfigBundleIndex(indexRaw)
+		if uErr != nil {
+			return false, false
+		}
+		fc, rErr := filterapi.ReassembleBundleConfig(index, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+			partSecret, getErr := kube.CoreV1().Secrets(ns).Get(ctx, part.Name, metav1.GetOptions{})
+			if getErr != nil {
+				return nil, getErr
+			}
+			return partSecret.Data[controller.FilterConfigBundlePartKey], nil
+		})
+		if rErr != nil {
 			return false, false
 		}
 		return true, fc.EmitErrorMetadata

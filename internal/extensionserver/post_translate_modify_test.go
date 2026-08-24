@@ -845,7 +845,7 @@ func Test_buildMirrorEndpointCopyFilter_copiesWithoutRemovingSource(t *testing.T
 }
 
 func Test_patchListenerWithInferencePoolFilters_sharedPool(t *testing.T) {
-	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "", 0, false)
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
 	require.NoError(t, err)
 
 	sharedPool := &gwaiev1.InferencePool{
