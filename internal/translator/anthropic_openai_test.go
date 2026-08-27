@@ -341,6 +341,63 @@ func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming(t *testing.T) {
 	})
 }
 
+// TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_CachedTokens pins
+// that a non-streaming response reports the cache split the upstream sent. The
+// streaming path reports it through setOpenAIStreamUsage; a non-streaming
+// response that drops it reads downstream as a fully uncached prompt.
+func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_CachedTokens(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	content := "Hello!"
+	openAIResp := openai.ChatCompletionResponse{
+		ID:    "chatcmpl-cache",
+		Model: "gpt-4o",
+		Choices: []openai.ChatCompletionResponseChoice{
+			{
+				FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
+				Message:      openai.ChatCompletionResponseChoiceMessage{Content: &content, Role: "assistant"},
+			},
+		},
+		Usage: openai.Usage{
+			PromptTokens:     1000,
+			CompletionTokens: 20,
+			// An OpenAI upstream counts these inside PromptTokens.
+			PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 900, CacheCreationTokens: 64},
+		},
+	}
+	respBytes, err := json.Marshal(openAIResp)
+	require.NoError(t, err)
+
+	_, _, tokenUsage, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "application/json"},
+		bytes.NewReader(respBytes),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+
+	cached, cachedSet := tokenUsage.CachedInputTokens()
+	require.True(t, cachedSet, "cached input tokens must be reported")
+	assert.Equal(t, uint32(900), cached)
+
+	created, createdSet := tokenUsage.CacheCreationInputTokens()
+	require.True(t, createdSet, "cache creation tokens must be reported")
+	assert.Equal(t, uint32(64), created)
+
+	// The cached count lives inside prompt_tokens, so the input total is the
+	// upstream's prompt_tokens and not prompt_tokens plus the cache counts.
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	require.True(t, inputSet)
+	assert.Equal(t, uint32(1000), inputTokens)
+}
+
 func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
 	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
 
