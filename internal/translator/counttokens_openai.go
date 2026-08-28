@@ -37,6 +37,18 @@ import (
 // meanwhile schemaToFilterAPI coerces an OpenAI schema's prefix to "v1", so
 // honouring the prefix here would emit /v1/tokenize and 404 on every request.
 // NewTokenizeTranslator ignores the prefix for the same reason.
+//
+// Count fidelity: vLLM renders /tokenize through the same
+// online_renderer.preprocess_chat as /v1/chat/completions, with the same chat
+// template, template kwargs and tool_dicts, so the count is what the equivalent
+// request would really consume. Two known divergences, both on vLLM's side:
+//   - Harmony models (model_type == "gpt_oss") render chat completions through
+//     the harmony path, which tokenize's serving code has no branch for, so
+//     counts for those models are approximate.
+//   - tokenize ignores tool_choice, while the chat path drops tools when
+//     tool_choice is "none" and the server runs with
+//     --exclude-tools-when-tool-choice-none. That flag defaults off and we do
+//     not set it, so tools are counted the same on both paths today.
 func NewCountTokensToOpenAITokenizeTranslator(modelNameOverride internalapi.ModelNameOverride) AnthropicCountTokensTranslator {
 	return &countTokensToOpenAITokenizeTranslator{modelNameOverride: modelNameOverride}
 }
