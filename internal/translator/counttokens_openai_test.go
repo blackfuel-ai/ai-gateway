@@ -34,8 +34,6 @@ func TestCountTokensToOpenAITokenize_RequestBody(t *testing.T) {
 		name              string
 		original          string
 		modelNameOverride string
-		prefix            string
-		expPath           string
 		expModel          string
 		expMessages       []string
 		expToolNames      []string
@@ -43,14 +41,12 @@ func TestCountTokensToOpenAITokenize_RequestBody(t *testing.T) {
 		{
 			name:        "messages only",
 			original:    `{"model":"deepseek-ai/DeepSeek-V4-Flash-0731","messages":[{"role":"user","content":"hello"}]}`,
-			expPath:     "/tokenize",
 			expModel:    "deepseek-ai/DeepSeek-V4-Flash-0731",
 			expMessages: []string{"hello"},
 		},
 		{
 			name:        "system prompt is prepended as a system message",
 			original:    `{"model":"m","system":"be brief","messages":[{"role":"user","content":"hello"}]}`,
-			expPath:     "/tokenize",
 			expModel:    "m",
 			expMessages: []string{"be brief", "hello"},
 		},
@@ -58,7 +54,6 @@ func TestCountTokensToOpenAITokenize_RequestBody(t *testing.T) {
 			name: "tools are carried across so they are counted",
 			original: `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
 				`"tools":[{"name":"Bash","description":"run a command","input_schema":{"type":"object"}}]}`,
-			expPath:      "/tokenize",
 			expModel:     "m",
 			expMessages:  []string{"hi"},
 			expToolNames: []string{"Bash"},
@@ -67,33 +62,27 @@ func TestCountTokensToOpenAITokenize_RequestBody(t *testing.T) {
 			name:              "model override",
 			original:          `{"model":"m","messages":[{"role":"user","content":"hello"}]}`,
 			modelNameOverride: "override-model",
-			expPath:           "/tokenize",
 			expModel:          "override-model",
 			expMessages:       []string{"hello"},
-		},
-		{
-			name:        "openai prefix is honoured",
-			original:    `{"model":"m","messages":[{"role":"user","content":"hello"}]}`,
-			prefix:      "openai",
-			expPath:     "/openai/tokenize",
-			expModel:    "m",
-			expMessages: []string{"hello"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var body anthropicschema.CountTokensRequest
 			require.NoError(t, json.Unmarshal([]byte(tc.original), &body))
 
-			translator := NewCountTokensToOpenAITokenizeTranslator(tc.prefix, tc.modelNameOverride)
+			translator := NewCountTokensToOpenAITokenizeTranslator(tc.modelNameOverride)
 			require.NotNil(t, translator)
 
 			headers, newBody, err := translator.RequestBody([]byte(tc.original), &body, false)
 			require.NoError(t, err)
 			require.NotNil(t, newBody)
 
+			// Never prefixed: vLLM serves /tokenize at the root and the extproc
+			// registers it unprefixed, while an OpenAI schema's prefix is coerced
+			// to "v1". /v1/tokenize would 404 on every request.
 			got, ok := headerValue(headers, pathHeaderName)
 			require.Truef(t, ok, "missing header %s", pathHeaderName)
-			assert.Equal(t, tc.expPath, got)
+			assert.Equal(t, "/tokenize", got)
 			// The original-path headers are left to the router phase: they keep the
 			// client's original path, which the upstream filter selects its processor from.
 			for _, key := range []string{internalapi.OriginalPathHeader, internalapi.EnvoyOriginalPathHeader} {
@@ -130,7 +119,7 @@ func TestCountTokensToOpenAITokenize_RequestBody(t *testing.T) {
 }
 
 func TestCountTokensToOpenAITokenize_ResponseBody(t *testing.T) {
-	translator := NewCountTokensToOpenAITokenizeTranslator("", "")
+	translator := NewCountTokensToOpenAITokenizeTranslator("")
 
 	// Prime requestModel so the response model falls back to it: /tokenize
 	// responses carry no model field of their own.
@@ -167,7 +156,7 @@ func TestCountTokensToOpenAITokenize_ResponseBody(t *testing.T) {
 }
 
 func TestCountTokensToOpenAITokenize_ResponseBody_Malformed(t *testing.T) {
-	translator := NewCountTokensToOpenAITokenizeTranslator("", "")
+	translator := NewCountTokensToOpenAITokenizeTranslator("")
 	_, _, _, _, err := translator.ResponseBody(nil, strings.NewReader(`not json`), true, nil)
 	require.ErrorContains(t, err, "failed to unmarshal body")
 }
@@ -191,6 +180,19 @@ func TestCountTokensToOpenAITokenize_ResponseError(t *testing.T) {
 			expMessage: "bad tokenize request",
 		},
 		{
+			// FastAPI's own 404 body. It is JSON but not OpenAI-shaped, so
+			// unmarshalling into openai.Error succeeds with a zero struct —
+			// the client must still get a classified, non-empty error.
+			name: "json body that is not openai-shaped is classified from the status",
+			respHeaders: map[string]string{
+				statusHeaderName:      "404",
+				contentTypeHeaderName: jsonContentType,
+			},
+			body:       `{"detail":"Not Found"}`,
+			expType:    "not_found_error",
+			expMessage: `{"detail":"Not Found"}`,
+		},
+		{
 			name: "a backend without /tokenize answers 404, not a 500",
 			respHeaders: map[string]string{
 				statusHeaderName:      "404",
@@ -212,7 +214,7 @@ func TestCountTokensToOpenAITokenize_ResponseError(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			translator := NewCountTokensToOpenAITokenizeTranslator("", "")
+			translator := NewCountTokensToOpenAITokenizeTranslator("")
 			headers, mutatedBody, errInfo, err := translator.ResponseError(tc.respHeaders, strings.NewReader(tc.body))
 			require.NoError(t, err)
 
