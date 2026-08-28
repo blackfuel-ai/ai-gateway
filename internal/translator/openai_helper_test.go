@@ -1577,3 +1577,95 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ThinkingBlocks(t *testing.T)
 	assert.True(t, hasThinkingDelta, "expected a thinking_delta event")
 	assert.True(t, hasSignatureDelta, "expected a signature_delta event")
 }
+
+// TestAppendAnthropicAssistantMessage_ToolUseArgumentsAreByteStable pins the
+// serialisation of a replayed tool_use block.
+//
+// A conversation replays every historical tool call on every turn. If the
+// arguments JSON is re-ordered between requests the rendered prompt diverges at
+// the first tool call and never re-converges, so the backend re-prefills the
+// whole conversation body instead of reusing its prefix cache.
+//
+// Assert on the raw string, not with JSONEq or Contains: both are order
+// insensitive and would pass over the exact bug this guards.
+func TestAppendAnthropicAssistantMessage_ToolUseArgumentsAreByteStable(t *testing.T) {
+	msg := anthropic.MessageParam{
+		Role: anthropic.MessageRoleAssistant,
+		Content: anthropic.MessageContent{
+			Array: []anthropic.ContentBlockParam{
+				{ToolUse: &anthropic.ToolUseBlockParam{
+					Type: "tool_use", ID: "tool-1", Name: "Write",
+					Input: map[string]any{
+						"file_path": "/tmp/a.txt",
+						"content":   "hello",
+						"offset":    float64(1),
+						"limit":     float64(2),
+						"replace":   true,
+					},
+				}},
+			},
+		},
+	}
+
+	const want = `{"content":"hello","file_path":"/tmp/a.txt","limit":2,"offset":1,"replace":true}`
+	// Map order is randomised per range, so a single call can match by luck.
+	// Repeat enough that a regression is caught with near certainty.
+	for i := 0; i < 200; i++ {
+		msgs := appendAnthropicAssistantMessage(nil, msg)
+		require.Len(t, msgs, 1)
+		require.NotNil(t, msgs[0].OfAssistant)
+		require.Len(t, msgs[0].OfAssistant.ToolCalls, 1)
+		//nolint:testifylint // JSONEq is order-insensitive; byte equality is the property under test.
+		require.Equal(t, want, msgs[0].OfAssistant.ToolCalls[0].Function.Arguments,
+			"tool call arguments must be byte-stable (iteration %d)", i)
+	}
+}
+
+// TestAnthropicToolsToOpenAI_PreservesGivenOrder makes "someone sorted the tools
+// array" a red build.
+//
+// Clients append newly loaded tools to the end, which is already optimal for
+// prefix caching: every previously sent tool keeps its byte position, so only
+// the tail is recomputed. Sorting would insert new tools into the middle and
+// collapse the common prefix to zero on every load event.
+func TestAnthropicToolsToOpenAI_PreservesGivenOrder(t *testing.T) {
+	in := []anthropic.ToolUnion{
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Write"}},
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Bash"}},
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Read"}},
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Edit"}},
+	}
+
+	got := anthropicToolsToOpenAI(in)
+	require.Len(t, got, 4)
+	names := make([]string, 0, len(got))
+	for _, tool := range got {
+		names = append(names, tool.Function.Name)
+	}
+	assert.Equal(t, []string{"Write", "Bash", "Read", "Edit"}, names)
+}
+
+// TestAnthropicToolsToOpenAI_SchemaBytesVerbatim asserts the input schema reaches
+// the backend byte-for-byte.
+//
+// anthropic.Tool.InputSchema is a json.RawMessage aliased to sonic's
+// NoCopyRawMessage, so it is a sub-slice of the original request body and is
+// spliced back out unchanged. The existing "schema reaches the backend as sent"
+// case uses JSONEq, which is order insensitive and would still pass if the
+// schema were round-tripped through a map. This one would not.
+func TestAnthropicToolsToOpenAI_SchemaBytesVerbatim(t *testing.T) {
+	// Deliberately non-canonical: unsorted keys and interior whitespace.
+	const schema = `{"required":["b"],"type":"object","properties":{"b": {"type":"string"},"a":{"type":"number"}},"additionalProperties":false}`
+
+	var tool anthropic.ToolUnion
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"custom","name":"t","input_schema":`+schema+`}`), &tool))
+	require.NotNil(t, tool.Tool)
+
+	got := anthropicToolsToOpenAI([]anthropic.ToolUnion{tool})
+	require.Len(t, got, 1)
+
+	encoded, err := json.Marshal(got[0].Function.Parameters)
+	require.NoError(t, err)
+	//nolint:testifylint // JSONEq is order-insensitive; byte equality is the property under test.
+	assert.Equal(t, schema, string(encoded))
+}
