@@ -328,6 +328,23 @@ func anthropicContentToText(content anthropic.MessageContent) string {
 
 // anthropicToolsToOpenAI converts Anthropic custom tools to OpenAI function tools.
 // Only ToolUnion entries with a custom Tool variant are converted; built-in tool types are skipped.
+//
+// The given order is passed through untouched, and must stay that way. Backends
+// render the tool declarations at the front of the prompt, so their serialisation
+// is the head of the cacheable prefix. Clients append newly loaded tools to the
+// end, which is already optimal: every tool sent before keeps its byte position
+// and only the tail has to be re-prefilled. Sorting or otherwise normalising the
+// array would insert new tools into the middle and collapse the common prefix to
+// zero on every tool-load event, turning a bounded cost into a full re-prefill of
+// the whole conversation. TestAnthropicToolsToOpenAI_PreservesGivenOrder guards this.
+//
+// InputSchema is a RawMessage sub-slice of the original request body and is
+// spliced back out verbatim, which is what keeps the block byte-identical between
+// requests.
+//
+// TODO: provider-native tools (bash, text editor, web search) and union members
+// whose type did not parse are silently dropped here. Pre-existing behaviour; the
+// tools_dropped access-log field makes it visible in the meantime.
 func anthropicToolsToOpenAI(tools []anthropic.ToolUnion) []openai.Tool {
 	if len(tools) == 0 {
 		return nil

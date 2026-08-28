@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"strconv"
+	"strings"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -2796,4 +2797,99 @@ func TestBuildContentLengthDynamicMetadataOnRequest_rendersDigits(t *testing.T) 
 		require.NotNil(t, v)
 		require.Equal(t, strconv.Itoa(contentLength), v.GetStringValue())
 	}
+}
+
+// Test_messagesProcessor_ToolsDigestDynamicMetadata walks the whole path the
+// diagnostic takes: the router filter fingerprints the tools while parsing the
+// body, and the upstream filter emits that fingerprint as dynamic metadata for
+// the access log.
+func Test_messagesProcessor_ToolsDigestDynamicMetadata(t *testing.T) {
+	toolsFields := func(t *testing.T, rawBody []byte) map[string]*structpb.Value {
+		t.Helper()
+		headers := map[string]string{
+			":path":                               "/v1/messages",
+			internalapi.ModelNameHeaderKeyDefault: "claude-3",
+		}
+		r := &messagesProcessorRouterFilter{
+			eh:             endpointspec.MessagesEndpointSpec{},
+			config:         &filterapi.RuntimeConfig{},
+			requestHeaders: headers,
+			logger:         slog.Default(),
+			tracer: tracingapi.NoopTracer[anthropicschema.MessagesRequest,
+				anthropicschema.MessagesResponse, anthropicschema.MessagesStreamChunk]{},
+		}
+		_, err := r.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: rawBody})
+		require.NoError(t, err)
+
+		p := &messagesProcessorUpstreamFilter{requestHeaders: headers, metrics: &mockMetrics{}}
+		require.NoError(t, p.SetBackend(t.Context(), &filterapi.RuntimeBackend{
+			Backend: &filterapi.Backend{
+				Name:   "vllm",
+				Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI},
+			},
+		}, "test-route", r))
+
+		resp, err := p.ProcessRequestHeaders(t.Context(), nil)
+		require.NoError(t, err)
+		return resp.DynamicMetadata.
+			GetFields()[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().GetFields()
+	}
+
+	const tool = `{"type":"custom","name":%q,"description":"d",` +
+		`"input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}`
+	requestWith := func(names ...string) []byte {
+		tools := make([]string, 0, len(names))
+		for _, n := range names {
+			tools = append(tools, fmt.Sprintf(tool, n))
+		}
+		return []byte(`{"model":"claude-3","max_tokens":10,` +
+			`"messages":[{"role":"user","content":"hi"}],` +
+			`"tools":[` + strings.Join(tools, ",") + `]}`)
+	}
+
+	t.Run("emitted alongside the existing metadata", func(t *testing.T) {
+		fields := toolsFields(t, requestWith("Write", "Read"))
+		require.Equal(t, "2", fields["tools_count"].GetStringValue())
+		require.Equal(t, "0", fields["tools_dropped"].GetStringValue())
+		require.Len(t, fields["tools_fp"].GetStringValue(), contentHashLen)
+		// The pre-existing backend metadata must survive the merge.
+		require.Equal(t, "vllm", fields["backend_name"].GetStringValue())
+	})
+
+	t.Run("appending a tool leaves the prefix identifiable", func(t *testing.T) {
+		before := toolsFields(t, requestWith("Write", "Read"))
+		after := toolsFields(t, requestWith("Write", "Read", "Bash"))
+
+		require.Equal(t, "3", after["tools_count"].GetStringValue())
+		require.NotEqual(t, before["tools_fp"].GetStringValue(), after["tools_fp"].GetStringValue())
+		// This equality is what tells an operator "the client appended, nothing
+		// else moved" rather than "something rewrote the tool set".
+		require.Equal(t, before["tools_fp"].GetStringValue(), after["tools_prefix_fp"].GetStringValue())
+	})
+
+	t.Run("a request without tools reports zero, not absent", func(t *testing.T) {
+		fields := toolsFields(t, []byte(`{"model":"claude-3","max_tokens":10,`+
+			`"messages":[{"role":"user","content":"hi"}]}`))
+		require.Equal(t, "0", fields["tools_count"].GetStringValue())
+		require.NotContains(t, fields, "tools_fp")
+	})
+}
+
+// Test_chatCompletionProcessor_NoToolsDigestDynamicMetadata pins that the digest
+// is a no-op for endpoints it does not apply to: the type assertion in the router
+// filter must not fire, and no tools_* fields may appear.
+func Test_chatCompletionProcessor_NoToolsDigestDynamicMetadata(t *testing.T) {
+	headers := map[string]string{":path": "/v1/chat/completions", internalapi.ModelNameHeaderKeyDefault: "some-model"}
+	r := &chatCompletionProcessorRouterFilter{
+		config:         &filterapi.RuntimeConfig{},
+		requestHeaders: headers,
+		logger:         slog.Default(),
+		tracer: tracingapi.NoopTracer[openai.ChatCompletionRequest,
+			openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+	}
+	_, err := r.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, "some-model", false, nil)})
+	require.NoError(t, err)
+
+	require.False(t, r.toolsDigest.present)
+	require.Nil(t, buildToolsDigestDynamicMetadata(r.toolsDigest))
 }
