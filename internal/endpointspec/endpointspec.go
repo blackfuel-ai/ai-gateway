@@ -467,7 +467,7 @@ func (MessagesCountTokensEndpointSpec) GetTranslator(schema filterapi.VersionedA
 		// request to a self-served OpenAI-schema model fails translator
 		// construction and Envoy answers 500, even though /v1/messages to the
 		// same backend translates fine.
-		return translator.NewCountTokensToOpenAITokenizeTranslator(schema.OpenAIPrefix(), modelNameOverride), nil
+		return translator.NewCountTokensToOpenAITokenizeTranslator(modelNameOverride), nil
 	default:
 		return nil, fmt.Errorf("unsupported API schema for /v1/messages/count_tokens: backend=%s", schema)
 	}

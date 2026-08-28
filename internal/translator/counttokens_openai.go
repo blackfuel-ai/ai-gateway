@@ -9,7 +9,6 @@ import (
 	"cmp"
 	"fmt"
 	"io"
-	"path"
 	"strconv"
 	"strings"
 
@@ -32,11 +31,14 @@ import (
 // tokenizer, so a backend that does not implement it answers 404 and the client
 // sees a not_found_error instead of a count. That is intentional: the alternative
 // for such a backend is no count at all.
-func NewCountTokensToOpenAITokenizeTranslator(prefix string, modelNameOverride internalapi.ModelNameOverride) AnthropicCountTokensTranslator {
-	return &countTokensToOpenAITokenizeTranslator{
-		modelNameOverride: modelNameOverride,
-		path:              path.Join("/", prefix, "tokenize"),
-	}
+//
+// The path is deliberately NOT prefixed with the backend's OpenAI prefix. vLLM
+// serves /tokenize at the server root, and the extproc registers it unprefixed;
+// meanwhile schemaToFilterAPI coerces an OpenAI schema's prefix to "v1", so
+// honouring the prefix here would emit /v1/tokenize and 404 on every request.
+// NewTokenizeTranslator ignores the prefix for the same reason.
+func NewCountTokensToOpenAITokenizeTranslator(modelNameOverride internalapi.ModelNameOverride) AnthropicCountTokensTranslator {
+	return &countTokensToOpenAITokenizeTranslator{modelNameOverride: modelNameOverride}
 }
 
 type countTokensToOpenAITokenizeTranslator struct {
@@ -44,8 +46,6 @@ type countTokensToOpenAITokenizeTranslator struct {
 	// requestModel is the fallback response model: the /tokenize response body
 	// carries no model field, so without this metrics and tracing would record none.
 	requestModel internalapi.RequestModel
-	// path is the tokenize endpoint path used for routing the request.
-	path string
 }
 
 // RequestBody implements [AnthropicCountTokensTranslator.RequestBody].
@@ -82,7 +82,7 @@ func (t *countTokensToOpenAITokenizeTranslator) RequestBody(_ []byte, body *anth
 	}
 
 	newHeaders = []internalapi.Header{
-		{pathHeaderName, t.path},
+		{pathHeaderName, openAITokenizePath},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
 		// Keep the original-path headers consistent with the rewritten :path. A
 		// downstream extproc upstream filter selects its processor by
@@ -90,8 +90,8 @@ func (t *countTokensToOpenAITokenizeTranslator) RequestBody(_ []byte, body *anth
 		// a two-tier deployment the second gateway must resolve the translated
 		// /tokenize path, not the client's original /v1/messages/count_tokens —
 		// otherwise the second tier returns "unsupported path".
-		{internalapi.OriginalPathHeader, t.path},
-		{internalapi.EnvoyOriginalPathHeader, t.path},
+		{internalapi.OriginalPathHeader, openAITokenizePath},
+		{internalapi.EnvoyOriginalPathHeader, openAITokenizePath},
 	}
 	return
 }
@@ -146,14 +146,28 @@ func (t *countTokensToOpenAITokenizeTranslator) ResponseError(respHeaders map[st
 		if err = json.Unmarshal(buf, &openaiErr); err != nil {
 			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to unmarshal OpenAI error body: %w", err)
 		}
-		anthropicError = anthropicschema.ErrorResponse{
-			Type: "error",
-			Error: anthropicschema.ErrorResponseMessage{
-				Type:    openaiErr.Error.Type,
-				Message: openaiErr.Error.Message,
-			},
+		if openaiErr.Error.Type == "" && openaiErr.Error.Message == "" {
+			// Unmarshalling any JSON object into openai.Error succeeds, so a body
+			// that simply isn't OpenAI-shaped yields a zero struct rather than an
+			// error. A backend without /tokenize is exactly this case: FastAPI
+			// answers 404 with {"detail":"Not Found"}. Classify it from the status
+			// and keep the raw body, or the client gets an empty error.
+			typ := anthropicErrorTypeForStatus(statusCode)
+			anthropicError = anthropicschema.ErrorResponse{
+				Type:  "error",
+				Error: anthropicschema.ErrorResponseMessage{Type: typ, Message: string(buf)},
+			}
+			errInfo = LLMErrorInfo{Type: typ}
+		} else {
+			anthropicError = anthropicschema.ErrorResponse{
+				Type: "error",
+				Error: anthropicschema.ErrorResponseMessage{
+					Type:    openaiErr.Error.Type,
+					Message: openaiErr.Error.Message,
+				},
+			}
+			errInfo = extractOpenAIErrorInfo(buf)
 		}
-		errInfo = extractOpenAIErrorInfo(buf)
 	} else {
 		typ := anthropicErrorTypeForStatus(statusCode)
 		anthropicError = anthropicschema.ErrorResponse{

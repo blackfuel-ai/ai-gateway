@@ -33,6 +33,7 @@ const (
 
 	// Count-tokens route paths per backend.
 	anthropicCountTokensPath        = "/v1/messages/count_tokens" // #nosec G101 -- Native Anthropic Messages count_tokens path, not a credential.
+	openAITokenizePath              = "/tokenize"                 // vLLM serves /tokenize at the server root, never under the OpenAI prefix.
 	awsBedrockCountTokensPathFormat = "/model/%s/count-tokens"    // #nosec G101 -- AWS Bedrock CountTokens path format (modelId placeholder), not a credential.
 	gcpCountTokensModel             = "count-tokens"              // GCP Vertex AI virtual model for count-tokens.
 )
