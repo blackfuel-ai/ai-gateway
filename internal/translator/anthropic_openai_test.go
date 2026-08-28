@@ -1487,3 +1487,126 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_ReasoningContentStri
 	}
 	assert.True(t, sawThinkingDelta, "expected a thinking_delta from string-form reasoning_content")
 }
+
+// toolFixture builds a custom tool whose schema keys are deliberately
+// non-alphabetical, so any round-trip through a Go map would show up.
+func toolFixture(t *testing.T, name string) anthropic.ToolUnion {
+	t.Helper()
+	var tool anthropic.ToolUnion
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"custom","name":"`+name+`","description":"d",`+
+		`"input_schema":{"required":["path"],"type":"object","properties":{"path":{"type":"string"},"count":{"type":"number"}}}}`), &tool))
+	return tool
+}
+
+// toolReplayRequest is a conversation that has already made tool calls, i.e. the
+// shape every turn of an agentic session after the first one takes.
+func toolReplayRequest(t *testing.T, toolNames []string) *anthropic.MessagesRequest {
+	t.Helper()
+	tools := make([]anthropic.ToolUnion, 0, len(toolNames))
+	for _, name := range toolNames {
+		tools = append(tools, toolFixture(t, name))
+	}
+	return &anthropic.MessagesRequest{
+		Model:     "claude-3",
+		MaxTokens: 100,
+		Tools:     tools,
+		Messages: []anthropic.MessageParam{
+			{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "write hello"}},
+			{
+				Role: anthropic.MessageRoleAssistant,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{ToolUse: &anthropic.ToolUseBlockParam{
+							Type: "tool_use", ID: "tool-1", Name: "Write",
+							Input: map[string]any{
+								"file_path": "/tmp/a.txt", "content": "hello",
+								"offset": float64(1), "limit": float64(2), "replace": true,
+							},
+						}},
+					},
+				},
+			},
+			{
+				Role: anthropic.MessageRoleUser,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{ToolResult: &anthropic.ToolResultBlockParam{
+							Type: "tool_result", ToolUseID: "tool-1",
+							Content: &anthropic.ToolResultContent{Text: "ok"},
+						}},
+					},
+				},
+			},
+			{
+				Role: anthropic.MessageRoleAssistant,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{ToolUse: &anthropic.ToolUseBlockParam{
+							Type: "tool_use", ID: "tool-2", Name: "Read",
+							Input: map[string]any{
+								"path": "/tmp/a.txt", "limit": float64(10),
+								"offset": float64(0), "encoding": "utf-8",
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestAnthropicToOpenAITranslator_RequestBody_ByteStableWithToolUseReplay is the
+// end-to-end regression lock for the prefix-cache bug: the same logical request
+// must translate to identical bytes every time, or the backend re-prefills the
+// whole conversation on every turn.
+func TestAnthropicToOpenAITranslator_RequestBody_ByteStableWithToolUseReplay(t *testing.T) {
+	body := toolReplayRequest(t, []string{"Write", "Read", "Edit"})
+
+	var want []byte
+	// Repeat: Go randomises map order per range, so a single pair of runs can
+	// agree by luck even when the encoding is unstable.
+	for i := 0; i < 200; i++ {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		_, got, err := translator.RequestBody(nil, body, false)
+		require.NoError(t, err)
+		require.NotEmpty(t, got)
+		if want == nil {
+			want = got
+			continue
+		}
+		require.True(t, bytes.Equal(want, got),
+			"translated request body must be byte-stable (iteration %d)\n want: %s\n  got: %s", i, want, got)
+	}
+}
+
+// TestAnthropicToOpenAITranslator_RequestBody_AppendingToolIsPrefixStable pins the
+// property that keeps a client's newly loaded tool cheap.
+//
+// Clients append new tool schemas to the end of the array. As long as the gateway
+// passes that order through untouched, the serialised tools block for N+1 tools
+// has the block for N tools as an exact byte prefix, so only the tail has to be
+// recomputed upstream. Sorting or otherwise normalising the array would break
+// this and turn every tool load into a full re-prefill.
+func TestAnthropicToOpenAITranslator_RequestBody_AppendingToolIsPrefixStable(t *testing.T) {
+	before := toolReplayRequest(t, []string{"Write", "Read", "Edit"})
+	after := toolReplayRequest(t, []string{"Write", "Read", "Edit", "Bash"})
+
+	toolsBlock := func(body *anthropic.MessagesRequest) string {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		_, raw, err := translator.RequestBody(nil, body, false)
+		require.NoError(t, err)
+		var decoded struct {
+			Tools json.RawMessage `json:"tools"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		require.NotEmpty(t, decoded.Tools)
+		return string(decoded.Tools)
+	}
+
+	toolsBefore, toolsAfter := toolsBlock(before), toolsBlock(after)
+	// Drop the closing bracket: everything up to it must survive the append.
+	prefix := strings.TrimSuffix(toolsBefore, "]")
+	require.NotEqual(t, toolsBefore, prefix)
+	assert.True(t, strings.HasPrefix(toolsAfter, prefix),
+		"appending a tool must not perturb the tools already sent\n before: %s\n  after: %s", toolsBefore, toolsAfter)
+}
