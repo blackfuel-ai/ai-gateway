@@ -147,6 +147,12 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyNonStreaming(b
 		tokenUsage.SetCachedInputTokens(uint32(details.CachedTokens))               //nolint:gosec
 		tokenUsage.SetCacheCreationInputTokens(uint32(details.CacheCreationTokens)) //nolint:gosec
 	}
+	// Reasoning tokens are part of the same split, counted inside
+	// completion_tokens by the upstream and reported alongside it by every
+	// other non-streaming translator.
+	if details := openAIResp.Usage.CompletionTokensDetails; details != nil {
+		tokenUsage.SetReasoningTokens(uint32(details.ReasoningTokens)) //nolint:gosec
+	}
 
 	anthropicResp := openAIResponseToAnthropic(openAIResp, responseModel)
 
