@@ -129,12 +129,30 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyNonStreaming(b
 
 	responseModel = cmp.Or(openAIResp.Model, a.requestModel)
 
+	// The cache arguments stay nil: an OpenAI upstream already counts cached
+	// and cache-creation tokens inside prompt_tokens, and the helper adds what
+	// it is given to the input total, so passing them here would count them
+	// twice.
 	tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 		int64(openAIResp.Usage.PromptTokens),
 		int64(openAIResp.Usage.CompletionTokens),
 		nil,
 		nil,
 	)
+	// The cache split is still reported, as the streaming path does through
+	// setOpenAIStreamUsage. Without this a non-streaming /v1/messages response
+	// carries no cached-token count at all, and every consumer of the usage
+	// record reads a fully uncached prompt.
+	if details := openAIResp.Usage.PromptTokensDetails; details != nil {
+		tokenUsage.SetCachedInputTokens(uint32(details.CachedTokens))               //nolint:gosec
+		tokenUsage.SetCacheCreationInputTokens(uint32(details.CacheCreationTokens)) //nolint:gosec
+	}
+	// Reasoning tokens are part of the same split, counted inside
+	// completion_tokens by the upstream and reported alongside it by every
+	// other non-streaming translator.
+	if details := openAIResp.Usage.CompletionTokensDetails; details != nil {
+		tokenUsage.SetReasoningTokens(uint32(details.ReasoningTokens)) //nolint:gosec
+	}
 
 	anthropicResp := openAIResponseToAnthropic(openAIResp, responseModel)
 
