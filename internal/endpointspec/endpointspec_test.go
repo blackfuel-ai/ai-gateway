@@ -1763,12 +1763,16 @@ func TestMessagesCountTokensEndpointSpec_GetTranslator(t *testing.T) {
 		{Name: filterapi.APISchemaGCPAnthropic},
 		{Name: filterapi.APISchemaAWSAnthropic},
 		{Name: filterapi.APISchemaAnthropic},
+		{Name: filterapi.APISchemaAWSBedrock},
+		// A self-served OpenAI-schema backend counts via its own /tokenize.
+		// Without this case every count_tokens request to one 500s.
+		{Name: filterapi.APISchemaOpenAI},
 	} {
 		translator, err := spec.GetTranslator(schema, "override")
 		require.NoError(t, err)
 		require.NotNil(t, translator)
 	}
 
-	_, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, "override")
+	_, err := spec.GetTranslator(filterapi.VersionedAPISchema{Name: filterapi.APISchemaCohere}, "override")
 	require.ErrorContains(t, err, "unsupported")
 }

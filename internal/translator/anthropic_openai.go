@@ -259,29 +259,7 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders 
 		if err != nil {
 			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
-		var typ string
-		switch statusCode {
-		case "400":
-			typ = "invalid_request_error"
-		case "401":
-			typ = "authentication_error"
-		case "403":
-			typ = "permission_error"
-		case "404":
-			typ = "not_found_error"
-		case "413":
-			typ = "request_too_large"
-		case "429":
-			typ = "rate_limit_error"
-		case "500":
-			typ = "internal_server_error"
-		case "503":
-			typ = "service_unavailable_error"
-		case "529":
-			typ = "overloaded_error"
-		default:
-			typ = "internal_server_error"
-		}
+		typ := anthropicErrorTypeForStatus(statusCode)
 		anthropicError = anthropic.ErrorResponse{
 			Type:  "error", // Always "error" at the top level.
 			Error: anthropic.ErrorResponseMessage{Type: typ, Message: string(buf)},

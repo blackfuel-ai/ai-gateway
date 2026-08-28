@@ -126,3 +126,33 @@ func serializeOpenAIChatCompletionChunk(chunk *openai.ChatCompletionResponseChun
 	*buf = append(*buf, '\n', '\n')
 	return nil
 }
+
+// anthropicErrorTypeForStatus maps an HTTP status code to the Anthropic error
+// type name that goes in an error response's `error.type` field. It is the
+// fallback used when a non-Anthropic backend fails without a structured JSON
+// body to translate, so all that is left to classify the failure is the status.
+// https://platform.claude.com/docs/en/api/errors#http-errors
+func anthropicErrorTypeForStatus(statusCode string) string {
+	switch statusCode {
+	case "400":
+		return "invalid_request_error"
+	case "401":
+		return "authentication_error"
+	case "403":
+		return "permission_error"
+	case "404":
+		return "not_found_error"
+	case "413":
+		return "request_too_large"
+	case "429":
+		return "rate_limit_error"
+	case "500":
+		return "internal_server_error"
+	case "503":
+		return "service_unavailable_error"
+	case "529":
+		return "overloaded_error"
+	default:
+		return "internal_server_error"
+	}
+}
