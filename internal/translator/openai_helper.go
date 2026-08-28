@@ -328,6 +328,26 @@ func anthropicContentToText(content anthropic.MessageContent) string {
 
 // anthropicToolsToOpenAI converts Anthropic custom tools to OpenAI function tools.
 // Only ToolUnion entries with a custom Tool variant are converted; built-in tool types are skipped.
+//
+// The given order is passed through untouched, and must stay that way. Chat
+// templates render the tool declarations near the head of the prompt - Kimi K2's
+// published template emits them as a tool_declare block ahead of the system
+// message and every conversation message - so the tools array is the head of the
+// cacheable prefix. Clients append newly loaded tools to the end, which is already
+// optimal: every tool sent before keeps its position and only the tail has to be
+// re-prefilled. Sorting or otherwise normalising the array would insert new tools
+// into the middle and collapse the common prefix on every tool-load event.
+// TestAnthropicToolsToOpenAI_PreservesGivenOrder guards this.
+//
+// InputSchema is a RawMessage sub-slice of the original request body, spliced back
+// out verbatim, so the request we emit is byte-identical between turns. The
+// template then re-serialises the block (normalising whitespace away) but does not
+// sort keys, so it is our key order that has to be stable, and the passthrough is
+// what keeps it so.
+//
+// TODO: provider-native tools (bash, text editor, web search) and union members
+// whose type did not parse are silently dropped here. Pre-existing behaviour; the
+// tools_dropped access-log field makes it visible in the meantime.
 func anthropicToolsToOpenAI(tools []anthropic.ToolUnion) []openai.Tool {
 	if len(tools) == 0 {
 		return nil

@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
@@ -98,6 +99,10 @@ type (
 		tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT]
 		// span is the tracing span for this request, created in ProcessRequestBody.
 		span tracingapi.Span[RespT, RespChunkT]
+		// toolsDigest fingerprints the tool definitions on the request, for
+		// attributing backend prefix-cache misses. Computed once here rather than in
+		// the upstream filter so a retry does not recompute it.
+		toolsDigest toolsDigest
 		// upstreamFilterCount is the number of upstream filters that have been processed.
 		// This is used to determine if the request is a retry request.
 		upstreamFilterCount int
@@ -308,6 +313,9 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 	})
 	r.originalModel = originalModel
 	r.originalRequestBody = body
+	if msgReq, ok := any(body).(*anthropic.MessagesRequest); ok {
+		r.toolsDigest = computeToolsDigest(msgReq.Tools)
+	}
 	r.stream = stream
 
 	// Tracing may need to inject headers, so create a header mutation here.
@@ -449,8 +457,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 				},
 			},
 			DynamicMetadata: mergeDynamicMetadata(
-				buildBackendDynamicMetadata(u.backendName),
-				buildRequestHeaderDynamicMetadata(u.requestHeaders),
+				mergeDynamicMetadata(
+					buildBackendDynamicMetadata(u.backendName),
+					buildRequestHeaderDynamicMetadata(u.requestHeaders),
+				),
+				buildToolsDigestDynamicMetadata(u.parent.toolsDigest),
 			),
 		}, nil
 	}
@@ -461,6 +472,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	}
 	dm = mergeDynamicMetadata(dm, buildBackendDynamicMetadata(u.backendName))
 	dm = mergeDynamicMetadata(dm, buildRequestHeaderDynamicMetadata(u.requestHeaders))
+	dm = mergeDynamicMetadata(dm, buildToolsDigestDynamicMetadata(u.parent.toolsDigest))
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
@@ -833,6 +845,48 @@ func buildBackendDynamicMetadata(backendName string) *structpb.Struct {
 							"backend_name": structpb.NewStringValue(backendName),
 						},
 					},
+				},
+			},
+		},
+	}
+}
+
+// buildToolsDigestDynamicMetadata emits the tool fingerprint for this request so a
+// backend prefix-cache miss can be attributed from the access log. Grouping a
+// session's requests by time, the fields separate the three causes that otherwise
+// look identical:
+//
+//   - tools_count grows and tools_prefix_fp matches the previous tools_fp: the
+//     client appended a tool. Re-prefilling everything after it is arithmetic.
+//   - tools_count is unchanged but tools_fp changed: a stable tool set was
+//     mutated. That is the signature of a bug, in the gateway or the client.
+//   - tools_fp is unchanged but the request landed on a different endpoint: a cold
+//     replica, i.e. a routing problem rather than a prompt problem.
+//
+// Access logs are not sampled, unlike spans, which is why this is emitted here.
+// It is deliberately not a metric: a hash has unbounded cardinality, and "changed
+// since the last request in this session" is a query-time join that a stateless
+// per-request metric cannot express.
+func buildToolsDigestDynamicMetadata(d toolsDigest) *structpb.Struct {
+	if !d.present {
+		return nil
+	}
+	// Counts are stored as strings for the same reason as content_length: Envoy's
+	// formatter renders NumberValue doubles in shortest form (100000 -> "1e+05").
+	fields := map[string]*structpb.Value{
+		"tools_count":   structpb.NewStringValue(strconv.Itoa(d.count)),
+		"tools_dropped": structpb.NewStringValue(strconv.Itoa(d.dropped)),
+		"tools_bytes":   structpb.NewStringValue(strconv.Itoa(d.bytes)),
+	}
+	if d.fp != "" {
+		fields["tools_fp"] = structpb.NewStringValue(d.fp)
+		fields["tools_prefix_fp"] = structpb.NewStringValue(d.prefixFP)
+	}
+	return &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: {
+				Kind: &structpb.Value_StructValue{
+					StructValue: &structpb.Struct{Fields: fields},
 				},
 			},
 		},
