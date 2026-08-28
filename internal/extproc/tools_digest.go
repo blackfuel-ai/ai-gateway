@@ -19,9 +19,10 @@ const contentHashLen = 16
 
 // toolsDigest summarises the tool definitions carried by a request.
 //
-// Backends render the tool declarations at the very front of the prompt, ahead of
-// the system prompt and every message, so growing the tools block shifts every
-// token after it and the conversation body has to be re-prefilled. That cost is
+// Chat templates render the tool declarations near the head of the prompt - Kimi
+// K2's published template emits them ahead of the system message and every
+// conversation message - so growing the tools block shifts the tokens after it and
+// the conversation body has to be re-prefilled. That cost is
 // arithmetic, not a bug: a client that loads new tool schemas mid-session pays it
 // legitimately. What operators could not previously do is tell that apart from a
 // gateway bug that mutates a stable tool set, or from a request landing on a
