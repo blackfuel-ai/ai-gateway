@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -133,7 +134,17 @@ const originalPathHeader = internalapi.OriginalPathHeader
 const internalReqIDHeader = internalapi.EnvoyAIGatewayHeaderPrefix + "internal-req-id"
 
 // Process implements [extprocv3.ExternalProcessorServer].
-func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
+func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err error) {
+	// A panic while handling one stream must fail that stream only. Without this the whole
+	// process exits and Envoy answers every in-flight and subsequent request on this pod with
+	// a 5xx until the sidecar is restarted.
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic while processing ext_proc stream",
+				slog.Any("panic", r), slog.String("stack", string(debug.Stack())))
+			err = status.Errorf(codes.Internal, "panic while processing ext_proc stream: %v", r)
+		}
+	}()
 	ctx := stream.Context()
 	if s.debugLogEnabled {
 		s.logger.Debug("handling a new stream", slog.Any("config_uuid", s.config.UUID))
