@@ -93,20 +93,13 @@ func (t *countTokensToOpenAITokenizeTranslator) RequestBody(_ []byte, body *anth
 		return nil, nil, fmt.Errorf("failed to marshal tokenize request: %w", err)
 	}
 
+	// Only :path is rewritten. The original-path headers set by the router phase
+	// keep the client's original /v1/messages/count_tokens path: processor
+	// selection never reads them (see internal/extproc/server.go), and access
+	// logs use them to report what the client requested.
 	newHeaders = []internalapi.Header{
 		{pathHeaderName, openAITokenizePath},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
-		// Keep the original-path headers consistent with the rewritten :path so that a
-		// downstream gateway tier and the backend see the translated path everywhere.
-		// Note that this gateway's own upstream filter does NOT select its processor
-		// from these headers (it derives it from the router processor of the request,
-		// see internal/extproc/server.go), so Envoy retrying this leg with the rewritten
-		// headers stays on the Messages processor. In a two-tier deployment the second
-		// gateway's router phase reads :path and must resolve the translated
-		// /tokenize path, not the client's original /v1/messages/count_tokens —
-		// otherwise the second tier returns "unsupported path".
-		{internalapi.OriginalPathHeader, openAITokenizePath},
-		{internalapi.EnvoyOriginalPathHeader, openAITokenizePath},
 	}
 	return
 }

@@ -135,12 +135,16 @@ const internalReqIDHeader = internalapi.EnvoyAIGatewayHeaderPrefix + "internal-r
 
 // Process implements [extprocv3.ExternalProcessorServer].
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err error) {
+	// Re-assigned with request_id and is_upstream_filter once the request headers are
+	// seen; declared before the recovery defer below so a panic is logged with those
+	// fields and can be correlated with the failed request.
+	logger := s.logger
 	// A panic while handling one stream must fail that stream only. Without this the whole
 	// process exits and Envoy answers every in-flight and subsequent request on this pod with
 	// a 5xx until the sidecar is restarted.
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("panic while processing ext_proc stream",
+			logger.Error("panic while processing ext_proc stream",
 				slog.Any("panic", r), slog.String("stack", string(debug.Stack())))
 			err = status.Errorf(codes.Internal, "panic while processing ext_proc stream: %v", r)
 		}
@@ -151,7 +155,8 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 	}
 
 	// The processor will be instantiated when the first message containing the request headers is received.
-	// The :path header is used to determine the processor to use, based on the registered ones.
+	// At the router level the :path header selects the processor from the registered factories; at the
+	// upstream level the processor is derived from the router processor of the same request (see routerEntry).
 	//
 	// If this extproc filter is invoked without going through a RequestHeaders phase, that means
 	// an earlier filter has already processed the request headers/bodies and decided to terminate
@@ -161,7 +166,6 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 	var isUpstreamFilter bool
 	var internalReqID string
 	var originalReqID string
-	var logger *slog.Logger
 	// Seed the context with the server-level logger as a fallback so that loggerFromContext never returns nil in processMsg.
 	ctx = context.WithValue(ctx, loggerContextKey, s.logger)
 	defer func() {
@@ -187,8 +191,8 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
 
-		// If we're processing the request headers, read the :path header to instantiate the
-		// right processor.
+		// If we're processing the request headers, instantiate the right processor: at the
+		// router level from the :path header, at the upstream level from the router entry.
 		// Note that `req.GetRequestHeaders()` will only return non-nil if the request is
 		// of type `ProcessingRequest_RequestHeaders`, so this will be executed only once per
 		// request, and the processor will be instantiated only once.
@@ -214,7 +218,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 
 			// Create request-scoped logger with request_id before creating processor
 			// so that the logger passed to translators includes the request_id field.
-			if logger == nil {
+			if logger == s.logger {
 				logger = s.logger.With("request_id", originalReqID, "is_upstream_filter", isUpstreamFilter)
 			}
 			// Add logger to context so processMsg can access it
@@ -238,9 +242,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 					return status.Errorf(codes.Internal, "cannot create upstream processor: %v", err)
 				}
 				_, isEndpoinPicker := headersMap[internalapi.EndpointPickerHeaderKey]
-				if err = s.setBackend(ctx, p, internalReqID, isEndpoinPicker, req); err != nil {
-					s.logger.Error("error processing request message", slog.String("error", err.Error()))
-					return status.Errorf(codes.Unknown, "error processing request message: %v", err)
+				if err = s.setBackend(ctx, p, entry.processor, isEndpoinPicker, req); err != nil {
+					// Every setBackend failure is already a status error; returning it as-is
+					// keeps its code (re-wrapping downgraded codes.Internal to codes.Unknown).
+					s.logger.Error("cannot set backend", slog.String("error", err.Error()))
+					return err
 				}
 			} else {
 				path := headersMap[":path"]
@@ -411,9 +417,10 @@ func (s *Server) processMsg(ctx context.Context, p Processor, req *extprocv3.Pro
 	}
 }
 
-// setBackend retrieves the backend from the request attributes and sets it in the processor. This is only called
-// if the processor is an upstream filter.
-func (s *Server) setBackend(ctx context.Context, p Processor, internalReqID string, isEndpointPicker bool, req *extprocv3.ProcessingRequest) error {
+// setBackend retrieves the backend from the request attributes and sets it in the processor p,
+// handing it routerProcessor (the router-level processor of the same request). This is only called
+// if p is an upstream filter.
+func (s *Server) setBackend(ctx context.Context, p Processor, routerProcessor Processor, isEndpointPicker bool, req *extprocv3.ProcessingRequest) error {
 	attributes := req.GetAttributes()["envoy.filters.http.ext_proc"]
 	if attributes == nil || len(attributes.Fields) == 0 { // coverage-ignore
 		return status.Error(codes.Internal, "missing attributes in request")
@@ -430,15 +437,7 @@ func (s *Server) setBackend(ctx context.Context, p Processor, internalReqID stri
 		return status.Errorf(codes.Internal, "unknown backend: %s", backendName)
 	}
 
-	s.routerProcessorsPerReqIDMutex.RLock()
-	defer s.routerProcessorsPerReqIDMutex.RUnlock()
-	entry, ok := s.routerProcessorsPerReqID[internalReqID]
-	if !ok {
-		return status.Errorf(codes.Internal, "no router processor found, request_id=%s, backend=%s",
-			internalReqID, backendName)
-	}
-
-	if err := p.SetBackend(ctx, backend, routeName, entry.processor); err != nil {
+	if err := p.SetBackend(ctx, backend, routeName, routerProcessor); err != nil {
 		return status.Errorf(codes.Internal, "cannot set backend: %v", err)
 	}
 	return nil

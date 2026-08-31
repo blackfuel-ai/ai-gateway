@@ -298,8 +298,10 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 	})
 	originalPath := r.requestHeaders[":path"]
 	// These original-path headers are owned by extproc, so set them unconditionally.
-	// A client-supplied or pre-existing value must not shadow the gateway's own value,
-	// as downstream logic (e.g. processor lookup on retry) keys off it.
+	// A client-supplied or pre-existing value must not shadow the gateway's own value:
+	// access logs and a downstream gateway tier read these headers. Processor selection
+	// does NOT key off them — the upstream-level processor is derived from the router
+	// processor of the same request (see routerEntry in server.go).
 	r.requestHeaders[originalPathHeader] = originalPath
 	additionalHeaders = append(additionalHeaders, &corev3.HeaderValueOption{
 		// Overwrite unconditionally so a client-supplied or pre-existing value is replaced, not appended.
@@ -714,6 +716,9 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
 		}
 	}()
+	// Record the backend on the metrics before any failure below, so that the
+	// deferred failure sample carries the provider label.
+	u.metrics.SetBackend(backend.Backend)
 	rp, ok := routeProcessor.(*routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT])
 	if !ok {
 		// Request-derived state must never crash the process: fail this request only.
@@ -726,7 +731,6 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	if !backend.Backend.IsMirror {
 		rp.upstreamFilterCount++
 	}
-	u.metrics.SetBackend(backend.Backend)
 	// Some semantic conventions record the provider, which is only known now
 	// that routing has resolved a backend.
 	if bs, ok := rp.span.(tracingapi.BackendSpan); ok {

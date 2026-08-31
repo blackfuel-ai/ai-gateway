@@ -789,6 +789,8 @@ func Test_chatCompletionProcessorUpstreamFilter_SetBackend_routerTypeMismatch(t 
 	})
 	require.ErrorContains(t, err, "BUG: expected routeProcessor to be of type")
 	mm.RequireRequestFailure(t)
+	// The failure sample must carry the provider label even on this early exit.
+	mm.RequireSelectedBackend(t, "some-backend")
 }
 
 // Test_chatCompletionProcessorUpstreamFilter_SetBackend_recordsBackend pins that

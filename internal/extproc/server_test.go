@@ -312,10 +312,23 @@ func TestServer_Process(t *testing.T) {
 	})
 }
 
+// recordingSetBackendProcessor records the arguments setBackend hands to Processor.SetBackend.
+type recordingSetBackendProcessor struct {
+	passThroughProcessor
+	backend   *filterapi.RuntimeBackend
+	routeName string
+	router    Processor
+}
+
+func (r *recordingSetBackendProcessor) SetBackend(_ context.Context, backend *filterapi.RuntimeBackend, routeName string, router Processor) error {
+	r.backend, r.routeName, r.router = backend, routeName, router
+	return nil
+}
+
 func TestServer_setBackend(t *testing.T) {
 	s, _ := requireNewServerWithMockProcessor(t)
 	s.config.Backends = map[string]*filterapi.RuntimeBackend{"openai": {Backend: &filterapi.Backend{Name: "openai"}}}
-	mockProc := &mockProcessor{}
+	routerProc := &mockProcessor{}
 
 	for _, isEndpointPicker := range []bool{true, false} {
 		t.Run(fmt.Sprintf("isEndpointPicker=%t", isEndpointPicker), func(t *testing.T) {
@@ -324,7 +337,8 @@ func TestServer_setBackend(t *testing.T) {
 				attributeKey = internalapi.XDSClusterMetadataBackendNamePath
 			}
 
-			err := s.setBackend(t.Context(), mockProc, "aaaaaaaaaaaa", isEndpointPicker, &extprocv3.ProcessingRequest{
+			rec := &recordingSetBackendProcessor{}
+			err := s.setBackend(t.Context(), rec, routerProc, isEndpointPicker, &extprocv3.ProcessingRequest{
 				Attributes: map[string]*structpb.Struct{
 					"envoy.filters.http.ext_proc": {Fields: map[string]*structpb.Value{
 						attributeKey: {Kind: &structpb.Value_StringValue{
@@ -337,9 +351,12 @@ func TestServer_setBackend(t *testing.T) {
 				},
 				Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}},
 			})
-			// Should be an error as there is no router processor registered for openai backend.
-			// The purpose of this test is to verify that the backend name is correctly extracted.
-			require.ErrorContains(t, err, `no router processor found, request_id=aaaaaaaaaaaa, backend=openai`)
+			// The backend name and route name resolved from the attributes, and the router
+			// processor handed in by Process, must all reach the upstream processor.
+			require.NoError(t, err)
+			require.Equal(t, "openai", rec.backend.Backend.Name)
+			require.Equal(t, "route-a", rec.routeName)
+			require.Same(t, Processor(routerProc), rec.router)
 		})
 	}
 }
@@ -1161,21 +1178,28 @@ func upstreamHeadersRequest(headers ...*corev3.HeaderValue) *extprocv3.Processin
 // mutated headers. The upstream processor must still come from the Messages factory, never from the
 // ChatCompletions one, or SetBackend gets a router processor of the wrong type.
 func TestServer_UpstreamProcessorFollowsRouterFactory(t *testing.T) {
-	s, err := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
-	require.NoError(t, err)
-	s.config = &filterapi.RuntimeConfig{Backends: map[string]*filterapi.RuntimeBackend{
+	s, _ := requireNewServerWithMockProcessor(t)
+	s.config.Backends = map[string]*filterapi.RuntimeBackend{
 		"openai": {Backend: &filterapi.Backend{Name: "openai"}},
-	}}
+	}
 	s.uuidFn = func() string { return "uuid" }
 	const internalReqID = "req-1-uuid"
 
-	type call struct{ isUpstream bool }
-	var messagesCalls []call
+	var messagesCalls []bool
 	routerHeaders := &corev3.HeaderMap{Headers: []*corev3.HeaderValue{{Key: ":path", Value: "/anthropic/v1/messages"}, {Key: "x-request-id", Value: "req-1"}}}
-	// The headers the upstream-level mock must be handed; set per upstream leg below.
-	var upstreamHeaders *corev3.HeaderMap
+	// The headers every upstream leg carries: even with every path header rewritten to
+	// the translated path (a stronger scenario than today's translators, which leave
+	// the original-path headers alone), the processor must come from the router entry.
+	upstreamHeaderValues := []*corev3.HeaderValue{
+		{Key: ":path", Value: "/v1/chat/completions"},
+		{Key: originalPathHeader, Value: "/v1/chat/completions"},
+		{Key: internalapi.EnvoyOriginalPathHeader, Value: "/v1/chat/completions"},
+		{Key: internalReqIDHeader, Value: internalReqID},
+		{Key: "x-request-id", Value: "req-1"},
+	}
+	upstreamHeaders := &corev3.HeaderMap{Headers: upstreamHeaderValues}
 	s.Register("/anthropic/v1/messages", func(_ *filterapi.RuntimeConfig, _ map[string]string, _ *slog.Logger, isUpstreamFilter bool, _ bool) (Processor, error) {
-		messagesCalls = append(messagesCalls, call{isUpstream: isUpstreamFilter})
+		messagesCalls = append(messagesCalls, isUpstreamFilter)
 		exp := routerHeaders
 		if isUpstreamFilter {
 			exp = upstreamHeaders
@@ -1197,7 +1221,14 @@ func TestServer_UpstreamProcessorFollowsRouterFactory(t *testing.T) {
 		release:                      release,
 	}
 	routerDone := make(chan error, 1)
-	go func() { routerDone <- s.Process(routerStream) }()
+	go func() {
+		// Deferred send so an assertion failure inside the mock (require's FailNow
+		// calls runtime.Goexit off the test goroutine) still unblocks the receive
+		// below instead of timing the test out with the diff hidden.
+		var perr error
+		defer func() { routerDone <- perr }()
+		perr = s.Process(routerStream)
+	}()
 	require.Eventually(t, func() bool {
 		s.routerProcessorsPerReqIDMutex.RLock()
 		defer s.routerProcessorsPerReqIDMutex.RUnlock()
@@ -1208,17 +1239,9 @@ func TestServer_UpstreamProcessorFollowsRouterFactory(t *testing.T) {
 	// Two upstream legs (first attempt + retry), both carrying the headers as rewritten by the
 	// Anthropic -> OpenAI translator on the first leg.
 	for i := range 2 {
-		hm := []*corev3.HeaderValue{
-			{Key: ":path", Value: "/v1/chat/completions"},
-			{Key: originalPathHeader, Value: "/v1/chat/completions"},
-			{Key: internalapi.EnvoyOriginalPathHeader, Value: "/v1/chat/completions"},
-			{Key: internalReqIDHeader, Value: internalReqID},
-			{Key: "x-request-id", Value: "req-1"},
-		}
-		upstreamHeaders = &corev3.HeaderMap{Headers: hm}
 		upstreamStream := &queuedProcessingStream{
 			mockExternalProcessingStream: mockExternalProcessingStream{t: t, ctx: ctx},
-			reqs:                         []*extprocv3.ProcessingRequest{upstreamHeadersRequest(hm...)},
+			reqs:                         []*extprocv3.ProcessingRequest{upstreamHeadersRequest(upstreamHeaderValues...)},
 		}
 		require.NoError(t, s.Process(upstreamStream), "upstream leg %d", i+1)
 		require.Len(t, upstreamStream.sent, 1)
@@ -1227,7 +1250,7 @@ func TestServer_UpstreamProcessorFollowsRouterFactory(t *testing.T) {
 	close(release)
 	require.NoError(t, <-routerDone)
 	// Router phase + two upstream legs, all from the Messages factory.
-	require.Equal(t, []call{{isUpstream: false}, {isUpstream: true}, {isUpstream: true}}, messagesCalls)
+	require.Equal(t, []bool{false, true, true}, messagesCalls)
 }
 
 func TestServer_Process_UpstreamWithoutRouterEntry(t *testing.T) {
@@ -1253,9 +1276,7 @@ func (panickingProcessor) ProcessRequestHeaders(context.Context, *corev3.HeaderM
 }
 
 func TestServer_Process_RecoversFromPanic(t *testing.T) {
-	s, err := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
-	require.NoError(t, err)
-	s.config = &filterapi.RuntimeConfig{}
+	s, _ := requireNewServerWithMockProcessor(t)
 	s.Register("/panic", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
 		return panickingProcessor{}, nil
 	})
@@ -1265,6 +1286,7 @@ func TestServer_Process_RecoversFromPanic(t *testing.T) {
 			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{{Key: ":path", Value: "/panic"}}},
 		}}}},
 	}
+	var err error
 	require.NotPanics(t, func() { err = s.Process(stream) })
 	require.Equal(t, codes.Internal, status.Code(err))
 	require.ErrorContains(t, err, "panic while processing ext_proc stream: boom")
