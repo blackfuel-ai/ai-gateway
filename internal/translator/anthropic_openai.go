@@ -87,10 +87,13 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) RequestBody(_ []byte, body
 	newHeaders = []internalapi.Header{
 		{pathHeaderName, a.path},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
-		// Keep the original-path headers consistent with the rewritten :path. A
-		// downstream extproc upstream filter selects its processor by
-		// x-ai-eg-original-path (see internal/extproc/server.go processorForPath), so in
-		// a two-tier deployment the second gateway must resolve the translated
+		// Keep the original-path headers consistent with the rewritten :path so that a
+		// downstream gateway tier and the backend see the translated path everywhere.
+		// Note that this gateway's own upstream filter does NOT select its processor
+		// from these headers (it derives it from the router processor of the request,
+		// see internal/extproc/server.go), so Envoy retrying this leg with the rewritten
+		// headers stays on the Messages processor. In a two-tier deployment the second
+		// gateway's router phase reads :path and must resolve the translated
 		// /chat/completions path, not the client's original /v1/messages — otherwise an
 		// OpenAI-only tier returns "unsupported path".
 		{internalapi.OriginalPathHeader, a.path},

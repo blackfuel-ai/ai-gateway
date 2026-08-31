@@ -716,7 +716,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	}()
 	rp, ok := routeProcessor.(*routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT])
 	if !ok {
-		panic(fmt.Sprintf("BUG: expected routeProcessor to be of type *routerProcessor[%T], got %T", rp, routeProcessor))
+		// Request-derived state must never crash the process: fail this request only.
+		return fmt.Errorf("BUG: expected routeProcessor to be of type %T, got %T", rp, routeProcessor)
 	}
 	// Mirror (shadow) legs run their own upstream filter but are fire-and-forget:
 	// their response never returns downstream. They must not count as an upstream
