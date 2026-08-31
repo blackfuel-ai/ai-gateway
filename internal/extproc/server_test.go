@@ -312,10 +312,23 @@ func TestServer_Process(t *testing.T) {
 	})
 }
 
+// recordingSetBackendProcessor records the arguments setBackend hands to Processor.SetBackend.
+type recordingSetBackendProcessor struct {
+	passThroughProcessor
+	backend   *filterapi.RuntimeBackend
+	routeName string
+	router    Processor
+}
+
+func (r *recordingSetBackendProcessor) SetBackend(_ context.Context, backend *filterapi.RuntimeBackend, routeName string, router Processor) error {
+	r.backend, r.routeName, r.router = backend, routeName, router
+	return nil
+}
+
 func TestServer_setBackend(t *testing.T) {
 	s, _ := requireNewServerWithMockProcessor(t)
 	s.config.Backends = map[string]*filterapi.RuntimeBackend{"openai": {Backend: &filterapi.Backend{Name: "openai"}}}
-	mockProc := &mockProcessor{}
+	routerProc := &mockProcessor{}
 
 	for _, isEndpointPicker := range []bool{true, false} {
 		t.Run(fmt.Sprintf("isEndpointPicker=%t", isEndpointPicker), func(t *testing.T) {
@@ -324,7 +337,8 @@ func TestServer_setBackend(t *testing.T) {
 				attributeKey = internalapi.XDSClusterMetadataBackendNamePath
 			}
 
-			err := s.setBackend(t.Context(), mockProc, "aaaaaaaaaaaa", isEndpointPicker, &extprocv3.ProcessingRequest{
+			rec := &recordingSetBackendProcessor{}
+			err := s.setBackend(t.Context(), rec, routerProc, isEndpointPicker, &extprocv3.ProcessingRequest{
 				Attributes: map[string]*structpb.Struct{
 					"envoy.filters.http.ext_proc": {Fields: map[string]*structpb.Value{
 						attributeKey: {Kind: &structpb.Value_StringValue{
@@ -337,9 +351,12 @@ func TestServer_setBackend(t *testing.T) {
 				},
 				Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{}},
 			})
-			// Should be an error as there is no router processor registered for openai backend.
-			// The purpose of this test is to verify that the backend name is correctly extracted.
-			require.ErrorContains(t, err, `no router processor found, request_id=aaaaaaaaaaaa, backend=openai`)
+			// The backend name and route name resolved from the attributes, and the router
+			// processor handed in by Process, must all reach the upstream processor.
+			require.NoError(t, err)
+			require.Equal(t, "openai", rec.backend.Backend.Name)
+			require.Equal(t, "route-a", rec.routeName)
+			require.Same(t, Processor(routerProc), rec.router)
 		})
 	}
 }

@@ -238,9 +238,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 					return status.Errorf(codes.Internal, "cannot create upstream processor: %v", err)
 				}
 				_, isEndpoinPicker := headersMap[internalapi.EndpointPickerHeaderKey]
-				if err = s.setBackend(ctx, p, internalReqID, isEndpoinPicker, req); err != nil {
-					s.logger.Error("error processing request message", slog.String("error", err.Error()))
-					return status.Errorf(codes.Unknown, "error processing request message: %v", err)
+				if err = s.setBackend(ctx, p, entry.processor, isEndpoinPicker, req); err != nil {
+					// Every setBackend failure is already a status error; returning it as-is
+					// keeps its code (re-wrapping downgraded codes.Internal to codes.Unknown).
+					s.logger.Error("cannot set backend", slog.String("error", err.Error()))
+					return err
 				}
 			} else {
 				path := headersMap[":path"]
@@ -411,9 +413,10 @@ func (s *Server) processMsg(ctx context.Context, p Processor, req *extprocv3.Pro
 	}
 }
 
-// setBackend retrieves the backend from the request attributes and sets it in the processor. This is only called
-// if the processor is an upstream filter.
-func (s *Server) setBackend(ctx context.Context, p Processor, internalReqID string, isEndpointPicker bool, req *extprocv3.ProcessingRequest) error {
+// setBackend retrieves the backend from the request attributes and sets it in the processor p,
+// handing it routerProcessor (the router-level processor of the same request). This is only called
+// if p is an upstream filter.
+func (s *Server) setBackend(ctx context.Context, p Processor, routerProcessor Processor, isEndpointPicker bool, req *extprocv3.ProcessingRequest) error {
 	attributes := req.GetAttributes()["envoy.filters.http.ext_proc"]
 	if attributes == nil || len(attributes.Fields) == 0 { // coverage-ignore
 		return status.Error(codes.Internal, "missing attributes in request")
@@ -430,15 +433,7 @@ func (s *Server) setBackend(ctx context.Context, p Processor, internalReqID stri
 		return status.Errorf(codes.Internal, "unknown backend: %s", backendName)
 	}
 
-	s.routerProcessorsPerReqIDMutex.RLock()
-	defer s.routerProcessorsPerReqIDMutex.RUnlock()
-	entry, ok := s.routerProcessorsPerReqID[internalReqID]
-	if !ok {
-		return status.Errorf(codes.Internal, "no router processor found, request_id=%s, backend=%s",
-			internalReqID, backendName)
-	}
-
-	if err := p.SetBackend(ctx, backend, routeName, entry.processor); err != nil {
+	if err := p.SetBackend(ctx, backend, routeName, routerProcessor); err != nil {
 		return status.Errorf(codes.Internal, "cannot set backend: %v", err)
 	}
 	return nil
