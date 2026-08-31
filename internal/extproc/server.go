@@ -135,12 +135,16 @@ const internalReqIDHeader = internalapi.EnvoyAIGatewayHeaderPrefix + "internal-r
 
 // Process implements [extprocv3.ExternalProcessorServer].
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err error) {
+	// Re-assigned with request_id and is_upstream_filter once the request headers are
+	// seen; declared before the recovery defer below so a panic is logged with those
+	// fields and can be correlated with the failed request.
+	logger := s.logger
 	// A panic while handling one stream must fail that stream only. Without this the whole
 	// process exits and Envoy answers every in-flight and subsequent request on this pod with
 	// a 5xx until the sidecar is restarted.
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("panic while processing ext_proc stream",
+			logger.Error("panic while processing ext_proc stream",
 				slog.Any("panic", r), slog.String("stack", string(debug.Stack())))
 			err = status.Errorf(codes.Internal, "panic while processing ext_proc stream: %v", r)
 		}
@@ -161,7 +165,6 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 	var isUpstreamFilter bool
 	var internalReqID string
 	var originalReqID string
-	var logger *slog.Logger
 	// Seed the context with the server-level logger as a fallback so that loggerFromContext never returns nil in processMsg.
 	ctx = context.WithValue(ctx, loggerContextKey, s.logger)
 	defer func() {
@@ -214,7 +217,7 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 
 			// Create request-scoped logger with request_id before creating processor
 			// so that the logger passed to translators includes the request_id field.
-			if logger == nil {
+			if logger == s.logger {
 				logger = s.logger.With("request_id", originalReqID, "is_upstream_filter", isUpstreamFilter)
 			}
 			// Add logger to context so processMsg can access it
