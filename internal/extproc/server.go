@@ -155,7 +155,8 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 	}
 
 	// The processor will be instantiated when the first message containing the request headers is received.
-	// The :path header is used to determine the processor to use, based on the registered ones.
+	// At the router level the :path header selects the processor from the registered factories; at the
+	// upstream level the processor is derived from the router processor of the same request (see routerEntry).
 	//
 	// If this extproc filter is invoked without going through a RequestHeaders phase, that means
 	// an earlier filter has already processed the request headers/bodies and decided to terminate
@@ -190,8 +191,8 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
 
-		// If we're processing the request headers, read the :path header to instantiate the
-		// right processor.
+		// If we're processing the request headers, instantiate the right processor: at the
+		// router level from the :path header, at the upstream level from the router entry.
 		// Note that `req.GetRequestHeaders()` will only return non-nil if the request is
 		// of type `ProcessingRequest_RequestHeaders`, so this will be executed only once per
 		// request, and the processor will be instantiated only once.
