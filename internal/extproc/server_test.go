@@ -266,6 +266,7 @@ func TestServer_Process(t *testing.T) {
 		hm := &corev3.HeaderMap{Headers: []*corev3.HeaderValue{{Key: originalPathHeader, Value: "/"}, {Key: internalReqIDHeader, Value: "test-req-id-123"}, {Key: "foo", Value: "bar"}}}
 		p.t = t
 		p.expHeaderMap = hm
+		s.routerProcessorsPerReqID["test-req-id-123"] = routerEntry{processor: p, factory: s.processorFactories["/"]}
 		req := &extprocv3.ProcessingRequest{
 			Attributes: map[string]*structpb.Struct{
 				"envoy.filters.http.ext_proc": {Fields: map[string]*structpb.Value{"something": {}}},
@@ -1061,130 +1062,185 @@ func Test_headersToMap(t *testing.T) {
 	require.Equal(t, map[string]string{"foo": "bar", "dog": "cat"}, m)
 }
 
-func TestServer_ProcessorForPath_QueryParameterStripping(t *testing.T) {
+func TestServer_FactoryForPath_QueryParameterStripping(t *testing.T) {
 	s, err := NewServer(slog.Default(), false)
 	require.NoError(t, err)
 	require.NotNil(t, s)
 
-	s.config = &filterapi.RuntimeConfig{}
-
 	// Register processors for different base paths.
-	mockProc := &mockProcessor{}
 	s.Register("/v1/messages", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
-		return mockProc, nil
+		return &mockProcessor{}, nil
 	})
 	s.Register("/anthropic/v1/messages", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
-		return mockProc, nil
+		return &mockProcessor{}, nil
 	})
 
 	tests := []struct {
-		name           string
-		requestHeaders map[string]string
-		isUpstream     bool
-		expectSuccess  bool
-		expectedError  string
+		name          string
+		path          string
+		expectSuccess bool
+		expectedError string
 	}{
-		{
-			name: "path_without_query_params",
-			requestHeaders: map[string]string{
-				":path": "/v1/messages",
-			},
-			isUpstream:    false,
-			expectSuccess: true,
-		},
-		{
-			name: "path_with_beta_query_param",
-			requestHeaders: map[string]string{
-				":path": "/v1/messages?beta=true",
-			},
-			isUpstream:    false,
-			expectSuccess: true,
-		},
-		{
-			name: "path_with_multiple_query_params",
-			requestHeaders: map[string]string{
-				":path": "/v1/messages?beta=true&stream=false&version=2",
-			},
-			isUpstream:    false,
-			expectSuccess: true,
-		},
-		{
-			name: "anthropic_path_with_beta_param",
-			requestHeaders: map[string]string{
-				":path": "/anthropic/v1/messages?beta=true",
-			},
-			isUpstream:    false,
-			expectSuccess: true,
-		},
-		{
-			name: "unknown_path_without_query_params",
-			requestHeaders: map[string]string{
-				":path": "/unknown/path",
-			},
-			isUpstream:    false,
-			expectSuccess: false,
-			expectedError: "no processor registered for the given path: /unknown/path",
-		},
-		{
-			name: "unknown_path_with_query_params",
-			requestHeaders: map[string]string{
-				":path": "/unknown/path?param=value",
-			},
-			isUpstream:    false,
-			expectSuccess: false,
-			expectedError: "no processor registered for the given path: /unknown/path",
-		},
-		{
-			name: "upstream_filter_with_original_path_header",
-			requestHeaders: map[string]string{
-				originalPathHeader: "/v1/messages?beta=true&other=param",
-			},
-			isUpstream:    true,
-			expectSuccess: true,
-		},
-		{
-			name: "empty_path",
-			requestHeaders: map[string]string{
-				":path": "",
-			},
-			isUpstream:    false,
-			expectSuccess: false,
-			expectedError: "no processor registered for the given path: ",
-		},
-		{
-			name: "path_with_only_query_params",
-			requestHeaders: map[string]string{
-				":path": "?beta=true",
-			},
-			isUpstream:    false,
-			expectSuccess: false,
-			expectedError: "no processor registered for the given path: ",
-		},
-		{
-			name: "path_with_fragment_and_query",
-			requestHeaders: map[string]string{
-				":path": "/v1/messages?beta=true#fragment",
-			},
-			isUpstream:    false,
-			expectSuccess: true,
-		},
+		{name: "path_without_query_params", path: "/v1/messages", expectSuccess: true},
+		{name: "path_with_beta_query_param", path: "/v1/messages?beta=true", expectSuccess: true},
+		{name: "path_with_multiple_query_params", path: "/v1/messages?beta=true&stream=false&version=2", expectSuccess: true},
+		{name: "anthropic_path_with_beta_param", path: "/anthropic/v1/messages?beta=true", expectSuccess: true},
+		{name: "unknown_path_without_query_params", path: "/unknown/path", expectedError: "no processor registered for the given path: /unknown/path"},
+		{name: "unknown_path_with_query_params", path: "/unknown/path?param=value", expectedError: "no processor registered for the given path: /unknown/path"},
+		{name: "empty_path", path: "", expectedError: "no processor registered for the given path: "},
+		{name: "path_with_only_query_params", path: "?beta=true", expectedError: "no processor registered for the given path: "},
+		{name: "path_with_fragment_and_query", path: "/v1/messages?beta=true#fragment", expectSuccess: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			processor, err := s.processorForPath(tt.requestHeaders, tt.isUpstream, slog.Default())
-
+			factory, err := s.factoryForPath(tt.path)
 			if tt.expectSuccess {
 				require.NoError(t, err)
-				require.NotNil(t, processor)
-				require.Equal(t, mockProc, processor)
+				require.NotNil(t, factory)
 			} else {
-				require.Error(t, err)
-				require.Nil(t, processor)
-				if tt.expectedError != "" {
-					require.Contains(t, err.Error(), tt.expectedError)
-				}
+				require.ErrorIs(t, err, errNoProcessor)
+				require.Nil(t, factory)
+				require.Contains(t, err.Error(), tt.expectedError)
 			}
 		})
 	}
+}
+
+// queuedProcessingStream is a mock stream that hands out a fixed sequence of messages and then
+// blocks until released (or the context is done), so a router-level stream can be kept open while
+// the upstream-level streams of the same request are exercised.
+type queuedProcessingStream struct {
+	mockExternalProcessingStream
+	reqs    []*extprocv3.ProcessingRequest
+	release chan struct{}
+	sent    []*extprocv3.ProcessingResponse
+}
+
+func (q *queuedProcessingStream) Recv() (*extprocv3.ProcessingRequest, error) {
+	if len(q.reqs) > 0 {
+		r := q.reqs[0]
+		q.reqs = q.reqs[1:]
+		return r, nil
+	}
+	if q.release == nil {
+		return nil, io.EOF
+	}
+	select {
+	case <-q.release:
+		return nil, io.EOF
+	case <-q.ctx.Done():
+		return nil, q.ctx.Err()
+	}
+}
+
+func (q *queuedProcessingStream) Send(response *extprocv3.ProcessingResponse) error {
+	q.sent = append(q.sent, response)
+	return nil
+}
+
+// upstreamHeadersRequest builds an upstream-filter RequestHeaders message (attributes present)
+// resolving to backend "openai".
+func upstreamHeadersRequest(headers ...*corev3.HeaderValue) *extprocv3.ProcessingRequest {
+	return &extprocv3.ProcessingRequest{
+		Attributes: map[string]*structpb.Struct{
+			"envoy.filters.http.ext_proc": {Fields: map[string]*structpb.Value{
+				internalapi.XDSUpstreamHostMetadataBackendNamePath: structpb.NewStringValue("openai"),
+				internalapi.XDSRouteMetadataRouteNamePath:          structpb.NewStringValue("route-a"),
+			}},
+		},
+		Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: headers},
+		}},
+	}
+}
+
+// TestServer_UpstreamProcessorFollowsRouterFactory is the regression test for the retry-leg panic:
+// a /anthropic/v1/messages request whose first upstream leg rewrote :path and the original-path
+// headers to /v1/chat/completions (Anthropic -> OpenAI translation) is retried by Envoy with the
+// mutated headers. The upstream processor must still come from the Messages factory, never from the
+// ChatCompletions one, or SetBackend gets a router processor of the wrong type.
+func TestServer_UpstreamProcessorFollowsRouterFactory(t *testing.T) {
+	s, err := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+	s.config = &filterapi.RuntimeConfig{Backends: map[string]*filterapi.RuntimeBackend{
+		"openai": {Backend: &filterapi.Backend{Name: "openai"}},
+	}}
+	s.uuidFn = func() string { return "uuid" }
+	const internalReqID = "req-1-uuid"
+
+	type call struct{ isUpstream bool }
+	var messagesCalls []call
+	routerHeaders := &corev3.HeaderMap{Headers: []*corev3.HeaderValue{{Key: ":path", Value: "/anthropic/v1/messages"}, {Key: "x-request-id", Value: "req-1"}}}
+	// The headers the upstream-level mock must be handed; set per upstream leg below.
+	var upstreamHeaders *corev3.HeaderMap
+	s.Register("/anthropic/v1/messages", func(_ *filterapi.RuntimeConfig, _ map[string]string, _ *slog.Logger, isUpstreamFilter bool, _ bool) (Processor, error) {
+		messagesCalls = append(messagesCalls, call{isUpstream: isUpstreamFilter})
+		exp := routerHeaders
+		if isUpstreamFilter {
+			exp = upstreamHeaders
+		}
+		return &mockProcessor{t: t, expHeaderMap: exp, retProcessingResponse: &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_RequestHeaders{}}}, nil
+	})
+	s.Register("/v1/chat/completions", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
+		t.Fatal("the chat completions factory must not be used for a /anthropic/v1/messages request")
+		return nil, nil
+	})
+
+	// Router-level stream on the original path, kept open while the upstream legs run.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	release := make(chan struct{})
+	routerStream := &queuedProcessingStream{
+		mockExternalProcessingStream: mockExternalProcessingStream{t: t, ctx: ctx},
+		reqs:                         []*extprocv3.ProcessingRequest{{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{Headers: routerHeaders}}}},
+		release:                      release,
+	}
+	routerDone := make(chan error, 1)
+	go func() { routerDone <- s.Process(routerStream) }()
+	require.Eventually(t, func() bool {
+		s.routerProcessorsPerReqIDMutex.RLock()
+		defer s.routerProcessorsPerReqIDMutex.RUnlock()
+		_, ok := s.routerProcessorsPerReqID[internalReqID]
+		return ok
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// Two upstream legs (first attempt + retry), both carrying the headers as rewritten by the
+	// Anthropic -> OpenAI translator on the first leg.
+	for i := range 2 {
+		hm := []*corev3.HeaderValue{
+			{Key: ":path", Value: "/v1/chat/completions"},
+			{Key: originalPathHeader, Value: "/v1/chat/completions"},
+			{Key: internalapi.EnvoyOriginalPathHeader, Value: "/v1/chat/completions"},
+			{Key: internalReqIDHeader, Value: internalReqID},
+			{Key: "x-request-id", Value: "req-1"},
+		}
+		upstreamHeaders = &corev3.HeaderMap{Headers: hm}
+		upstreamStream := &queuedProcessingStream{
+			mockExternalProcessingStream: mockExternalProcessingStream{t: t, ctx: ctx},
+			reqs:                         []*extprocv3.ProcessingRequest{upstreamHeadersRequest(hm...)},
+		}
+		require.NoError(t, s.Process(upstreamStream), "upstream leg %d", i+1)
+		require.Len(t, upstreamStream.sent, 1)
+	}
+
+	close(release)
+	require.NoError(t, <-routerDone)
+	// Router phase + two upstream legs, all from the Messages factory.
+	require.Equal(t, []call{{isUpstream: false}, {isUpstream: true}, {isUpstream: true}}, messagesCalls)
+}
+
+func TestServer_Process_UpstreamWithoutRouterEntry(t *testing.T) {
+	s, _ := requireNewServerWithMockProcessor(t)
+	s.config.Backends = map[string]*filterapi.RuntimeBackend{"openai": {Backend: &filterapi.Backend{Name: "openai"}}}
+	stream := &queuedProcessingStream{
+		mockExternalProcessingStream: mockExternalProcessingStream{t: t, ctx: t.Context()},
+		reqs: []*extprocv3.ProcessingRequest{upstreamHeadersRequest(
+			&corev3.HeaderValue{Key: ":path", Value: "/"},
+			&corev3.HeaderValue{Key: internalReqIDHeader, Value: "unknown-req-id"},
+		)},
+	}
+	err := s.Process(stream)
+	require.Equal(t, codes.Internal, status.Code(err))
+	require.ErrorContains(t, err, "no router processor found, request_id=unknown-req-id")
 }
