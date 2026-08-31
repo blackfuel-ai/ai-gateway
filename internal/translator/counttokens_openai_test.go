@@ -77,19 +77,17 @@ func TestCountTokensToOpenAITokenize_RequestBody(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, newBody)
 
-			// The rewritten :path must be mirrored onto both original-path headers,
-			// otherwise a second-tier extproc cannot resolve a processor for it.
-			for _, key := range []string{
-				pathHeaderName,
-				internalapi.OriginalPathHeader,
-				internalapi.EnvoyOriginalPathHeader,
-			} {
-				got, ok := headerValue(headers, key)
-				require.Truef(t, ok, "missing header %s", key)
-				// Never prefixed: vLLM serves /tokenize at the root and the extproc
-				// registers it unprefixed, while an OpenAI schema's prefix is coerced
-				// to "v1". /v1/tokenize would 404 on every request.
-				assert.Equalf(t, "/tokenize", got, "header %s", key)
+			// Never prefixed: vLLM serves /tokenize at the root and the extproc
+			// registers it unprefixed, while an OpenAI schema's prefix is coerced
+			// to "v1". /v1/tokenize would 404 on every request.
+			got, ok := headerValue(headers, pathHeaderName)
+			require.Truef(t, ok, "missing header %s", pathHeaderName)
+			assert.Equal(t, "/tokenize", got)
+			// The original-path headers are left to the router phase: they keep the
+			// client's original path and are never used for processor selection.
+			for _, key := range []string{internalapi.OriginalPathHeader, internalapi.EnvoyOriginalPathHeader} {
+				_, found := headerValue(headers, key)
+				require.Falsef(t, found, "unexpected header %s", key)
 			}
 
 			var req tokenize.ChatRequest
