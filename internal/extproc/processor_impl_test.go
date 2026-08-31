@@ -776,6 +776,21 @@ func Test_chatCompletionProcessorUpstreamFilter_SetBackend(t *testing.T) {
 	require.Nil(t, r.upstreamFilter, "upstreamFilter must remain nil when SetBackend fails")
 }
 
+// Test_chatCompletionProcessorUpstreamFilter_SetBackend_routerTypeMismatch pins that a router
+// processor of another type is reported as an error for that request only, never as a process-wide
+// panic (the extproc sidecar going down fails every request on the pod).
+func Test_chatCompletionProcessorUpstreamFilter_SetBackend_routerTypeMismatch(t *testing.T) {
+	mm := &mockMetrics{}
+	p := &chatCompletionProcessorUpstreamFilter{requestHeaders: map[string]string{":path": "/foo"}, metrics: mm}
+	r := &messagesProcessorRouterFilter{}
+	var err error
+	require.NotPanics(t, func() {
+		err = p.SetBackend(t.Context(), &filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "some-backend"}}, "test-route", r)
+	})
+	require.ErrorContains(t, err, "BUG: expected routeProcessor to be of type")
+	mm.RequireRequestFailure(t)
+}
+
 // Test_chatCompletionProcessorUpstreamFilter_SetBackend_recordsBackend pins that
 // the resolved backend reaches the span, and that recording it is optional: the
 // backend is only known after routing, and only some semantic conventions record

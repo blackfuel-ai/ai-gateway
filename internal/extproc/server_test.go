@@ -1244,3 +1244,30 @@ func TestServer_Process_UpstreamWithoutRouterEntry(t *testing.T) {
 	require.Equal(t, codes.Internal, status.Code(err))
 	require.ErrorContains(t, err, "no router processor found, request_id=unknown-req-id")
 }
+
+// panickingProcessor panics on the request headers phase.
+type panickingProcessor struct{ passThroughProcessor }
+
+func (panickingProcessor) ProcessRequestHeaders(context.Context, *corev3.HeaderMap) (*extprocv3.ProcessingResponse, error) {
+	panic("boom")
+}
+
+func TestServer_Process_RecoversFromPanic(t *testing.T) {
+	s, err := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+	s.config = &filterapi.RuntimeConfig{}
+	s.Register("/panic", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
+		return panickingProcessor{}, nil
+	})
+	stream := &queuedProcessingStream{
+		mockExternalProcessingStream: mockExternalProcessingStream{t: t, ctx: t.Context()},
+		reqs: []*extprocv3.ProcessingRequest{{Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{
+			Headers: &corev3.HeaderMap{Headers: []*corev3.HeaderValue{{Key: ":path", Value: "/panic"}}},
+		}}}},
+	}
+	require.NotPanics(t, func() { err = s.Process(stream) })
+	require.Equal(t, codes.Internal, status.Code(err))
+	require.ErrorContains(t, err, "panic while processing ext_proc stream: boom")
+	// The router entry must still be cleaned up by the deferred delete.
+	require.Empty(t, s.routerProcessorsPerReqID)
+}
