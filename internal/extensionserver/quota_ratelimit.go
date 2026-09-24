@@ -1148,9 +1148,8 @@ func buildClientSelectorActions(
 	return actions
 }
 
-// buildClientSelectorStreamDoneActions is like buildClientSelectorActions but
-// always uses ExpectMatch=true on HeaderValueMatch actions. Distinct headers fall
-// back to GenericKey because per-value bucketing is not applicable at stream-done time.
+// buildClientSelectorStreamDoneActions is the stream-done counterpart of
+// buildClientSelectorActions; see buildStreamDoneHeaderMatchAction for the per-header actions.
 func buildClientSelectorStreamDoneActions(
 	ruleIndex int, selectors []egv1a1.RateLimitSelectCondition,
 ) []*routev3.RateLimit_Action {
@@ -1191,8 +1190,10 @@ func flattenAndSortClientSelectorHeaders(selectors []egv1a1.RateLimitSelectCondi
 	return headers
 }
 
-// buildStreamDoneHeaderMatchAction is like buildHeaderMatchAction but always uses
-// ExpectMatch=true. Distinct headers are treated as GenericKey.
+// buildStreamDoneHeaderMatchAction is the stream-done counterpart of
+// buildHeaderMatchAction. Exact/RegularExpression headers produce the same
+// HeaderValueMatch action, honouring Invert, so the charge lands on the population
+// the request-time check admits. Distinct headers read their value from dynamic metadata.
 func buildStreamDoneHeaderMatchAction(
 	ruleIndex, matchIndex int, header egv1a1.HeaderMatch,
 ) *routev3.RateLimit_Action {
@@ -1231,12 +1232,14 @@ func buildStreamDoneHeaderMatchAction(
 			StringMatch: stringMatcher,
 		},
 	}
+	expectMatch := header.Invert == nil || !*header.Invert
+
 	return &routev3.RateLimit_Action{
 		ActionSpecifier: &routev3.RateLimit_Action_HeaderValueMatch_{
 			HeaderValueMatch: &routev3.RateLimit_Action_HeaderValueMatch{
 				DescriptorKey:   descriptorKey,
 				DescriptorValue: descriptorKey,
-				ExpectMatch:     &wrapperspb.BoolValue{Value: true},
+				ExpectMatch:     &wrapperspb.BoolValue{Value: expectMatch},
 				Headers:         []*routev3.HeaderMatcher{headerMatcher},
 			},
 		},

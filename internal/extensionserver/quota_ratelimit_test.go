@@ -707,6 +707,83 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 		require.Equal(t, "premium|enterprise", hvm.Headers[0].GetStringMatch().GetSafeRegex().Regex)
 	})
 
+	t.Run("token cost with distinct and inverted regex headers charges with ExpectMatch false", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		policies := []aigv1a1.QuotaPolicy{
+			{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+				Spec: aigv1a1.QuotaPolicySpec{
+					TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: "test-backend"}},
+					PerModelQuotas: []aigv1a1.PerModelQuota{
+						{
+							ModelName: ptr.To("claude"),
+							Quota: aigv1a1.QuotaDefinition{
+								BucketRules: []aigv1a1.QuotaRule{
+									{
+										ClientSelectors: []egv1a1.RateLimitSelectCondition{
+											{
+												Headers: []egv1a1.HeaderMatch{
+													{
+														Name: "x-org-id",
+														Type: ptr.To(egv1a1.HeaderMatchDistinct),
+													},
+													{
+														Name:   "x-tier",
+														Type:   ptr.To(egv1a1.HeaderMatchRegularExpression),
+														Value:  ptr.To("premium|enterprise"),
+														Invert: ptr.To(true),
+													},
+												},
+											},
+										},
+										Quota: aigv1a1.QuotaValue{
+											Limit: 1000, Duration: "1h",
+											CostExpression: ptr.To("input_tokens + output_tokens"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+
+		rateLimits := quotaRateLimitsOnRoute(t, route)
+
+		headerValueMatch := func(rl *routev3.RateLimit) *routev3.RateLimit_Action_HeaderValueMatch {
+			for _, a := range rl.Actions {
+				if hvm := a.GetHeaderValueMatch(); hvm != nil {
+					return hvm
+				}
+			}
+			return nil
+		}
+
+		var requestTime, streamDone *routev3.RateLimit
+		for _, rl := range rateLimits {
+			if headerValueMatch(rl) == nil {
+				continue
+			}
+			if rl.ApplyOnStreamDone {
+				streamDone = rl
+			} else {
+				requestTime = rl
+			}
+		}
+		require.NotNil(t, requestTime)
+		require.NotNil(t, streamDone)
+
+		reqHVM := headerValueMatch(requestTime)
+		doneHVM := headerValueMatch(streamDone)
+		require.False(t, reqHVM.ExpectMatch.Value)
+		require.False(t, doneHVM.ExpectMatch.Value)
+		require.Equal(t, reqHVM.DescriptorKey, doneHVM.DescriptorKey)
+		require.Equal(t, "premium|enterprise", doneHVM.Headers[0].GetStringMatch().GetSafeRegex().Regex)
+	})
+
 	t.Run("empty client selectors uses GenericKey", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
 		policies := []aigv1a1.QuotaPolicy{
@@ -1612,6 +1689,34 @@ func TestBuildHeaderMatchAction(t *testing.T) {
 		require.Equal(t, "rule-3-h1|v-match-2", hvm.DescriptorKey)
 		require.Equal(t, "rule-3-h1|v-match-2", hvm.DescriptorValue)
 	})
+}
+
+func TestBuildStreamDoneHeaderMatchAction_Invert(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		headerType  egv1a1.HeaderMatchType
+		invert      *bool
+		expectMatch bool
+	}{
+		{name: "exact invert true sets ExpectMatch false", headerType: egv1a1.HeaderMatchExact, invert: ptr.To(true), expectMatch: false},
+		{name: "exact invert false sets ExpectMatch true", headerType: egv1a1.HeaderMatchExact, invert: ptr.To(false), expectMatch: true},
+		{name: "exact nil invert defaults to ExpectMatch true", headerType: egv1a1.HeaderMatchExact, expectMatch: true},
+		{name: "regex invert true sets ExpectMatch false", headerType: egv1a1.HeaderMatchRegularExpression, invert: ptr.To(true), expectMatch: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := egv1a1.HeaderMatch{
+				Name:   "x-tier",
+				Type:   ptr.To(tc.headerType),
+				Value:  ptr.To("internal"),
+				Invert: tc.invert,
+			}
+			hvm := buildStreamDoneHeaderMatchAction(0, 0, header).GetHeaderValueMatch()
+			require.NotNil(t, hvm)
+			require.Equal(t, tc.expectMatch, hvm.ExpectMatch.Value)
+			// The stream-done charge carries the same polarity as the request-time admission check.
+			require.Equal(t, buildHeaderMatchAction(0, 0, header).GetHeaderValueMatch().ExpectMatch.Value, hvm.ExpectMatch.Value)
+		})
+	}
 }
 
 func TestBaseDescriptorActions(t *testing.T) {
