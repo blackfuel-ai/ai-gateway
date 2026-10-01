@@ -89,7 +89,8 @@ func (c *BackendSecurityPolicyController) Reconcile(ctx context.Context, req ctr
 	if err != nil {
 		c.logger.Error(err, "failed to reconcile backend security policy", "namespace", req.Namespace, "name", req.Name)
 		c.updateBackendSecurityPolicyStatus(ctx, &bsp, aigv1b1.ConditionTypeNotAccepted, err.Error())
-	} else {
+	} else if bsp.GetDeletionTimestamp().IsZero() {
+		// A terminating policy is not served, so it is never reported Accepted.
 		c.updateBackendSecurityPolicyStatus(ctx, &bsp, aigv1b1.ConditionTypeAccepted, "BackendSecurityPolicy reconciled successfully")
 	}
 	return
@@ -97,8 +98,10 @@ func (c *BackendSecurityPolicyController) Reconcile(ctx context.Context, req ctr
 
 // reconcile reconciles BackendSecurityPolicy but extracted from Reconcile to centralize error handling.
 func (c *BackendSecurityPolicyController) reconcile(ctx context.Context, bsp *aigv1b1.BackendSecurityPolicy) (res ctrl.Result, err error) {
-	if handleFinalizer(ctx, c.client, c.logger, bsp, c.syncBackendSecurityPolicy) { // Propagate the bsp deletion all the way to relevant Gateways.
-		return res, nil
+	// Propagate the bsp deletion all the way to relevant Gateways.
+	var onDelete bool
+	if onDelete, err = handleFinalizer(ctx, c.client, c.logger, bsp, c.syncBackendSecurityPolicy); err != nil || onDelete {
+		return res, err
 	}
 	// Determine if credential rotation is needed
 	requiresRotation := bsp.Spec.Type != aigv1b1.BackendSecurityPolicyTypeAPIKey &&

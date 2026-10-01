@@ -592,22 +592,25 @@ const aiGatewayControllerFinalizer = "aigateway.envoyproxy.io/finalizer"
 // onDeletionFn can be nil, in which case it will not be called. The function can return an error but should not
 // be a recoverable error. For example, onDeletionFn only propagates the deletion of the object to other resources.
 // See the call sites of this function for examples.
+//
+// A failed Update adding or removing the finalizer is returned, and callers must fail the reconcile with it.
+// Controllers built by TypedControllerBuilderForCRD filter events with GenerationChangedPredicate, and nothing
+// bumps the generation of a terminating object, so the requeue that controller-runtime schedules for a returned
+// error is the only retry. A swallowed Conflict leaves the object Terminating with the finalizer indefinitely.
 func handleFinalizer[objType client.Object](
 	ctx context.Context, client client.Client,
 	logger logr.Logger,
 	o objType,
 	onDeletionFn func(ctx context.Context, o objType) error,
-) (onDelete bool) {
+) (onDelete bool, _ error) {
 	if o.GetDeletionTimestamp().IsZero() {
 		if !ctrlutil.ContainsFinalizer(o, aiGatewayControllerFinalizer) {
 			ctrlutil.AddFinalizer(o, aiGatewayControllerFinalizer)
 			if err := client.Update(ctx, o); err != nil {
-				// This shouldn't happen in normal operation, but if it does, we log the error.
-				logger.Error(err, "Failed to add finalizer to object",
-					"namespace", o.GetNamespace(), "name", o.GetName())
+				return false, fmt.Errorf("failed to add finalizer to %s/%s: %w", o.GetNamespace(), o.GetName(), err)
 			}
 		}
-		return false
+		return false, nil
 	}
 	if ctrlutil.ContainsFinalizer(o, aiGatewayControllerFinalizer) {
 		ctrlutil.RemoveFinalizer(o, aiGatewayControllerFinalizer)
@@ -619,12 +622,10 @@ func handleFinalizer[objType client.Object](
 			}
 		}
 		if err := client.Update(ctx, o); err != nil {
-			// This shouldn't happen in normal operation, but if it does, we log the error.
-			logger.Error(err, "Failed to remove finalizer from object",
-				"namespace", o.GetNamespace(), "name", o.GetName())
+			return true, fmt.Errorf("failed to remove finalizer from %s/%s: %w", o.GetNamespace(), o.GetName(), err)
 		}
 	}
-	return true
+	return true, nil
 }
 
 // isKubernetes133OrLater returns true if the Kubernetes version is 1.33 or later.

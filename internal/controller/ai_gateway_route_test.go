@@ -15,12 +15,14 @@ import (
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	fake2 "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -104,6 +106,80 @@ func TestAIGatewayRouteController_Reconcile_SyncError(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, updatedRoute.Status.Conditions, 1)
 	require.Equal(t, aigv1b1.ConditionTypeNotAccepted, updatedRoute.Status.Conditions[0].Type)
+}
+
+// TestAIGatewayRouteController_Reconcile_FinalizerRemovalConflictIsRetried pins that a failed
+// finalizer removal fails the reconcile. The controller filters events with
+// GenerationChangedPredicate and nothing bumps a terminating object's generation, so the error
+// returned here is the only thing that makes controller-runtime requeue; a nil result leaves the
+// route Terminating with the finalizer for good.
+func TestAIGatewayRouteController_Reconcile_FinalizerRemovalConflictIsRetried(t *testing.T) {
+	inner, ok := requireNewFakeClientWithIndexes(t).(client.WithWatch)
+	require.True(t, ok)
+	updates := 0
+	fakeClient := interceptor.NewClient(inner, interceptor.Funcs{
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updates++
+			if updates == 1 {
+				return apierrors.NewConflict(schema.GroupResource{Group: "aigateway.envoyproxy.io", Resource: "aigatewayroutes"},
+					obj.GetName(), fmt.Errorf("the object has been modified; please apply your changes to the latest version and try again"))
+			}
+			return cl.Update(ctx, obj, opts...)
+		},
+	})
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	c := NewAIGatewayRouteController(fakeClient, fake2.NewClientset(), ctrl.Log, eventCh.Ch, "/v1")
+
+	key := types.NamespacedName{Namespace: "inference", Name: "terminating-route"}
+	route := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Finalizers: []string{aiGatewayControllerFinalizer}},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), route))
+	require.NoError(t, fakeClient.Delete(t.Context(), route))
+
+	_, err := c.Reconcile(t.Context(), reconcile.Request{NamespacedName: key})
+	require.True(t, apierrors.IsConflict(err), "the conflict must fail the reconcile so it is requeued, got %v", err)
+
+	var stuck aigv1b1.AIGatewayRoute
+	require.NoError(t, fakeClient.Get(t.Context(), key, &stuck))
+	require.Equal(t, []string{aiGatewayControllerFinalizer}, stuck.Finalizers)
+	for _, cond := range stuck.Status.Conditions {
+		require.NotEqual(t, aigv1b1.ConditionTypeAccepted, cond.Type, "a route whose finalizer removal failed must not report Accepted")
+	}
+
+	// The requeued reconcile removes the finalizer and the route is gone.
+	_, err = c.Reconcile(t.Context(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	err = fakeClient.Get(t.Context(), key, &stuck)
+	require.True(t, apierrors.IsNotFound(err), "expected the route to be deleted, got %v", err)
+}
+
+// TestAIGatewayRouteController_Reconcile_DeletionDoesNotWriteAccepted pins that the deletion path
+// writes no Accepted status. Another finalizer keeps the route visible after ours is removed, so
+// a status write would land on the terminating object.
+func TestAIGatewayRouteController_Reconcile_DeletionDoesNotWriteAccepted(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	c := NewAIGatewayRouteController(fakeClient, fake2.NewClientset(), ctrl.Log, eventCh.Ch, "/v1")
+
+	const otherFinalizer = "example.com/other"
+	key := types.NamespacedName{Namespace: "inference", Name: "terminating-route"}
+	route := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: key.Name, Namespace: key.Namespace,
+			Finalizers: []string{aiGatewayControllerFinalizer, otherFinalizer},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), route))
+	require.NoError(t, fakeClient.Delete(t.Context(), route))
+
+	_, err := c.Reconcile(t.Context(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+
+	var terminating aigv1b1.AIGatewayRoute
+	require.NoError(t, fakeClient.Get(t.Context(), key, &terminating))
+	require.Equal(t, []string{otherFinalizer}, terminating.Finalizers)
+	require.Empty(t, terminating.Status.Conditions)
 }
 
 func requireNewFakeClientWithIndexes(t *testing.T) client.Client {
