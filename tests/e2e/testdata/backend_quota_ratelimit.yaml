@@ -77,6 +77,14 @@ spec:
       backendRefs:
         - name: envoy-ai-gateway-quota-ratelimit-testupstream
           modelNameOverride: quota-org-model
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: quota-reserve-model
+      backendRefs:
+        - name: envoy-ai-gateway-quota-ratelimit-testupstream
+          modelNameOverride: quota-reserve-model
   # The following metadata keys are used to store the costs from the LLM request.
   llmRequestCosts:
     - metadataKey: llm_input_token
@@ -152,6 +160,19 @@ spec:
             quota:
               limit: 100
               duration: "1h"
+    - modelName: "quota-reserve-model"
+      quota:
+        mode: Shared
+        defaultBucket:
+          # Fresh input tokens per hour. The admission reserve charges the
+          # estimate drawn from the same x-test-client's previous responses
+          # when the request is admitted, and the remainder at completion.
+          limit: 100000
+          duration: "1h"
+          costExpression: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+          admissionReserve:
+            estimateByHeader: x-test-client
+            percent: 100
 ---
 apiVersion: apps/v1
 kind: Deployment
