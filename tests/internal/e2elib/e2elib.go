@@ -25,6 +25,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/singleflight"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
@@ -614,10 +617,140 @@ func kubectlWaitForDaemonSetReady(ctx context.Context, namespace, daemonset stri
 	return
 }
 
-// RequireWaitForGatewayPodReady waits for the Envoy Gateway pod with the given selector to be ready.
+// RequireWaitForGatewayPodReady waits until the Envoy proxy workload with the
+// given selector has finished rolling out: every pod carries the extproc
+// container and is Ready, no pod is terminating, and each Deployment and
+// DaemonSet reports its rollout complete.
+//
+// The ai-gateway controller rolls the proxy workload to inject the extproc
+// sidecar once it sees the first route, so the proxy goes through at least one
+// rollout right after the Gateway is created. The outgoing pod has no extproc
+// and answers 500 until it is gone, so the wait holds until no such pod remains
+// and the settled state survives gatewayRolloutStablePolls consecutive polls,
+// which absorbs a follow-up rollout started by the controller's next reconcile.
 func RequireWaitForGatewayPodReady(t *testing.T, selector string) {
-	requireWaitForGatewayPod(t, selector)
-	RequireWaitForPodReady(t, EnvoyGatewayNamespace, selector)
+	const (
+		timeout      = 5 * time.Minute
+		pollInterval = 2 * time.Second
+	)
+	var lastErr error
+	stable := 0
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		lastErr = gatewayRolloutSettled(t, selector)
+		if lastErr == nil {
+			stable++
+			if stable == gatewayRolloutStablePolls {
+				return
+			}
+		} else {
+			stable = 0
+		}
+		time.Sleep(pollInterval)
+	}
+	require.Fail(t, "timed out waiting for the gateway proxy rollout", "selector %q, last error: %v", selector, lastErr)
+}
+
+// gatewayRolloutStablePolls is the number of consecutive polls the proxy
+// rollout must be observed settled before it is considered done.
+const gatewayRolloutStablePolls = 3
+
+// gatewayRolloutSettled fetches the proxy pods and workloads with the given
+// selector and checks them with checkGatewayRolloutSettled.
+func gatewayRolloutSettled(t *testing.T, selector string) error {
+	var pods corev1.PodList
+	if err := kubectlGetJSON(t.Context(), &pods, "pods", selector); err != nil {
+		return err
+	}
+	var deployments appsv1.DeploymentList
+	if err := kubectlGetJSON(t.Context(), &deployments, "deployments", selector); err != nil {
+		return err
+	}
+	var daemonSets appsv1.DaemonSetList
+	if err := kubectlGetJSON(t.Context(), &daemonSets, "daemonsets", selector); err != nil {
+		return err
+	}
+	return checkGatewayRolloutSettled(pods.Items, deployments.Items, daemonSets.Items)
+}
+
+func kubectlGetJSON(ctx context.Context, into any, resource, selector string) error {
+	cmd := Kubectl(ctx, "get", resource, "-n", EnvoyGatewayNamespace, "--selector="+selector, "-o", "json")
+	cmd.Stdout = nil // To ensure that we can capture the output by Output().
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get %s with selector %q: %w", resource, selector, err)
+	}
+	if err = json.Unmarshal(out, into); err != nil {
+		return fmt.Errorf("failed to decode %s: %w", resource, err)
+	}
+	return nil
+}
+
+// checkGatewayRolloutSettled returns nil when every pod carries the extproc
+// container, is Ready and is not terminating, and every workload's rollout is
+// complete; otherwise it returns the first reason it is not.
+func checkGatewayRolloutSettled(pods []corev1.Pod, deployments []appsv1.Deployment, daemonSets []appsv1.DaemonSet) error {
+	if len(pods) == 0 {
+		return errors.New("no pods found")
+	}
+	for i := range pods {
+		pod := &pods[i]
+		if pod.DeletionTimestamp != nil {
+			return fmt.Errorf("pod %q is terminating", pod.Name)
+		}
+		if !podHasExtProc(pod) {
+			return fmt.Errorf("pod %q has no %s container", pod.Name, extProcContainerName)
+		}
+		if !podIsReady(pod) {
+			return fmt.Errorf("pod %q is not Ready", pod.Name)
+		}
+	}
+	for i := range deployments {
+		dep := &deployments[i]
+		desired := ptr.Deref(dep.Spec.Replicas, 1)
+		s := dep.Status
+		if s.ObservedGeneration < dep.Generation || s.Replicas != desired ||
+			s.UpdatedReplicas != desired || s.AvailableReplicas != desired {
+			return fmt.Errorf("deployment %q rollout not complete: generation %d observed %d, replicas %d desired %d updated %d available %d",
+				dep.Name, dep.Generation, s.ObservedGeneration, s.Replicas, desired, s.UpdatedReplicas, s.AvailableReplicas)
+		}
+	}
+	for i := range daemonSets {
+		ds := &daemonSets[i]
+		s := ds.Status
+		if s.ObservedGeneration < ds.Generation || s.CurrentNumberScheduled != s.DesiredNumberScheduled ||
+			s.UpdatedNumberScheduled != s.DesiredNumberScheduled || s.NumberAvailable != s.DesiredNumberScheduled {
+			return fmt.Errorf("daemonset %q rollout not complete: generation %d observed %d, desired %d current %d updated %d available %d",
+				ds.Name, ds.Generation, s.ObservedGeneration, s.DesiredNumberScheduled, s.CurrentNumberScheduled,
+				s.UpdatedNumberScheduled, s.NumberAvailable)
+		}
+	}
+	return nil
+}
+
+// extProcContainerName is the name of the extproc container the ai-gateway
+// controller injects into the proxy pods, as an init (native sidecar) or a
+// regular container.
+const extProcContainerName = "ai-gateway-extproc"
+
+func podHasExtProc(pod *corev1.Pod) bool {
+	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for i := range containers {
+			if containers[i].Name == extProcContainerName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func podIsReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // RequireGatewayListenerAddressViaMetalLB gets the external IP address of the Gateway via MetalLB.
@@ -630,18 +763,6 @@ func RequireGatewayListenerAddressViaMetalLB(t *testing.T, namespace, name strin
 	require.NoError(t, err, "failed to get gateway address")
 	addr = strings.TrimSpace(string(out))
 	return
-}
-
-// requireWaitForGatewayPod waits for the Envoy Gateway pod containing the
-// extproc container.
-func requireWaitForGatewayPod(t *testing.T, selector string) {
-	waitUntilKubectl(t, 2*time.Minute, 1*time.Second, func(output string) error {
-		if !strings.Contains(output, "ai-gateway-extproc") {
-			return fmt.Errorf("container not found, output: %s", output)
-		}
-		return nil
-	}, "get", "pod", "-n", EnvoyGatewayNamespace,
-		"--selector="+selector, "-o", "jsonpath='{.items[0].spec.initContainers[*].name} {.items[0].spec.containers[*].name}'")
 }
 
 // RequireWaitForPodReady waits for the pod with the given selector to be ready.
