@@ -33,6 +33,8 @@ static_resources:
                           some_cel: "%DYNAMIC_METADATA(io.envoy.ai_gateway:some_cel)%"
                           llm_error_type: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%"
                           llm_error_code: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_code)%"
+                          estimated_input_token: "%DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%"
+                          estimated_input_token_samples: "%DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token_samples)%"
                   - name: default
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StderrAccessLog

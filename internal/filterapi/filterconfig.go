@@ -56,6 +56,25 @@ type Config struct {
 	// upstream error responses (llm_error_type, llm_error_code, backend_name, route_name,
 	// model_name_override) under the "io.envoy.ai_gateway" namespace for non-2xx responses.
 	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
+	// UsageEstimates configures the token usage estimates emitted as dynamic metadata
+	// when a request is admitted.
+	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
+}
+
+// UsageEstimate configures one token usage estimate emitted when a request is admitted.
+// The estimate is drawn from the responses completed in the last completed period for
+// requests carrying the same ByHeader value and model, and computed by the CEL expression.
+type UsageEstimate struct {
+	// MetadataKey is the key of the dynamic metadata storing the estimate. The number of
+	// requests completed in that period and how many of them failed are stored under
+	// MetadataKey + "_samples" and MetadataKey + "_failures".
+	MetadataKey string `json:"metadataKey"`
+	// CEL is the CEL expression evaluated on the estimated usage.
+	CEL string `json:"cel"`
+	// ByHeader is the lower-cased name of the request header grouping the requests.
+	ByHeader string `json:"byHeader"`
+	// EmitMetric also records the estimate in metrics.
+	EmitMetric bool `json:"emitMetric,omitempty"`
 }
 
 // Model corresponds to the OpenAI model object in the OpenAI-compatible APIs

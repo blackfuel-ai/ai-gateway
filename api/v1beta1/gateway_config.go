@@ -103,6 +103,84 @@ type GatewayConfigSpec struct {
 	//
 	// +optional
 	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
+
+	// UsageEstimates estimates the token usage of each request when it is admitted,
+	// from the responses completed in the last 15 seconds for requests carrying the same value of
+	// a request header (for example the API key identity stamped by an external
+	// authorization service) and the same model, and emits each estimate as Envoy
+	// dynamic metadata under the "io.envoy.ai_gateway" namespace.
+	//
+	// Estimates are observational: they change no routing, cost or quota decision.
+	// They can be referenced in access logs, for example
+	// %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=metadataKey
+	// +kubebuilder:validation:MaxItems=16
+	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
+}
+
+// UsageEstimate estimates one value of a request's token usage when the request
+// is admitted, before any upstream has answered.
+//
+// Completed requests are accumulated per ByHeader value and model over fixed
+// 15-second periods aligned on the clock. A request is estimated from the
+// successful responses of the last completed period:
+//
+//   - input tokens: the request body size times the input tokens per body byte
+//     observed in those responses;
+//   - cached input tokens: the mean cached input tokens per response.
+//
+// The CEL expression is evaluated on that estimated usage and its result is
+// stored under MetadataKey. No estimate is emitted when the last completed
+// period holds no successful response. Two more keys are always emitted when the
+// header is present: "<metadataKey>_samples", the number of requests completed
+// in that period, and "<metadataKey>_failures", how many of them failed (an
+// error status, a response without usage, or a stream aborted after reaching an
+// upstream).
+//
+// Each gateway replica estimates from the responses it served itself.
+type UsageEstimate struct {
+	// MetadataKey is the key of the dynamic metadata storing the estimate.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	MetadataKey string `json:"metadataKey"`
+	// CEL is the CEL expression computing the estimate. It accepts the variables
+	// of LLMRequestCost.CEL and must return a signed or unsigned integer. It is
+	// evaluated on the estimated usage of the request:
+	//
+	//	* model: the model name extracted from the request content.
+	//	* input_tokens: the estimated number of input tokens.
+	//	* cached_input_tokens: the estimated number of cached read input tokens.
+	//	* total_tokens: equal to input_tokens.
+	//	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.
+	//	* backend and route_name: empty, as no route is selected at admission.
+	//
+	// For example, "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+	// estimates the input tokens that are not served from the prompt cache.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	CEL string `json:"cel"`
+	// ByHeader names the request header whose value groups the responses the
+	// estimate is drawn from. Requests without the header get no estimate.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	ByHeader string `json:"byHeader"`
+	// EmitMetric also records the estimate in metrics: a counter of the requests
+	// that got an estimate or none, and a histogram of the estimate divided by
+	// the same CEL expression evaluated on the actual usage of the response.
+	// The header value is never a metric attribute.
+	//
+	// Defaults to false.
+	//
+	// +optional
+	EmitMetric bool `json:"emitMetric,omitempty"`
 }
 
 // GatewayConfigExtProc holds runtime-specific configuration for the external processor.

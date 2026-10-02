@@ -15,12 +15,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/uuid"
+	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -29,7 +31,9 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/redaction"
+	"github.com/envoyproxy/ai-gateway/internal/usageestimate"
 )
 
 var (
@@ -62,6 +66,7 @@ type Server struct {
 	routerProcessorsPerReqID      map[string]routerEntry
 	routerProcessorsPerReqIDMutex sync.RWMutex
 	uuidFn                        func() string
+	usageEstimates                *usageEstimates
 }
 
 // routerEntry is the per-request state kept by the router filter for the upstream filter(s).
@@ -76,8 +81,20 @@ type routerEntry struct {
 	factory ProcessorFactory
 }
 
+// ServerOption configures a [Server].
+type ServerOption func(*Server)
+
+// WithUsageEstimates sets the store the usage estimates draw on and the metrics
+// they record. Without it, the server uses a store nothing sweeps and records no
+// metrics.
+func WithUsageEstimates(store *usageestimate.Store, m metrics.UsageEstimateMetrics) ServerOption {
+	return func(s *Server) {
+		s.usageEstimates = &usageEstimates{store: store, metrics: m}
+	}
+}
+
 // NewServer creates a new external processor server.
-func NewServer(logger *slog.Logger, enableRedaction bool) (*Server, error) {
+func NewServer(logger *slog.Logger, enableRedaction bool, opts ...ServerOption) (*Server, error) {
 	debugLogEnabled := logger.Enabled(context.Background(), slog.LevelDebug)
 	srv := &Server{
 		logger:                   logger,
@@ -86,6 +103,13 @@ func NewServer(logger *slog.Logger, enableRedaction bool) (*Server, error) {
 		processorFactories:       make(map[string]ProcessorFactory),
 		routerProcessorsPerReqID: make(map[string]routerEntry),
 		uuidFn:                   uuid.NewString,
+		usageEstimates: &usageEstimates{
+			store:   usageestimate.NewStore(time.Now),
+			metrics: metrics.NewUsageEstimate(noopmetric.NewMeterProvider().Meter("")),
+		},
+	}
+	for _, opt := range opts {
+		opt(srv)
 	}
 	return srv, nil
 }
@@ -170,6 +194,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 	ctx = context.WithValue(ctx, loggerContextKey, s.logger)
 	defer func() {
 		if !isUpstreamFilter {
+			if up, ok := p.(usageEstimateProcessor); ok {
+				up.finishUsageEstimates()
+			}
 			s.routerProcessorsPerReqIDMutex.Lock()
 			defer s.routerProcessorsPerReqIDMutex.Unlock()
 			delete(s.routerProcessorsPerReqID, internalReqID)
@@ -272,6 +299,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 				if err != nil {
 					s.logger.Error("cannot create router processor", slog.String("error", err.Error()))
 					return status.Errorf(codes.Internal, "cannot create router processor: %v", err)
+				}
+				if up, ok := p.(usageEstimateProcessor); ok {
+					up.setUsageEstimates(s.usageEstimates)
 				}
 				s.routerProcessorsPerReqIDMutex.Lock()
 				s.routerProcessorsPerReqID[internalReqID] = routerEntry{processor: p, factory: factory}

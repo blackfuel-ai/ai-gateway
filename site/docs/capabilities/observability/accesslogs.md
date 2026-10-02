@@ -203,6 +203,48 @@ metadata namespace, which you can reference from your access log configuration:
 This applies only to errors returned by the upstream LLM provider. Errors generated before backend selection
 (for example, an unknown model) do not carry this metadata; use the standard `%RESPONSE_CODE%` field for those.
 
+## Usage Estimates in Access Logs
+
+The AI Gateway can estimate the token usage of a request when it is admitted, before any upstream has
+answered, from the responses recently completed for requests carrying the same value of a request header
+(for example the API key identity stamped by an external authorization service) and the same model.
+Completed requests are accumulated over fixed 15-second periods, and a request is estimated from the last
+completed period.
+Configure the estimates on the `GatewayConfig`:
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: GatewayConfig
+metadata:
+  name: envoy-ai-gateway
+  namespace: default
+spec:
+  usageEstimates:
+    - metadataKey: estimated_input_token
+      cel: "input_tokens"
+      byHeader: x-api-key-id
+      emitMetric: true
+    - metadataKey: estimated_fresh_input_token
+      cel: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+      byHeader: x-api-key-id
+```
+
+The estimated input tokens are the request body size times the input tokens per body byte observed in the
+last completed period, and the estimated cached input tokens are their mean per response. The `cel` expression is evaluated
+on those estimates, with zero output tokens, and its result is stored under `metadataKey` in the
+`io.envoy.ai_gateway` metadata namespace. Two more keys are emitted whenever the request carries the header:
+
+- `<metadataKey>_samples` — the number of requests completed in the last completed period.
+- `<metadataKey>_failures` — how many of them failed: an error status, a response without usage, or a
+  stream aborted after reaching an upstream.
+
+No estimate is emitted when the last completed period holds no successful response. Estimates are observational: they
+change no routing, cost or rate limit decision. Each gateway replica estimates from the responses it served.
+
+With `emitMetric: true`, the estimate is also recorded in the `aigw.usage_estimate.requests` counter (whether
+an estimate existed) and the `aigw.usage_estimate.ratio` histogram (the estimate divided by the same
+expression evaluated on the actual usage of the response). The header value is never a metric attribute.
+
 ## MCP Metadata in Access Logs
 
 Envoy AI Gateway automatically populates MCP information in the filter dynamic metadata under the `io.envoy.ai_gateway` namespace.
