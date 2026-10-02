@@ -104,7 +104,11 @@ func (c *AIGatewayRouteController) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, err
 	}
 	if !aiGatewayRoute.GetDeletionTimestamp().IsZero() {
-		// A terminating route is not served, so it is never reported Accepted.
+		// A terminating route is dropped from the Gateways' configuration, so it reads NotAccepted
+		// for as long as another finalizer keeps it.
+		if keptTerminating(&aiGatewayRoute) {
+			c.updateAIGatewayRouteStatus(ctx, &aiGatewayRoute, aigv1b1.ConditionTypeNotAccepted, terminatingMessage)
+		}
 		return reconcile.Result{}, nil
 	}
 	c.updateAIGatewayRouteStatus(ctx, &aiGatewayRoute, aigv1b1.ConditionTypeAccepted, "AI Gateway Route reconciled successfully")

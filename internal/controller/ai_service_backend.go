@@ -59,7 +59,10 @@ func (c *AIBackendController) Reconcile(ctx context.Context, req reconcile.Reque
 		return ctrl.Result{}, err
 	}
 	if !aiBackend.GetDeletionTimestamp().IsZero() {
-		// A terminating backend is not served, so it is never reported Accepted.
+		// A terminating backend reads NotAccepted for as long as another finalizer keeps it.
+		if keptTerminating(&aiBackend) {
+			c.updateAIServiceBackendStatus(ctx, &aiBackend, aigv1b1.ConditionTypeNotAccepted, terminatingMessage)
+		}
 		return ctrl.Result{}, nil
 	}
 	c.updateAIServiceBackendStatus(ctx, &aiBackend, aigv1b1.ConditionTypeAccepted, "AIServiceBackend reconciled successfully")

@@ -594,9 +594,12 @@ const aiGatewayControllerFinalizer = "aigateway.envoyproxy.io/finalizer"
 // See the call sites of this function for examples.
 //
 // A failed Update adding or removing the finalizer is returned, and callers must fail the reconcile with it.
-// Controllers built by TypedControllerBuilderForCRD filter events with GenerationChangedPredicate, and nothing
-// bumps the generation of a terminating object, so the requeue that controller-runtime schedules for a returned
-// error is the only retry. A swallowed Conflict leaves the object Terminating with the finalizer indefinitely.
+// Controllers built by TypedControllerBuilderForCRD filter Update events with GenerationChangedPredicate, and
+// nothing bumps the generation of a terminating object, so no watch event retries it until the controller
+// restarts or a referencing object fans an event in. A swallowed Conflict leaves the object Terminating with
+// the finalizer until then; the requeue that controller-runtime schedules for a returned error clears it.
+//
+// onDeletionFn runs again on every retry of a failed removal, so it must be idempotent.
 func handleFinalizer[objType client.Object](
 	ctx context.Context, client client.Client,
 	logger logr.Logger,
@@ -626,6 +629,17 @@ func handleFinalizer[objType client.Object](
 		}
 	}
 	return true, nil
+}
+
+// terminatingMessage is the NotAccepted message of an object that is marked for deletion and kept by a
+// finalizer other than aiGatewayControllerFinalizer.
+const terminatingMessage = "the object is being deleted and is no longer served"
+
+// keptTerminating reports whether o is marked for deletion and still carries a finalizer once handleFinalizer
+// has run. Such an object stays readable while nothing serves it, so its status must not read Accepted. An
+// object whose last finalizer was ours is gone, and there is no status left to write.
+func keptTerminating(o client.Object) bool {
+	return !o.GetDeletionTimestamp().IsZero() && len(o.GetFinalizers()) > 0
 }
 
 // isKubernetes133OrLater returns true if the Kubernetes version is 1.33 or later.

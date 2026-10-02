@@ -80,7 +80,10 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 		return ctrl.Result{}, err
 	}
 	if !MCPRoute.GetDeletionTimestamp().IsZero() {
-		// A terminating route is not served, so it is never reported Accepted.
+		// A terminating route reads NotAccepted for as long as another finalizer keeps it.
+		if keptTerminating(&MCPRoute) {
+			c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeNotAccepted, terminatingMessage)
+		}
 		return reconcile.Result{}, nil
 	}
 	c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeAccepted, "MCP Gateway Route reconciled successfully")
