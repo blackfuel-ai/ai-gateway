@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -29,6 +30,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/quotareserve"
 	"github.com/envoyproxy/ai-gateway/internal/redaction"
 )
 
@@ -62,6 +64,9 @@ type Server struct {
 	routerProcessorsPerReqID      map[string]routerEntry
 	routerProcessorsPerReqIDMutex sync.RWMutex
 	uuidFn                        func() string
+	// admissionReserves holds the recent outcomes the quota admission reserves are
+	// estimated from. It outlives configuration reloads.
+	admissionReserves *quotareserve.Store
 }
 
 // routerEntry is the per-request state kept by the router filter for the upstream filter(s).
@@ -86,6 +91,7 @@ func NewServer(logger *slog.Logger, enableRedaction bool) (*Server, error) {
 		processorFactories:       make(map[string]ProcessorFactory),
 		routerProcessorsPerReqID: make(map[string]routerEntry),
 		uuidFn:                   uuid.NewString,
+		admissionReserves:        quotareserve.NewStore(time.Now),
 	}
 	return srv, nil
 }
@@ -96,8 +102,18 @@ func (s *Server) LoadConfig(ctx context.Context, config *filterapi.Config) error
 	if err != nil {
 		return fmt.Errorf("cannot create runtime filter config: %w", err)
 	}
+	newConfig.AdmissionReserveStore = s.admissionReserves
 	s.config = newConfig // This is racey, but we don't care.
 	return nil
+}
+
+// admissionReserveSweepInterval is how often idle estimate keys are dropped.
+const admissionReserveSweepInterval = 30 * time.Second
+
+// RunAdmissionReserveSweeper drops the idle keys of the admission reserve store
+// until ctx is done.
+func (s *Server) RunAdmissionReserveSweeper(ctx context.Context) {
+	s.admissionReserves.Run(ctx, admissionReserveSweepInterval)
 }
 
 // Register a new processor for the given request path.
@@ -170,6 +186,11 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 	ctx = context.WithValue(ctx, loggerContextKey, s.logger)
 	defer func() {
 		if !isUpstreamFilter {
+			// The router stream ends with the request: record the outcome of an
+			// admitted request that recorded none.
+			if f, ok := p.(admissionReserveFinisher); ok {
+				f.finishAdmission()
+			}
 			s.routerProcessorsPerReqIDMutex.Lock()
 			defer s.routerProcessorsPerReqIDMutex.Unlock()
 			delete(s.routerProcessorsPerReqID, internalReqID)

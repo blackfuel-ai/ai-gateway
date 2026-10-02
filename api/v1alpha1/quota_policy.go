@@ -8,6 +8,7 @@ package v1alpha1
 import (
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
@@ -60,6 +61,7 @@ type QuotaPolicySpec struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.quota.dynamicOverride)",message="serviceQuota does not support dynamicOverride"
+// +kubebuilder:validation:XValidation:rule="!has(self.quota.admissionReserve)",message="serviceQuota does not support admissionReserve"
 type ServiceQuotaDefinition struct {
 	// CostExpression specifies a CEL expression for computing the quota burndown of the LLM-related request.
 	// If no expression is specified the "total_tokens" value is used.
@@ -135,6 +137,7 @@ const (
 )
 
 // +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.dynamicOverride))",message="dynamicOverride cannot be combined with shadowMode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.admissionReserve))",message="admissionReserve cannot be combined with shadowMode"
 type QuotaRule struct {
 	// ClientSelectors holds the list of conditions to select
 	// specific clients using attributes from the traffic flow.
@@ -166,6 +169,7 @@ type QuotaRule struct {
 // QuotaValue defines the quota limits using sliding window.
 //
 // +kubebuilder:validation:XValidation:rule="!(has(self.costExpression) && has(self.costMetric) && self.costMetric == 'Requests')",message="costExpression cannot be combined with costMetric=Requests"
+// +kubebuilder:validation:XValidation:rule="!(has(self.admissionReserve) && has(self.costMetric) && self.costMetric == 'Requests')",message="admissionReserve cannot be combined with costMetric=Requests"
 type QuotaValue struct {
 	// The limit alloted for a specified time window.
 	Limit uint `json:"limit"`
@@ -180,7 +184,7 @@ type QuotaValue struct {
 	DynamicOverride *QuotaLimitOverride `json:"dynamicOverride,omitempty"`
 	// CostMetric selects what this bucket counts. "Tokens" (the default) burns
 	// the bucket down at stream-done by CostExpression (or the model-level
-	// fallback). "Requests" burns the bucket down by exactly 1 per request at
+	// fallback), less any AdmissionReserve already charged. "Requests" burns the bucket down by exactly 1 per request at
 	// request time and adds no stream-done token charge.
 	//
 	// +optional
@@ -192,7 +196,75 @@ type QuotaValue struct {
 	//
 	// +optional
 	CostExpression *string `json:"costExpression,omitempty"`
+	// AdmissionReserve charges an estimate of the request's cost to the bucket
+	// when the request is admitted, and only the remainder when its stream
+	// completes, so requests in flight count against the limit. Without it the
+	// whole cost is charged at stream completion.
+	//
+	// +optional
+	AdmissionReserve *QuotaAdmissionReserve `json:"admissionReserve,omitempty"`
 }
+
+// QuotaAdmissionReserve configures the charge a token bucket takes when a
+// request is admitted.
+//
+// The reserve is estimated from the responses completed in the last Window for
+// requests carrying the same EstimateByHeader value and model: the request's
+// input tokens are its body size times the observed input tokens per byte, its
+// cached input tokens are the observed mean per request, and the bucket's cost
+// expression is evaluated on those estimates with zero output tokens. Percent of
+// that cost is charged at admission. At stream completion the bucket is charged
+// the actual cost minus the reserve, or nothing when the reserve covered it: a
+// reserve is never refunded.
+//
+// A key with no successful response in the window reserves nothing. A key whose
+// recent requests mostly fail reserves nothing either, because a failed request
+// keeps the reserve it was charged.
+//
+// Each gateway replica estimates from the responses it served itself.
+type QuotaAdmissionReserve struct {
+	// EstimateByHeader names the request header whose value groups the responses
+	// an estimate is drawn from, typically the API key identity stamped by an
+	// external authorization service.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	EstimateByHeader string `json:"estimateByHeader"`
+	// Percent of the estimated cost charged at admission.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	Percent uint32 `json:"percent"`
+	// Window is how far back the completed responses an estimate draws on go.
+	//
+	// +optional
+	// +kubebuilder:default="60s"
+	Window *gwapiv1.Duration `json:"window,omitempty"`
+	// MaxFailurePercent is the share of the key's requests in the window that
+	// may have failed or been aborted before the key stops reserving.
+	//
+	// +optional
+	// +kubebuilder:default=20
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	MaxFailurePercent *uint32 `json:"maxFailurePercent,omitempty"`
+	// MinSamples is the number of requests the key must have in the window
+	// before MaxFailurePercent applies.
+	//
+	// +optional
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	MinSamples *uint32 `json:"minSamples,omitempty"`
+}
+
+// Defaults of the optional QuotaAdmissionReserve fields, equal to their
+// kubebuilder defaults.
+const (
+	DefaultQuotaAdmissionReserveWindow            gwapiv1.Duration = "60s"
+	DefaultQuotaAdmissionReserveMaxFailurePercent uint32           = 20
+	DefaultQuotaAdmissionReserveMinSamples        uint32           = 5
+)
 
 // QuotaCostMetric selects whether a bucket counts tokens (stream-done charge)
 // or requests (request-time +1 only).

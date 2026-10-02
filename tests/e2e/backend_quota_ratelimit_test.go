@@ -178,6 +178,59 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		// A different org's bucket is untouched.
 		makeRequest("quota-org-model", 5, http.StatusOK, http.Header{"x-org-id": []string{"org-burndown-b"}})
 	})
+
+	// Admission reserve on "quota-reserve-model": its bucket counts fresh input
+	// tokens (input minus cached), and a request is charged, when admitted, the
+	// fresh input its x-test-client's previous responses predict (percent 100),
+	// then the remainder at completion. Every request also takes the +1 the
+	// request-time entry charges.
+	t.Run("admission reserve", func(t *testing.T) {
+		client := http.Header{"x-test-client": []string{"client-reserve-a"}}
+		send := func(promptTokens, cachedTokens int, headers http.Header) {
+			fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+			defer fwd.Kill()
+			httpClient := &http.Client{Timeout: 30 * time.Second}
+			var resp *http.Response
+			require.Eventually(t, func() bool {
+				req := newChatRequestWithUsage(t, fwd.Address(), "quota-reserve-model", promptTokens, cachedTokens, headers)
+				r, err := httpClient.Do(req) //nolint:bodyclose // closed below or on the retry path.
+				if err != nil {
+					t.Logf("request failed, retrying: %v", err)
+					return false
+				}
+				if r.StatusCode == http.StatusNotFound {
+					_ = r.Body.Close()
+					return false
+				}
+				resp = r
+				return true
+			}, 30*time.Second, 500*time.Millisecond, "request kept failing or returning 404")
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", string(body))
+		}
+
+		// A client with no previous response reserves nothing: +1 at admission,
+		// 1,000 - 800 = 200 fresh at completion.
+		send(1000, 800, client)
+		requireQuotaUsage(t, "quota-reserve-model", 201)
+
+		// The same request again: the reserve is the predicted 200, charged at
+		// admission, and the completion charges the remaining 0. The bucket ends
+		// where it would without a reserve.
+		send(1000, 800, client)
+		requireQuotaUsage(t, "quota-reserve-model", 402)
+
+		// A response fully served from cache costs nothing, but the 200 reserved
+		// at admission stays charged: a reserve is never refunded.
+		send(1000, 1000, client)
+		requireQuotaUsage(t, "quota-reserve-model", 603)
+
+		// Another client has no history of its own and reserves nothing.
+		send(1000, 800, http.Header{"x-test-client": []string{"client-reserve-b"}})
+		requireQuotaUsage(t, "quota-reserve-model", 804)
+	})
 }
 
 // newChatRequest builds one chat completion request against the test upstream
@@ -264,4 +317,29 @@ func requireQuotaUsage(t *testing.T, modelName string, expected int) {
 		return ok && usage == expected
 	}, 30*time.Second, 500*time.Millisecond,
 		"quota counter for model %q did not reach expected value %d", modelName, expected)
+}
+
+// newChatRequestWithUsage builds one chat completion request against the test
+// upstream whose fake response reports promptTokens input tokens, of which
+// cachedTokens were served from the prefix cache.
+func newChatRequestWithUsage(t *testing.T, addr, modelName string, promptTokens, cachedTokens int, headers ...http.Header) *http.Request {
+	t.Helper()
+	requestBody := fmt.Sprintf(`{"messages":[{"role":"user","content":"Say this is a test"}],"model":"%s"}`, modelName)
+	fakeResponseBody := fmt.Sprintf(
+		`{"choices":[{"message":{"content":"This is a test.","role":"assistant"}}],"usage":{"prompt_tokens":%d,"completion_tokens":1,"total_tokens":%d,"prompt_tokens_details":{"cached_tokens":%d}}}`,
+		promptTokens, promptTokens+1, cachedTokens,
+	)
+	req, err := http.NewRequest(http.MethodPut, addr+"/v1/chat/completions", strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
+	req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+	req.Header.Set("Host", "openai.com")
+	for _, h := range headers {
+		for k, vals := range h {
+			for _, v := range vals {
+				req.Header.Set(k, v)
+			}
+		}
+	}
+	return req
 }

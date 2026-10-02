@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
@@ -34,6 +36,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
+	"github.com/envoyproxy/ai-gateway/internal/quotareserve"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 	"github.com/envoyproxy/ai-gateway/internal/translator"
 )
@@ -113,6 +116,21 @@ type (
 		stream            bool
 		debugLogEnabled   bool
 		enableRedaction   bool
+		// admissionReserves is the reserve charged at admission per reserve
+		// metadata key, subtracted from the bucket's cost at completion.
+		admissionReserves map[string]uint64
+		// admissionRequestBytes is the request body size the reserves were
+		// estimated from, recorded with the request's outcome.
+		admissionRequestBytes int
+		// admissionKeys are the estimate keys the request's outcome is recorded
+		// under, each with the longest window that reads it.
+		admissionKeys map[quotareserve.Key]time.Duration
+		// admissionUpstreamStarted is set once a primary upstream leg starts:
+		// from then on the request has been charged its reserve.
+		admissionUpstreamStarted atomic.Bool
+		// admissionOutcomeRecorded is set once the request's outcome is recorded,
+		// so a request records exactly one outcome across retries.
+		admissionOutcomeRecorded atomic.Bool
 	}
 	// upstreamProcessor implements [Processor] for the upstream filter for the standard LLM endpoints.
 	//
@@ -332,7 +350,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		rawBody.Body,
 	)
 
-	return &extprocv3.ProcessingResponse{
+	resp := &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestBody{
 			RequestBody: &extprocv3.BodyResponse{
 				Response: &extprocv3.CommonResponse{
@@ -341,7 +359,15 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 				},
 			},
 		},
-	}, nil
+	}
+	// The quota charge filter runs after this filter and reads the reserves
+	// from dynamic metadata at admission.
+	if reserves := r.estimateAdmissionReserves(len(rawBody.Body), logger); reserves != nil {
+		resp.DynamicMetadata = &structpb.Struct{Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: structpb.NewStructValue(&structpb.Struct{Fields: reserves}),
+		}}
+	}
+	return resp, nil
 }
 
 func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) onRetry() bool {
@@ -669,10 +695,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	// leg already emitted it and the downstream access-log / billing pipeline would
 	// otherwise double-count tokens for every mirrored request.
 	if body.EndOfStream && !u.isMirror && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
-		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel)
+		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel, u.parent.admissionReserves)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build dynamic metadata: %w", err)
 		}
+		u.parent.recordAdmissionSuccess(&u.costs)
 		if u.parent.stream {
 			// Adding token latency information to metadata.
 			u.mergeWithTokenLatencyMetadata(metadata)
@@ -730,6 +757,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	// mirror is configured on the rule.
 	if !backend.Backend.IsMirror {
 		rp.upstreamFilterCount++
+		rp.admissionUpstreamStarted.Store(true)
 	}
 	// Some semantic conventions record the provider, which is only known now
 	// that routing has resolved a backend.
@@ -1014,7 +1042,9 @@ func evalRuntimeRequestCost(rc *filterapi.RuntimeRequestCost, costs *metrics.Tok
 // The metadata includes token usage costs and model information for downstream processing.
 // Two-tier precedence: for each metadataKey, check route-scoped requestCosts first (matching RouteName == routeName).
 // If found, use it. Otherwise, fall back to globalRequestCosts. If neither exists, the key is not emitted.
-func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string) (*structpb.Struct, error) {
+// A route-scoped cost with an admission reserve stores the cost minus the reserve already charged at
+// admission (admissionReserves, by reserve metadata key), or zero when the reserve covered it.
+func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string, admissionReserves map[string]uint64) (*structpb.Struct, error) {
 	metadata := make(map[string]*structpb.Value, len(requestCosts)+len(globalRequestCosts)+3)
 
 	// Track which metadata keys have been populated by route-scoped costs.
@@ -1043,6 +1073,9 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 		cost, err := evalRuntimeRequestCost(rc, costs, requestHeaders, backendName, routeName)
 		if err != nil {
 			return nil, err
+		}
+		if rc.AdmissionReserve != nil {
+			cost -= min(cost, admissionReserves[rc.AdmissionReserve.MetadataKey])
 		}
 		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
 		populatedKeys[rc.MetadataKey] = struct{}{}

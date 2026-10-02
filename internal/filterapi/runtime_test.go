@@ -134,3 +134,32 @@ func TestServer_LoadConfig(t *testing.T) {
 		require.Contains(t, err.Error(), "missing_route")
 	})
 }
+
+func TestNewRuntimeConfig_AdmissionReserves(t *testing.T) {
+	reserve := func(key string) *LLMRequestCostAdmissionReserve {
+		return &LLMRequestCostAdmissionReserve{
+			MetadataKey: key, EstimateByHeader: "x-client-id", Percent: 90,
+			Window: time.Minute, MaxFailurePercent: 20, MinSamples: 5,
+		}
+	}
+	fresh := "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+	config := &Config{
+		LLMRequestCosts: []LLMRequestCost{
+			// The same bucket on two routes and two backends: one reserve.
+			{MetadataKey: "quota_cost_rule-1", RouteName: "ns/a", Backend: "ns/b1", Model: "m1", Type: LLMRequestCostTypeCEL, CEL: fresh, AdmissionReserve: reserve("quota_reserve_rule-1_x")},
+			{MetadataKey: "quota_cost_rule-1", RouteName: "ns/b", Backend: "ns/b2", Model: "m2", Type: LLMRequestCostTypeCEL, CEL: fresh, AdmissionReserve: reserve("quota_reserve_rule-1_x")},
+			// A bucket without a reserve.
+			{MetadataKey: "quota_cost_rule-2", RouteName: "ns/a", Backend: "ns/b1", Model: "m1", Type: LLMRequestCostTypeCEL, CEL: "output_tokens"},
+			// Another reserve configuration.
+			{MetadataKey: "quota_cost_default", RouteName: "ns/a", Backend: "ns/b1", Model: "m1", Type: LLMRequestCostTypeCEL, CEL: "total_tokens", AdmissionReserve: reserve("quota_reserve_default_y")},
+		},
+	}
+	rc, err := NewRuntimeConfig(t.Context(), config, nil)
+	require.NoError(t, err)
+	require.Len(t, rc.AdmissionReserves, 2)
+	require.Equal(t, "quota_reserve_rule-1_x", rc.AdmissionReserves[0].Reserve.MetadataKey)
+	require.Same(t, &rc.RequestCosts[0], rc.AdmissionReserves[0].Cost)
+	require.Equal(t, "quota_reserve_default_y", rc.AdmissionReserves[1].Reserve.MetadataKey)
+	require.Same(t, &rc.RequestCosts[3], rc.AdmissionReserves[1].Cost)
+	require.Nil(t, rc.AdmissionReserveStore, "the store is the server's, set when it loads the config")
+}

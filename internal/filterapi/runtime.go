@@ -13,6 +13,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
+	"github.com/envoyproxy/ai-gateway/internal/quotareserve"
 )
 
 // BackendAuthHandler is the interface that deals with the backend auth for a specific backend.
@@ -48,6 +49,20 @@ type RuntimeConfig struct {
 	// EmitErrorMetadata mirrors filterapi.Config.EmitErrorMetadata: when true, the
 	// filter emits error dynamic metadata for non-2xx upstream responses.
 	EmitErrorMetadata bool
+	// AdmissionReserves lists the distinct admission reserves of RequestCosts,
+	// one per reserve metadata key. The router filter computes each of them for
+	// every request, because the route is not yet selected when it runs.
+	AdmissionReserves []RuntimeAdmissionReserve
+	// AdmissionReserveStore holds the recent outcomes the reserves are estimated
+	// from. It outlives configuration reloads and is set by the ext_proc server.
+	AdmissionReserveStore *quotareserve.Store
+}
+
+// RuntimeAdmissionReserve is one admission reserve and the request cost whose
+// expression it is estimated by.
+type RuntimeAdmissionReserve struct {
+	Reserve *LLMRequestCostAdmissionReserve
+	Cost    *RuntimeRequestCost
 }
 
 // RuntimeBackend is a filter backend with its auth handler that is derived from the filterapi.Backend configuration.
@@ -126,7 +141,24 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		costs = append(costs, RuntimeRequestCost{LLMRequestCost: c, CELProg: prog})
 	}
 
+	// Collect the distinct admission reserves; entries sharing a reserve
+	// metadata key carry the same expression and settings by construction.
+	var reserves []RuntimeAdmissionReserve
+	seenReserves := make(map[string]struct{})
+	for i := range costs {
+		r := costs[i].AdmissionReserve
+		if r == nil {
+			continue
+		}
+		if _, seen := seenReserves[r.MetadataKey]; seen {
+			continue
+		}
+		seenReserves[r.MetadataKey] = struct{}{}
+		reserves = append(reserves, RuntimeAdmissionReserve{Reserve: r, Cost: &costs[i]})
+	}
+
 	return &RuntimeConfig{
+		AdmissionReserves:  reserves,
 		UUID:               config.UUID,
 		Backends:           backends,
 		GlobalRequestCosts: globalCosts,
