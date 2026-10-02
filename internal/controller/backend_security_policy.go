@@ -86,12 +86,13 @@ func (c *BackendSecurityPolicyController) Reconcile(ctx context.Context, req ctr
 
 	c.logger.Info("Reconciling backend security policy", "namespace", req.Namespace, "name", req.Name)
 	res, err = c.reconcile(ctx, &bsp)
-	if err != nil {
+	switch {
+	case err != nil:
 		c.logger.Error(err, "failed to reconcile backend security policy", "namespace", req.Namespace, "name", req.Name)
 		c.updateBackendSecurityPolicyStatus(ctx, &bsp, aigv1b1.ConditionTypeNotAccepted, err.Error())
-	} else if bsp.GetDeletionTimestamp().IsZero() {
+	case bsp.GetDeletionTimestamp().IsZero():
 		c.updateBackendSecurityPolicyStatus(ctx, &bsp, aigv1b1.ConditionTypeAccepted, "BackendSecurityPolicy reconciled successfully")
-	} else if keptTerminating(&bsp) {
+	case keptTerminating(&bsp):
 		// A terminating policy reads NotAccepted for as long as another finalizer keeps it.
 		c.updateBackendSecurityPolicyStatus(ctx, &bsp, aigv1b1.ConditionTypeNotAccepted, terminatingMessage)
 	}
