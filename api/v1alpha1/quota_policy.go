@@ -258,6 +258,14 @@ type QuotaAdmissionReserve struct {
 	MinSamples *uint32 `json:"minSamples,omitempty"`
 }
 
+// Defaults of the optional QuotaAdmissionReserve fields, equal to their
+// kubebuilder defaults.
+const (
+	DefaultQuotaAdmissionReserveWindow            gwapiv1.Duration = "60s"
+	DefaultQuotaAdmissionReserveMaxFailurePercent uint32           = 20
+	DefaultQuotaAdmissionReserveMinSamples        uint32           = 5
+)
+
 // QuotaCostMetric selects whether a bucket counts tokens (stream-done charge)
 // or requests (request-time +1 only).
 //

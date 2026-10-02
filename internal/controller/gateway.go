@@ -1148,7 +1148,13 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 			// One LLMRequestCost per (bucket, target backend) with the Backend and
 			// Model filters. ext_proc only evaluates entries matching the serving
 			// backend and model, storing each bucket's cost under its own key.
-			for _, bucket := range quotaCostBuckets(&pmq.Quota) {
+			buckets, err := quotaCostBuckets(&pmq.Quota)
+			if err != nil {
+				c.logger.Error(err, "invalid QuotaPolicy bucket, skipping its cost expressions",
+					"policy", qp.Name, "model", *pmq.ModelName)
+				continue
+			}
+			for _, bucket := range buckets {
 				if _, err := llmcostcel.NewProgram(bucket.expr); err != nil {
 					c.logger.Error(err, "invalid QuotaPolicy cost expression, skipping",
 						"policy", qp.Name, "model", *pmq.ModelName, "bucket", bucket.key, "expression", bucket.expr)
@@ -1162,12 +1168,13 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 						continue
 					}
 					ec.LLMRequestCosts = append(ec.LLMRequestCosts, filterapi.LLMRequestCost{
-						Type:        filterapi.LLMRequestCostTypeCEL,
-						MetadataKey: metadataKey,
-						CEL:         bucket.expr,
-						Backend:     backendKey,
-						RouteName:   routeName,
-						Model:       *pmq.ModelName,
+						Type:             filterapi.LLMRequestCostTypeCEL,
+						MetadataKey:      metadataKey,
+						CEL:              bucket.expr,
+						Backend:          backendKey,
+						RouteName:        routeName,
+						Model:            *pmq.ModelName,
+						AdmissionReserve: bucket.reserve,
 					})
 					injectedQuotaCosts[dedupeKey] = struct{}{}
 				}
@@ -1178,37 +1185,55 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 
 // quotaCostBucket pairs one bucket's cost-metadata bucket key with its
 // resolved CEL cost expression (bucket-level, falling back to the model-level
-// expression, then "total_tokens").
+// expression, then "total_tokens") and its admission reserve, if any.
 type quotaCostBucket struct {
-	key  string
-	expr string
+	key     string
+	expr    string
+	reserve *filterapi.LLMRequestCostAdmissionReserve
 }
 
 // quotaCostBuckets returns the token-cost buckets of a model quota: the default
 // bucket plus each bucket rule, skipping Requests-metric buckets (those burn
 // down by the request-time +1 only and carry no stream-done token charge).
-func quotaCostBuckets(quota *aigv1a1.QuotaDefinition) []quotaCostBucket {
-	resolveExpr := func(v *aigv1a1.QuotaValue) string {
-		if v.CostExpression != nil {
-			return *v.CostExpression
+func quotaCostBuckets(quota *aigv1a1.QuotaDefinition) ([]quotaCostBucket, error) {
+	newBucket := func(key string, v *aigv1a1.QuotaValue) (quotaCostBucket, error) {
+		b := quotaCostBucket{key: key, expr: translator.QuotaBucketCostExpression(quota, v)}
+		if v.AdmissionReserve != nil {
+			spec, err := translator.ResolveQuotaAdmissionReserve(quota, v)
+			if err != nil {
+				return quotaCostBucket{}, fmt.Errorf("bucket %s: %w", key, err)
+			}
+			b.reserve = &filterapi.LLMRequestCostAdmissionReserve{
+				MetadataKey:       spec.MetadataKey(key),
+				EstimateByHeader:  spec.EstimateByHeader,
+				Percent:           spec.Percent,
+				Window:            spec.Window,
+				MaxFailurePercent: spec.MaxFailurePercent,
+				MinSamples:        spec.MinSamples,
+			}
 		}
-		if quota.CostExpression != nil {
-			return *quota.CostExpression
-		}
-		return "total_tokens"
+		return b, nil
 	}
 	var buckets []quotaCostBucket
 	if v := quota.DefaultBucket; v != nil && v.CostMetric != aigv1a1.QuotaCostMetricRequests {
-		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostDefaultBucketKey(), expr: resolveExpr(v)})
+		b, err := newBucket(translator.QuotaCostDefaultBucketKey(), v)
+		if err != nil {
+			return nil, err
+		}
+		buckets = append(buckets, b)
 	}
 	for i := range quota.BucketRules {
 		v := &quota.BucketRules[i].Quota
 		if v.CostMetric == aigv1a1.QuotaCostMetricRequests {
 			continue
 		}
-		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostRuleBucketKey(i), expr: resolveExpr(v)})
+		b, err := newBucket(translator.QuotaCostRuleBucketKey(i), v)
+		if err != nil {
+			return nil, err
+		}
+		buckets = append(buckets, b)
 	}
-	return buckets
+	return buckets, nil
 }
 
 // backendWithMaybeBSP retrieves the AIServiceBackend and its associated BackendSecurityPolicy if it exists.

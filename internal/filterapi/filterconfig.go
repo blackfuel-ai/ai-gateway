@@ -111,6 +111,33 @@ type LLMRequestCost struct {
 	// only evaluated when the request's model name matches. This allows a single
 	// metadata key to be shared across models without conflicting overwrites.
 	Model string `json:"model,omitempty"`
+	// AdmissionReserve is set exclusively by the QuotaPolicy controller for a
+	// bucket whose quota carries an admission reserve. The router-level ext_proc
+	// estimates the cost at admission and stores the reserve under its
+	// MetadataKey; at stream completion the cost stored under this entry's
+	// MetadataKey is the remainder after that reserve.
+	AdmissionReserve *LLMRequestCostAdmissionReserve `json:"admissionReserve,omitempty"`
+}
+
+// LLMRequestCostAdmissionReserve configures the admission charge of one quota
+// bucket's cost. See aigv1a1.QuotaAdmissionReserve for the estimate.
+type LLMRequestCostAdmissionReserve struct {
+	// MetadataKey is the dynamic metadata key the reserve is stored under, read
+	// by the quota charge filter's hits_addend at admission.
+	MetadataKey string `json:"metadataKey"`
+	// EstimateByHeader names the request header whose value groups the
+	// completed responses an estimate is drawn from.
+	EstimateByHeader string `json:"estimateByHeader"`
+	// Percent of the estimated cost charged at admission.
+	Percent uint32 `json:"percent"`
+	// Window is how far back the completed responses an estimate draws on go.
+	Window time.Duration `json:"window"`
+	// MaxFailurePercent is the share of the key's requests in the window that
+	// may have failed before the key stops reserving.
+	MaxFailurePercent uint32 `json:"maxFailurePercent"`
+	// MinSamples is the number of requests the key must have in the window
+	// before MaxFailurePercent applies.
+	MinSamples uint32 `json:"minSamples"`
 }
 
 // LLMRequestCostType specifies the kind of the request cost calculation.
