@@ -1293,3 +1293,60 @@ func TestServer_Process_RecoversFromPanic(t *testing.T) {
 	// The router entry must still be cleaned up by the deferred delete.
 	require.Empty(t, s.routerProcessorsPerReqID)
 }
+
+func TestServer_LoadConfig_KeepsAdmissionReserveStore(t *testing.T) {
+	s, err := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+	require.NoError(t, s.LoadConfig(t.Context(), &filterapi.Config{}))
+	first := s.config.AdmissionReserveStore
+	require.NotNil(t, first)
+	require.NoError(t, s.LoadConfig(t.Context(), &filterapi.Config{UUID: "reloaded"}))
+	require.Same(t, first, s.config.AdmissionReserveStore, "outcomes survive a configuration reload")
+}
+
+// finishingProcessor is a router-level processor recording finishAdmission calls.
+type finishingProcessor struct {
+	mockProcessor
+	finished *int
+}
+
+func (f finishingProcessor) finishAdmission() { *f.finished++ }
+
+// headersThenEOFStream delivers one request headers message, then ends the stream.
+type headersThenEOFStream struct {
+	mockExternalProcessingStream
+	sent bool
+}
+
+func (m *headersThenEOFStream) Recv() (*extprocv3.ProcessingRequest, error) {
+	if m.sent {
+		return nil, io.EOF
+	}
+	m.sent = true
+	return m.retRecv, nil
+}
+
+func (m *headersThenEOFStream) Send(*extprocv3.ProcessingResponse) error { return nil }
+
+func TestServer_Process_FinishesAdmissionWhenRouterStreamEnds(t *testing.T) {
+	s, err := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	require.NoError(t, err)
+	s.config = &filterapi.RuntimeConfig{}
+	hm := &corev3.HeaderMap{Headers: []*corev3.HeaderValue{{Key: ":path", Value: "/"}}}
+	var finished int
+	s.Register("/", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
+		return finishingProcessor{
+			mockProcessor: mockProcessor{t: t, expHeaderMap: hm, retProcessingResponse: &extprocv3.ProcessingResponse{}},
+			finished:      &finished,
+		}, nil
+	})
+
+	ms := &headersThenEOFStream{mockExternalProcessingStream: mockExternalProcessingStream{
+		t: t, ctx: t.Context(),
+		retRecv: &extprocv3.ProcessingRequest{
+			Request: &extprocv3.ProcessingRequest_RequestHeaders{RequestHeaders: &extprocv3.HttpHeaders{Headers: hm}},
+		},
+	}}
+	require.NoError(t, s.Process(ms))
+	require.Equal(t, 1, finished)
+}

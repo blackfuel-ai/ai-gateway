@@ -323,6 +323,7 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to create external processor server: %w", err)
 	}
+	go server.RunAdmissionReserveSweeper(ctx)
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/chat/completions"), extproc.NewFactory(
 		chatCompletionMetricsFactory, tracing.ChatCompletionTracer(), endpointspec.ChatCompletionsEndpointSpec{}))
 	server.Register(path.Join(flags.rootPrefix, endpointPrefixes.OpenAI, "/v1/completions"), extproc.NewFactory(
