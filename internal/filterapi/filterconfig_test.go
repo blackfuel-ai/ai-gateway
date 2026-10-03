@@ -26,6 +26,11 @@ llmRequestCosts:
 - metadataKey: token_usage_key
   routeName: ns/my-route
   type: OutputToken
+usageEstimates:
+- metadataKey: estimated_input_token
+  cel: input_tokens
+  byHeader: x-client-id
+  emitMetric: true
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
 	cfg, err := filterapi.UnmarshalConfigYaml(configPath)
@@ -38,6 +43,14 @@ llmRequestCosts:
 				MetadataKey: "token_usage_key",
 				RouteName:   "ns/my-route",
 				Type:        filterapi.LLMRequestCostTypeOutputToken,
+			},
+		},
+		UsageEstimates: []filterapi.UsageEstimate{
+			{
+				MetadataKey: "estimated_input_token",
+				CEL:         "input_tokens",
+				ByHeader:    "x-client-id",
+				EmitMetric:  true,
 			},
 		},
 	}

@@ -59,6 +59,9 @@ func TestWithTestUpstream(t *testing.T) {
 		GlobalLLMRequestCosts: []filterapi.GlobalLLMRequestCost{
 			{MetadataKey: "used_token", Type: filterapi.LLMRequestCostTypeInputToken},
 		},
+		UsageEstimates: []filterapi.UsageEstimate{
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-usage-estimate-key"},
+		},
 		Backends: []filterapi.Backend{
 			alwaysFailingBackend,
 			testUpstreamOpenAIBackend,
@@ -1614,6 +1617,51 @@ data: {"type":"message_stop"}`,
 					continue
 				}
 				if l.LLMErrorType == "ThrottledException" && l.LLMErrorCode == "429" {
+					return true
+				}
+			}
+			return false
+		}, eventuallyTimeout, eventuallyInterval)
+	})
+
+	// A request is estimated from the responses of the same x-usage-estimate-key and model
+	// completed in the previous 15-second period, and the estimate is logged from the
+	// dynamic metadata.
+	t.Run("usage-estimate-access-log", func(t *testing.T) {
+		const requestBody = `{"model":"something","messages":[{"role":"user","content":"usage estimate"}]}`
+		const responseBody = `{"choices":[{"message":{"content":"This is a test."}}],"usage":{"prompt_tokens":40,"completion_tokens":5,"total_tokens":45}}`
+		send := func() {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+				fmt.Sprintf("http://localhost:%d/v1/chat/completions", listenerPort), strings.NewReader(requestBody))
+			require.NoError(t, err)
+			req.Header.Set("x-test-backend", "openai")
+			req.Header.Set("x-usage-estimate-key", "data-plane-estimate")
+			req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(responseBody)))
+			req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			_, err = io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+		send()
+		// The first response is exposed once its 15-second period is over.
+		time.Sleep(time.Until(time.Now().Truncate(15 * time.Second).Add(15 * time.Second)))
+		send()
+
+		require.Eventually(t, func() bool {
+			type lineFormat struct {
+				Estimate *float64 `json:"estimated_input_token"`
+				Samples  *float64 `json:"estimated_input_token_samples"`
+			}
+			for _, line := range strings.Split(env.EnvoyStdout(), "\n") {
+				var l lineFormat
+				if json.Unmarshal([]byte(line), &l) != nil || l.Estimate == nil || l.Samples == nil {
+					continue
+				}
+				// Same body, so the estimate is the input tokens of the first response.
+				if *l.Estimate == 40 && *l.Samples == 1 {
 					return true
 				}
 			}

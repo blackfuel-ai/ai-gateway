@@ -682,6 +682,103 @@ spec:
                 x-kubernetes-list-map-keys:
                 - metadataKey
                 x-kubernetes-list-type: map
+              usageEstimates:
+                description: |-
+                  UsageEstimates estimates the token usage of each request when it is admitted,
+                  from the responses completed during the last completed 15-second period (periods
+                  are aligned on the clock) for requests carrying the same value of a request header
+                  (for example the API key identity stamped by an external authorization service)
+                  and the same model, and emits each estimate as Envoy dynamic metadata under the
+                  "io.envoy.ai_gateway" namespace.
+
+                  Estimates change no routing, cost or quota decision. They can be referenced in
+                  access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+                  To learn from streamed responses, a streaming OpenAI-compatible request gets
+                  stream_options.include_usage set, as with LLMRequestCosts, so its client receives
+                  the final usage chunk.
+
+                  A metadataKey must not be another item's metadataKey followed by "_samples" or
+                  "_failures", nor share any of its three keys with an LLMRequestCost metadataKey.
+                items:
+                  description: |-
+                    UsageEstimate estimates one value of a request's token usage when the request
+                    is admitted, before any upstream has answered.
+
+                    Completed requests are accumulated per ByHeader value and model over fixed
+                    15-second periods aligned on the clock. A request is estimated from the
+                    successful responses of the last completed period:
+
+                      - input tokens: the request body size times the input tokens per body byte
+                        observed in those responses;
+                      - cached input tokens: the mean cached input tokens per response.
+
+                    The CEL expression is evaluated on that estimated usage and its result is
+                    stored under MetadataKey. No estimate is emitted when the last completed
+                    period holds no successful response. Two more keys are always emitted when the
+                    header is present: "<metadataKey>_samples", the number of requests completed
+                    in that period, and "<metadataKey>_failures", how many of them failed (an
+                    error status, a response without usage, or a stream aborted after reaching an
+                    upstream).
+
+                    Each gateway replica estimates from the responses it served itself.
+                  properties:
+                    byHeader:
+                      description: |-
+                        ByHeader names the request header whose value groups the responses the
+                        estimate is drawn from. Requests without the header get no estimate.
+
+                        The header should be set by the gateway, for example by an external
+                        authorization service, rather than by clients: each distinct value is kept
+                        in memory until it has had no request for up to about a minute.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    cel:
+                      description: "CEL is the CEL expression computing the estimate.
+                        It accepts the variables\nof LLMRequestCost.CEL and must return
+                        a signed or unsigned integer. It is\nevaluated on the estimated
+                        usage of the request:\n\n\t* model: the model name extracted
+                        from the request content.\n\t* input_tokens: the estimated
+                        number of input tokens.\n\t* cached_input_tokens: the estimated
+                        number of cached read input tokens.\n\t* total_tokens: equal
+                        to input_tokens.\n\t* output_tokens, reasoning_tokens and
+                        cache_creation_input_tokens: 0.\n\t* backend and route_name:
+                        empty, as no route is selected at admission.\n\nFor example,
+                        \"input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens
+                        : uint(0)\"\nestimates the input tokens that are not served
+                        from the prompt cache."
+                      minLength: 1
+                      type: string
+                    emitMetric:
+                      description: |-
+                        EmitMetric also records the estimate in metrics: a counter of the requests
+                        that got an estimate or none, and a histogram of the estimate divided by
+                        the same CEL expression evaluated on the actual usage of the response.
+                        The header value is never a metric attribute.
+
+                        Defaults to false.
+                      type: boolean
+                    metadataKey:
+                      description: MetadataKey is the key of the dynamic metadata
+                        storing the estimate.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - byHeader
+                  - cel
+                  - metadataKey
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - metadataKey
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: metadataKey must not equal another item's metadataKey with
+                    a _samples or _failures suffix
+                  rule: self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_samples'
+                    && a.metadataKey != b.metadataKey + '_failures'))
             type: object
           status:
             description: Status defines the status of the GatewayConfig.
@@ -1411,6 +1508,103 @@ spec:
                 x-kubernetes-list-map-keys:
                 - metadataKey
                 x-kubernetes-list-type: map
+              usageEstimates:
+                description: |-
+                  UsageEstimates estimates the token usage of each request when it is admitted,
+                  from the responses completed during the last completed 15-second period (periods
+                  are aligned on the clock) for requests carrying the same value of a request header
+                  (for example the API key identity stamped by an external authorization service)
+                  and the same model, and emits each estimate as Envoy dynamic metadata under the
+                  "io.envoy.ai_gateway" namespace.
+
+                  Estimates change no routing, cost or quota decision. They can be referenced in
+                  access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+                  To learn from streamed responses, a streaming OpenAI-compatible request gets
+                  stream_options.include_usage set, as with LLMRequestCosts, so its client receives
+                  the final usage chunk.
+
+                  A metadataKey must not be another item's metadataKey followed by "_samples" or
+                  "_failures", nor share any of its three keys with an LLMRequestCost metadataKey.
+                items:
+                  description: |-
+                    UsageEstimate estimates one value of a request's token usage when the request
+                    is admitted, before any upstream has answered.
+
+                    Completed requests are accumulated per ByHeader value and model over fixed
+                    15-second periods aligned on the clock. A request is estimated from the
+                    successful responses of the last completed period:
+
+                      - input tokens: the request body size times the input tokens per body byte
+                        observed in those responses;
+                      - cached input tokens: the mean cached input tokens per response.
+
+                    The CEL expression is evaluated on that estimated usage and its result is
+                    stored under MetadataKey. No estimate is emitted when the last completed
+                    period holds no successful response. Two more keys are always emitted when the
+                    header is present: "<metadataKey>_samples", the number of requests completed
+                    in that period, and "<metadataKey>_failures", how many of them failed (an
+                    error status, a response without usage, or a stream aborted after reaching an
+                    upstream).
+
+                    Each gateway replica estimates from the responses it served itself.
+                  properties:
+                    byHeader:
+                      description: |-
+                        ByHeader names the request header whose value groups the responses the
+                        estimate is drawn from. Requests without the header get no estimate.
+
+                        The header should be set by the gateway, for example by an external
+                        authorization service, rather than by clients: each distinct value is kept
+                        in memory until it has had no request for up to about a minute.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    cel:
+                      description: "CEL is the CEL expression computing the estimate.
+                        It accepts the variables\nof LLMRequestCost.CEL and must return
+                        a signed or unsigned integer. It is\nevaluated on the estimated
+                        usage of the request:\n\n\t* model: the model name extracted
+                        from the request content.\n\t* input_tokens: the estimated
+                        number of input tokens.\n\t* cached_input_tokens: the estimated
+                        number of cached read input tokens.\n\t* total_tokens: equal
+                        to input_tokens.\n\t* output_tokens, reasoning_tokens and
+                        cache_creation_input_tokens: 0.\n\t* backend and route_name:
+                        empty, as no route is selected at admission.\n\nFor example,
+                        \"input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens
+                        : uint(0)\"\nestimates the input tokens that are not served
+                        from the prompt cache."
+                      minLength: 1
+                      type: string
+                    emitMetric:
+                      description: |-
+                        EmitMetric also records the estimate in metrics: a counter of the requests
+                        that got an estimate or none, and a histogram of the estimate divided by
+                        the same CEL expression evaluated on the actual usage of the response.
+                        The header value is never a metric attribute.
+
+                        Defaults to false.
+                      type: boolean
+                    metadataKey:
+                      description: MetadataKey is the key of the dynamic metadata
+                        storing the estimate.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - byHeader
+                  - cel
+                  - metadataKey
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - metadataKey
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: metadataKey must not equal another item's metadataKey with
+                    a _samples or _failures suffix
+                  rule: self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_samples'
+                    && a.metadataKey != b.metadataKey + '_failures'))
             type: object
           status:
             description: Status defines the status of the GatewayConfig.
