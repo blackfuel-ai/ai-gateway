@@ -107,10 +107,11 @@ func (c *QuotaPolicyController) Reconcile(ctx context.Context, req reconcile.Req
 	c.logger.Info("Reconciling QuotaPolicy", "namespace", req.Namespace, "name", req.Name)
 
 	if c.isLeader() {
-		if handleFinalizer(ctx, c.client, c.logger, &quotaPolicy, func(ctx context.Context, _ *aigv1a1.QuotaPolicy) error {
+		onDelete, err := handleFinalizer(ctx, c.client, c.logger, &quotaPolicy, func(ctx context.Context, _ *aigv1a1.QuotaPolicy) error {
 			return c.deleteQuotaPolicyConfig(ctx, req.NamespacedName)
-		}) {
-			return ctrl.Result{}, nil
+		})
+		if err != nil || onDelete {
+			return ctrl.Result{}, err
 		}
 	} else if !quotaPolicy.GetDeletionTimestamp().IsZero() {
 		// A non-leader must still purge its local snapshot cache on deletion,

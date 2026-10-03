@@ -79,6 +79,13 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 		c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeNotAccepted, err.Error())
 		return ctrl.Result{}, err
 	}
+	if !MCPRoute.GetDeletionTimestamp().IsZero() {
+		// A terminating route reads NotAccepted for as long as another finalizer keeps it.
+		if keptTerminating(&MCPRoute) {
+			c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeNotAccepted, terminatingMessage)
+		}
+		return reconcile.Result{}, nil
+	}
 	c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeAccepted, "MCP Gateway Route reconciled successfully")
 	return reconcile.Result{}, nil
 }
@@ -88,8 +95,8 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1.MCPRoute) error {
 	// On deletion, propagate to the referenced Gateways and clean up the shared Backend if this
 	// is the last MCPRoute in the namespace.
-	if handleFinalizer(ctx, c.client, c.logger, mcpRoute, c.onMCPRouteDeleted) {
-		return nil
+	if onDelete, err := handleFinalizer(ctx, c.client, c.logger, mcpRoute, c.onMCPRouteDeleted); err != nil || onDelete {
+		return err
 	}
 
 	// Ensure the shared per-namespace MCP proxy Backend exists before creating/updating the HTTPRoute.
