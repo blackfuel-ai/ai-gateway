@@ -105,19 +105,26 @@ type GatewayConfigSpec struct {
 	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
 
 	// UsageEstimates estimates the token usage of each request when it is admitted,
-	// from the responses completed in the last 15 seconds for requests carrying the same value of
-	// a request header (for example the API key identity stamped by an external
-	// authorization service) and the same model, and emits each estimate as Envoy
-	// dynamic metadata under the "io.envoy.ai_gateway" namespace.
+	// from the responses completed during the last completed 15-second period (periods
+	// are aligned on the clock) for requests carrying the same value of a request header
+	// (for example the API key identity stamped by an external authorization service)
+	// and the same model, and emits each estimate as Envoy dynamic metadata under the
+	// "io.envoy.ai_gateway" namespace.
 	//
-	// Estimates are observational: they change no routing, cost or quota decision.
-	// They can be referenced in access logs, for example
-	// %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+	// Estimates change no routing, cost or quota decision. They can be referenced in
+	// access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+	// To learn from streamed responses, a streaming OpenAI-compatible request gets
+	// stream_options.include_usage set, as with LLMRequestCosts, so its client receives
+	// the final usage chunk.
+	//
+	// A metadataKey must not be another item's metadataKey followed by "_samples" or
+	// "_failures", nor share any of its three keys with an LLMRequestCost metadataKey.
 	//
 	// +optional
 	// +listType=map
 	// +listMapKey=metadataKey
 	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_samples' && a.metadataKey != b.metadataKey + '_failures'))",message="metadataKey must not equal another item's metadataKey with a _samples or _failures suffix"
 	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
 }
 
@@ -167,6 +174,10 @@ type UsageEstimate struct {
 	CEL string `json:"cel"`
 	// ByHeader names the request header whose value groups the responses the
 	// estimate is drawn from. Requests without the header get no estimate.
+	//
+	// The header should be set by the gateway, for example by an external
+	// authorization service, rather than by clients: each distinct value is kept
+	// in memory until it has had no request for up to about a minute.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1

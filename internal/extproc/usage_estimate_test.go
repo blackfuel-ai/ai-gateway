@@ -7,6 +7,8 @@ package extproc
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -18,16 +20,18 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
 	"github.com/envoyproxy/ai-gateway/internal/usageestimate"
 )
 
 type recordedUsageEstimateRequest struct {
 	metadataKey, model string
-	estimated          bool
+	outcome            metrics.UsageEstimateOutcome
 }
 
 type recordedUsageEstimateRatio struct {
@@ -42,10 +46,10 @@ type mockUsageEstimateMetrics struct {
 	ratios   []recordedUsageEstimateRatio
 }
 
-func (m *mockUsageEstimateMetrics) RecordRequest(_ context.Context, metadataKey, originalModel string, estimated bool) {
+func (m *mockUsageEstimateMetrics) RecordRequest(_ context.Context, metadataKey, originalModel string, outcome metrics.UsageEstimateOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.requests = append(m.requests, recordedUsageEstimateRequest{metadataKey, originalModel, estimated})
+	m.requests = append(m.requests, recordedUsageEstimateRequest{metadataKey, originalModel, outcome})
 }
 
 func (m *mockUsageEstimateMetrics) RecordRatio(_ context.Context, metadataKey, originalModel string, ratio float64) {
@@ -95,13 +99,39 @@ func newUsageEstimateTestRouter(config *filterapi.RuntimeConfig, ue *usageEstima
 	return rp
 }
 
-// admitAndSetBackend runs the router request body phase, then attaches a primary upstream leg.
-func admitAndSetBackend(t *testing.T, rp *chatCompletionProcessorRouterFilter) (*extprocv3.ProcessingResponse, *chatCompletionProcessorUpstreamFilter) {
-	resp, err := rp.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, usageEstimateTestModel, false, nil)})
+// admit runs the router request body phase.
+func admit(t *testing.T, rp *chatCompletionProcessorRouterFilter, stream bool) *extprocv3.ProcessingResponse {
+	resp, err := rp.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, usageEstimateTestModel, stream, nil)})
 	require.NoError(t, err)
+	return resp
+}
+
+// setBackend attaches an upstream leg to the request, a mirror one when mirror is set.
+func setBackend(t *testing.T, rp *chatCompletionProcessorRouterFilter, mirror bool) *chatCompletionProcessorUpstreamFilter {
 	u := &chatCompletionProcessorUpstreamFilter{requestHeaders: map[string]string{":path": "/v1/chat/completions"}, metrics: &mockMetrics{}}
 	require.NoError(t, u.SetBackend(t.Context(),
-		&filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "primary", Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}}}, "route", rp))
+		&filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "primary", Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, IsMirror: mirror}}, "route", rp))
+	return u
+}
+
+// dispatch runs the upstream request headers phase of u, which sends the request
+// upstream unless the auth handler h or the translator error translateErr stops it.
+func dispatch(t *testing.T, u *chatCompletionProcessorUpstreamFilter, h filterapi.BackendAuthHandler, translateErr error) (*extprocv3.ProcessingResponse, error) {
+	u.translator = &mockTranslator{
+		t: t, expRequestBody: u.parent.originalRequestBody,
+		expForceRequestBodyMutation: u.onRetry() || u.parent.forceBodyMutation, retErr: translateErr,
+	}
+	u.handler = h
+	u.logger = slog.Default()
+	return u.ProcessRequestHeaders(t.Context(), nil)
+}
+
+// admitAndDispatch admits a non-streaming request and sends it to a primary upstream leg.
+func admitAndDispatch(t *testing.T, rp *chatCompletionProcessorRouterFilter) (*extprocv3.ProcessingResponse, *chatCompletionProcessorUpstreamFilter) {
+	resp := admit(t, rp, false)
+	u := setBackend(t, rp, false)
+	_, err := dispatch(t, u, &mockBackendAuthHandler{}, nil)
+	require.NoError(t, err)
 	return resp, u
 }
 
@@ -157,7 +187,7 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 
 	// A cold key emits only the period counts.
 	rp := newUsageEstimateTestRouter(cfg, ue, headers)
-	resp, u := admitAndSetBackend(t, rp)
+	resp, u := admitAndDispatch(t, rp)
 	fields := usageEstimateFields(t, resp)
 	require.Len(t, fields, 4)
 	for _, key := range []string{"estimated_input_token", "estimated_fresh_input_token"} {
@@ -171,7 +201,7 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 
 	// The same key and body size is estimated from the first response.
 	rp = newUsageEstimateTestRouter(cfg, ue, headers)
-	resp, u = admitAndSetBackend(t, rp)
+	resp, u = admitAndDispatch(t, rp)
 	fields = usageEstimateFields(t, resp)
 	require.Equal(t, 100.0, fields["estimated_input_token"].GetNumberValue())
 	require.Equal(t, 60.0, fields["estimated_fresh_input_token"].GetNumberValue())
@@ -183,8 +213,8 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 
 	// Only the item with EmitMetric records metrics.
 	require.Equal(t, []recordedUsageEstimateRequest{
-		{"estimated_input_token", usageEstimateTestModel, false},
-		{"estimated_input_token", usageEstimateTestModel, true},
+		{"estimated_input_token", usageEstimateTestModel, metrics.UsageEstimateOutcomeCold},
+		{"estimated_input_token", usageEstimateTestModel, metrics.UsageEstimateOutcomeEstimated},
 	}, m.requests)
 	// The estimate (100) against the actual input tokens (200).
 	require.Equal(t, []recordedUsageEstimateRatio{{"estimated_input_token", usageEstimateTestModel, 0.5}}, m.ratios)
@@ -197,7 +227,7 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 func TestUsageEstimate_NoHeader(t *testing.T) {
 	ue, m, _ := newTestUsageEstimates()
 	rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, nil)
-	resp, u := admitAndSetBackend(t, rp)
+	resp, u := admitAndDispatch(t, rp)
 	require.Nil(t, resp.DynamicMetadata)
 	completeWithUsage(t, rp, u, 100, 0)
 	rp.finishUsageEstimates()
@@ -208,7 +238,7 @@ func TestUsageEstimate_NoHeader(t *testing.T) {
 func TestUsageEstimate_NotConfigured(t *testing.T) {
 	ue, _, clock := newTestUsageEstimates()
 	rp := newUsageEstimateTestRouter(&filterapi.RuntimeConfig{}, ue, map[string]string{usageEstimateTestHeader: "key-a"})
-	resp, u := admitAndSetBackend(t, rp)
+	resp, u := admitAndDispatch(t, rp)
 	require.Nil(t, resp.DynamicMetadata)
 	completeWithUsage(t, rp, u, 100, 0)
 	rp.finishUsageEstimates()
@@ -217,24 +247,27 @@ func TestUsageEstimate_NotConfigured(t *testing.T) {
 }
 
 func TestUsageEstimate_CELErrorSkipsOnlyThatKey(t *testing.T) {
-	ue, _, clock := newTestUsageEstimates()
+	ue, m, clock := newTestUsageEstimates()
 	failing := filterapi.UsageEstimate{
 		MetadataKey: "failing", CEL: "input_tokens > uint(0) ? input_tokens - uint(1000000) : uint(0)", ByHeader: usageEstimateTestHeader,
+		EmitMetric: true,
 	}
 	cfg := newUsageEstimateTestConfig(t, testEstimateInput, failing)
 	headers := map[string]string{usageEstimateTestHeader: "key-a"}
 
 	rp := newUsageEstimateTestRouter(cfg, ue, headers)
-	_, u := admitAndSetBackend(t, rp)
+	_, u := admitAndDispatch(t, rp)
 	completeWithUsage(t, rp, u, 100, 0)
 	clock.nextPeriod()
 
 	rp = newUsageEstimateTestRouter(cfg, ue, headers)
-	resp, _ := admitAndSetBackend(t, rp)
+	resp, _ := admitAndDispatch(t, rp)
 	fields := usageEstimateFields(t, resp)
 	require.Equal(t, 100.0, fields["estimated_input_token"].GetNumberValue())
 	require.NotContains(t, fields, "failing")
 	require.Equal(t, 1.0, fields["failing_samples"].GetNumberValue())
+	// A failed evaluation is not reported as a cold key.
+	require.Equal(t, recordedUsageEstimateRequest{"failing", usageEstimateTestModel, metrics.UsageEstimateOutcomeError}, m.requests[len(m.requests)-1])
 }
 
 func TestUsageEstimate_Failures(t *testing.T) {
@@ -244,7 +277,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 	t.Run("error status after reaching an upstream", func(t *testing.T) {
 		ue, _, clock := newTestUsageEstimates()
 		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
-		_, u := admitAndSetBackend(t, rp)
+		_, u := admitAndDispatch(t, rp)
 		inBody := &extprocv3.HttpBody{Body: []byte("error"), EndOfStream: true}
 		u.translator = &mockTranslator{t: t, expResponseBody: inBody}
 		u.responseHeaders = map[string]string{":status": "500"}
@@ -259,7 +292,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 	t.Run("response without usage", func(t *testing.T) {
 		ue, _, clock := newTestUsageEstimates()
 		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
-		_, u := admitAndSetBackend(t, rp)
+		_, u := admitAndDispatch(t, rp)
 		inBody := &extprocv3.HttpBody{Body: []byte("some-body"), EndOfStream: true}
 		u.translator = &mockTranslator{t: t, expResponseBody: inBody}
 		u.responseHeaders = map[string]string{":status": "200"}
@@ -283,15 +316,104 @@ func TestUsageEstimate_Failures(t *testing.T) {
 	t.Run("mirror leg only", func(t *testing.T) {
 		ue, _, clock := newTestUsageEstimates()
 		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
-		_, err := rp.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, usageEstimateTestModel, false, nil)})
+		admit(t, rp, false)
+		mirror := setBackend(t, rp, true)
+		_, err := dispatch(t, mirror, &mockBackendAuthHandler{}, nil)
 		require.NoError(t, err)
-		mirror := &chatCompletionProcessorUpstreamFilter{requestHeaders: map[string]string{":path": "/v1/chat/completions"}, metrics: &mockMetrics{}}
-		require.NoError(t, mirror.SetBackend(t.Context(),
-			&filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "mirror", Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, IsMirror: true}}, "route", rp))
 		rp.finishUsageEstimates()
 		clock.nextPeriod()
 		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, 1))
 	})
+
+	// The gateway answering or failing the request itself is not an outcome of
+	// the key: the request never reached an upstream.
+	for _, tc := range []struct {
+		name         string
+		handler      filterapi.BackendAuthHandler
+		translateErr error
+		expErr       bool
+	}{
+		{name: "missing upstream credential", handler: &mockBackendAuthHandlerError{err: backendauth.ErrCredentialMissing}},
+		{name: "upstream auth error", handler: &mockBackendAuthHandlerError{err: errors.New("authentication failed")}, expErr: true},
+		{name: "request rejected by the translator", translateErr: fmt.Errorf("%w: missing required field", internalapi.ErrInvalidRequestBody)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ue, _, clock := newTestUsageEstimates()
+			rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
+			admit(t, rp, false)
+			u := setBackend(t, rp, false)
+			resp, err := dispatch(t, u, tc.handler, tc.translateErr)
+			if tc.expErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, resp.GetImmediateResponse())
+			}
+			rp.finishUsageEstimates()
+			clock.nextPeriod()
+			require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, 1))
+		})
+	}
+
+	t.Run("stream aborted after reaching an upstream", func(t *testing.T) {
+		ue, _, clock := newTestUsageEstimates()
+		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
+		admit(t, rp, true)
+		u := setBackend(t, rp, false)
+		_, err := dispatch(t, u, &mockBackendAuthHandler{}, nil)
+		require.NoError(t, err)
+		u.translator = &mockTranslator{t: t}
+		u.responseHeaders = map[string]string{":status": "200"}
+		_, err = rp.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("data: {}\n\n")})
+		require.NoError(t, err)
+		rp.finishUsageEstimates()
+		clock.nextPeriod()
+		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, 1))
+	})
+}
+
+func TestUsageEstimate_RetryThenSuccess(t *testing.T) {
+	key := usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}
+	ue, _, clock := newTestUsageEstimates()
+	rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, map[string]string{usageEstimateTestHeader: "key-a"})
+	admit(t, rp, false)
+	// The first leg fails upstream; Envoy retries without the router seeing its response.
+	_, err := dispatch(t, setBackend(t, rp, false), &mockBackendAuthHandler{}, nil)
+	require.NoError(t, err)
+	u := setBackend(t, rp, false)
+	_, err = dispatch(t, u, &mockBackendAuthHandler{}, nil)
+	require.NoError(t, err)
+	completeWithUsage(t, rp, u, 100, 0)
+	rp.finishUsageEstimates()
+	clock.nextPeriod()
+	st := ue.store.Stats(key, 1)
+	require.Equal(t, uint32(1), st.Samples)
+	require.Equal(t, uint32(0), st.Failures)
+}
+
+func TestUsageEstimate_StreamSuccess(t *testing.T) {
+	key := usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}
+	ue, _, clock := newTestUsageEstimates()
+	rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, map[string]string{usageEstimateTestHeader: "key-a"})
+	admit(t, rp, true)
+	u := setBackend(t, rp, false)
+	_, err := dispatch(t, u, &mockBackendAuthHandler{}, nil)
+	require.NoError(t, err)
+	mt := &mockTranslator{t: t}
+	mt.retUsedToken.SetInputTokens(100)
+	u.translator = mt
+	u.responseHeaders = map[string]string{":status": "200"}
+	// The usage is recorded once, at the end of the stream.
+	for _, eos := range []bool{false, false, true} {
+		_, err = rp.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("data: {}\n\n"), EndOfStream: eos})
+		require.NoError(t, err)
+	}
+	rp.finishUsageEstimates()
+	clock.nextPeriod()
+	st := ue.store.Stats(key, 1)
+	require.Equal(t, uint32(1), st.Samples)
+	require.Equal(t, uint32(0), st.Failures)
+	require.True(t, st.Estimated)
 }
 
 func TestUsageEstimate_ForcesStreamUsage(t *testing.T) {
@@ -313,8 +435,17 @@ type usageEstimateRecordingProcessor struct {
 func (p *usageEstimateRecordingProcessor) setUsageEstimates(ue *usageEstimates) { p.set = ue }
 func (p *usageEstimateRecordingProcessor) finishUsageEstimates()                { p.finished++ }
 
+func TestNewServer_UsageEstimatesOff(t *testing.T) {
+	s, err := NewServer(slog.Default(), false)
+	require.NoError(t, err)
+	// Without WithUsageEstimates, no store is created that nothing would sweep.
+	require.Nil(t, s.usageEstimates)
+}
+
 func TestServer_Process_UsageEstimates(t *testing.T) {
 	s, _ := requireNewServerWithMockProcessor(t)
+	ue, _, _ := newTestUsageEstimates()
+	WithUsageEstimates(ue.store, ue.metrics)(s)
 	p := &usageEstimateRecordingProcessor{}
 	s.Register("/v1/chat/completions", func(*filterapi.RuntimeConfig, map[string]string, *slog.Logger, bool, bool) (Processor, error) {
 		return p, nil
@@ -326,6 +457,6 @@ func TestServer_Process_UsageEstimates(t *testing.T) {
 		}}}},
 	}
 	require.NoError(t, s.Process(stream))
-	require.Same(t, s.usageEstimates, p.set)
+	require.Same(t, ue.store, p.set.store)
 	require.Equal(t, 1, p.finished)
 }

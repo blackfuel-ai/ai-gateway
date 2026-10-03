@@ -15,7 +15,8 @@ import (
 // nolint: godot
 const (
 	// Usage Estimate Requests is a counter metric that records the requests a
-	// usage estimate was computed for, whether the estimate existed or not.
+	// usage estimate was computed for, by outcome: estimated, cold (no successful
+	// response in the last completed period) or error (the CEL evaluation failed).
 	//
 	// Dimensions:
 	// - aigw.usage_estimate.key
@@ -33,9 +34,20 @@ const (
 
 	usageEstimateAttributeKey     = "aigw.usage_estimate.key"
 	usageEstimateAttributeOutcome = "aigw.usage_estimate.outcome"
+)
 
-	usageEstimateOutcomeEstimated = "estimated"
-	usageEstimateOutcomeCold      = "cold"
+// UsageEstimateOutcome is what computing a usage estimate for a request ended with.
+type UsageEstimateOutcome string
+
+const (
+	// UsageEstimateOutcomeEstimated is an estimate drawn from the last completed period.
+	UsageEstimateOutcomeEstimated UsageEstimateOutcome = "estimated"
+	// UsageEstimateOutcomeCold is no estimate: the last completed period holds no
+	// successful response of the key.
+	UsageEstimateOutcomeCold UsageEstimateOutcome = "cold"
+	// UsageEstimateOutcomeError is no estimate: the CEL expression failed on the
+	// estimated usage.
+	UsageEstimateOutcomeError UsageEstimateOutcome = "error"
 )
 
 // usageEstimateRatioBuckets are centered on 1, an exact estimate, and spread
@@ -49,8 +61,8 @@ var usageEstimateRatioBuckets = []float64{0.25, 0.5, 0.67, 0.8, 0.9, 0.95, 1, 1.
 // typically an API key identity, whose cardinality is unbounded.
 type UsageEstimateMetrics interface {
 	// RecordRequest records that the usage estimate metadataKey was computed for a
-	// request of originalModel, and whether an estimate existed.
-	RecordRequest(ctx context.Context, metadataKey, originalModel string, estimated bool)
+	// request of originalModel, and its outcome.
+	RecordRequest(ctx context.Context, metadataKey, originalModel string, outcome UsageEstimateOutcome)
 	// RecordRatio records the estimate divided by the actual value of a request.
 	RecordRatio(ctx context.Context, metadataKey, originalModel string, ratio float64)
 }
@@ -76,15 +88,11 @@ func NewUsageEstimate(meter metric.Meter) UsageEstimateMetrics {
 }
 
 // RecordRequest implements [UsageEstimateMetrics.RecordRequest].
-func (u *usageEstimate) RecordRequest(ctx context.Context, metadataKey, originalModel string, estimated bool) {
-	outcome := usageEstimateOutcomeCold
-	if estimated {
-		outcome = usageEstimateOutcomeEstimated
-	}
+func (u *usageEstimate) RecordRequest(ctx context.Context, metadataKey, originalModel string, outcome UsageEstimateOutcome) {
 	u.requests.Add(ctx, 1, metric.WithAttributes(
 		attribute.Key(usageEstimateAttributeKey).String(metadataKey),
 		attribute.Key(genaiAttributeOriginalModel).String(originalModel),
-		attribute.Key(usageEstimateAttributeOutcome).String(outcome),
+		attribute.Key(usageEstimateAttributeOutcome).String(string(outcome)),
 	))
 }
 

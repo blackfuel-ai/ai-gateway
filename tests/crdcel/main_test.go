@@ -379,6 +379,10 @@ func TestGatewayConfigs(t *testing.T) {
 			name:   "usage-estimate-duplicate-key.yaml",
 			expErr: "Duplicate value",
 		},
+		{
+			name:   "usage-estimate-derived-key-collision.yaml",
+			expErr: "metadataKey must not equal another item's metadataKey with a _samples or _failures suffix",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/gatewayconfigs", tc.name))

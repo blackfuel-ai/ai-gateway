@@ -238,11 +238,20 @@ on those estimates, with zero output tokens, and its result is stored under `met
 - `<metadataKey>_failures` — how many of them failed: an error status, a response without usage, or a
   stream aborted after reaching an upstream.
 
-No estimate is emitted when the last completed period holds no successful response. Estimates are observational: they
-change no routing, cost or rate limit decision. Each gateway replica estimates from the responses it served.
+No estimate is emitted when the last completed period holds no successful response. Estimates change no routing, cost
+or rate limit decision. Each gateway replica estimates from the responses it served. A request the gateway answers or
+fails itself, for example for a missing upstream credential, is not counted. To learn from streamed responses, a
+streaming OpenAI-compatible request gets `stream_options.include_usage` set, as with `llmRequestCosts`, so its client
+receives the final usage chunk.
 
-With `emitMetric: true`, the estimate is also recorded in the `aigw.usage_estimate.requests` counter (whether
-an estimate existed) and the `aigw.usage_estimate.ratio` histogram (the estimate divided by the same
+A `metadataKey` must not be another item's `metadataKey` followed by `_samples` or `_failures`, nor share any of its
+three keys with an `LLMRequestCost` `metadataKey`. The `byHeader` header should be set by the gateway, for example by an
+external authorization service, rather than by clients: each distinct value is kept in memory until it has had no
+request for up to about a minute.
+
+With `emitMetric: true`, the estimate is also recorded in the `aigw.usage_estimate.requests` counter (with an
+`aigw.usage_estimate.outcome` of `estimated`, `cold` when the last completed period holds no successful response, or
+`error` when the expression failed) and the `aigw.usage_estimate.ratio` histogram (the estimate divided by the same
 expression evaluated on the actual usage of the response). The header value is never a metric attribute.
 
 ## MCP Metadata in Access Logs

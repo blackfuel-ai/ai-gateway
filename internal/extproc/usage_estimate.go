@@ -43,8 +43,9 @@ type usageEstimateState struct {
 	keys map[usageestimate.Key]struct{}
 	// admitted are the estimates computed at admission, for the ratio metric.
 	admitted []admittedUsageEstimate
-	// upstreamStarted is set when a primary upstream leg is attached to the request.
-	// It is set from the upstream filter stream, hence atomic.
+	// upstreamStarted is set when a primary upstream leg sends the request
+	// upstream, not when the gateway answers or fails it itself. It is set from
+	// the upstream filter stream, hence atomic.
 	upstreamStarted atomic.Bool
 	// outcomeRecorded guards against recording the outcome of the request twice.
 	outcomeRecorded atomic.Bool
@@ -90,7 +91,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 		fields[e.MetadataKey+"_samples"] = structpb.NewNumberValue(float64(s.Samples))
 		fields[e.MetadataKey+"_failures"] = structpb.NewNumberValue(float64(s.Failures))
 
-		estimated := false
+		outcome := metrics.UsageEstimateOutcomeCold
 		if s.Estimated {
 			var usage metrics.TokenUsage
 			usage.SetInputTokens(s.InputTokens)
@@ -98,15 +99,16 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 			usage.SetTotalTokens(s.InputTokens)
 			v, err := evalCost(filterapi.LLMRequestCostTypeCEL, e.CELProg, &usage, r.requestHeaders, "", "")
 			if err != nil {
+				outcome = metrics.UsageEstimateOutcomeError
 				logger.Warn("cannot evaluate usage estimate", slog.String("metadata_key", e.MetadataKey), slog.String("error", err.Error()))
 			} else {
-				estimated = true
+				outcome = metrics.UsageEstimateOutcomeEstimated
 				fields[e.MetadataKey] = structpb.NewNumberValue(float64(v))
 				st.admitted = append(st.admitted, admittedUsageEstimate{estimate: e, value: v})
 			}
 		}
 		if e.EmitMetric {
-			st.shared.metrics.RecordRequest(ctx, e.MetadataKey, r.originalModel, estimated)
+			st.shared.metrics.RecordRequest(ctx, e.MetadataKey, r.originalModel, outcome)
 		}
 	}
 	if len(fields) == 0 {
@@ -147,7 +149,9 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEst
 // finishUsageEstimates implements [usageEstimateProcessor]. A request that reached
 // an upstream but recorded no successful response failed: an error status, a
 // response without usage, failed retries, or a stream aborted early. A request
-// that never reached an upstream records nothing.
+// that never reached an upstream records nothing, including one the gateway
+// answered or failed itself (missing upstream credential, upstream auth error,
+// request rejected by the translator).
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) finishUsageEstimates() {
 	st := &r.usageEstimate
 	if len(st.keys) == 0 || !st.upstreamStarted.Load() || !st.outcomeRecorded.CompareAndSwap(false, true) {

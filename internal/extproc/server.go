@@ -15,14 +15,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/uuid"
-	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -85,8 +83,7 @@ type routerEntry struct {
 type ServerOption func(*Server)
 
 // WithUsageEstimates sets the store the usage estimates draw on and the metrics
-// they record. Without it, the server uses a store nothing sweeps and records no
-// metrics.
+// they record. Without it, the server computes no usage estimate.
 func WithUsageEstimates(store *usageestimate.Store, m metrics.UsageEstimateMetrics) ServerOption {
 	return func(s *Server) {
 		s.usageEstimates = &usageEstimates{store: store, metrics: m}
@@ -103,10 +100,6 @@ func NewServer(logger *slog.Logger, enableRedaction bool, opts ...ServerOption) 
 		processorFactories:       make(map[string]ProcessorFactory),
 		routerProcessorsPerReqID: make(map[string]routerEntry),
 		uuidFn:                   uuid.NewString,
-		usageEstimates: &usageEstimates{
-			store:   usageestimate.NewStore(time.Now),
-			metrics: metrics.NewUsageEstimate(noopmetric.NewMeterProvider().Meter("")),
-		},
 	}
 	for _, opt := range opts {
 		opt(srv)

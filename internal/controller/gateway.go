@@ -282,6 +282,32 @@ func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEsti
 	}, nil
 }
 
+// checkUsageEstimateMetadataKeys rejects a usage estimate whose dynamic metadata
+// keys (the estimate, "_samples" and "_failures") are also LLMRequestCost metadata
+// keys: the cost written at completion would overwrite the value written at
+// admission. Collisions between usage estimates are rejected by the CRD.
+func checkUsageEstimateMetadataKeys(ec *filterapi.Config) error {
+	if len(ec.UsageEstimates) == 0 {
+		return nil
+	}
+	costKeys := make(map[string]struct{}, len(ec.GlobalLLMRequestCosts)+len(ec.LLMRequestCosts))
+	for i := range ec.GlobalLLMRequestCosts {
+		costKeys[ec.GlobalLLMRequestCosts[i].MetadataKey] = struct{}{}
+	}
+	for i := range ec.LLMRequestCosts {
+		costKeys[ec.LLMRequestCosts[i].MetadataKey] = struct{}{}
+	}
+	for i := range ec.UsageEstimates {
+		k := ec.UsageEstimates[i].MetadataKey
+		for _, key := range []string{k, k + "_samples", k + "_failures"} {
+			if _, ok := costKeys[key]; ok {
+				return fmt.Errorf("usage estimate %q: metadata key %q collides with an LLMRequestCost metadataKey", k, key)
+			}
+		}
+	}
+	return nil
+}
+
 func aigwLLMRequestCostToFilterAPI(cost aigv1b1.LLMRequestCost, routeName string) (filterapi.LLMRequestCost, error) {
 	out := filterapi.LLMRequestCost{
 		MetadataKey: cost.MetadataKey,
@@ -670,6 +696,10 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 				ec.LLMRequestCosts = append(ec.LLMRequestCosts, fc)
 			}
 		}
+	}
+
+	if err = checkUsageEstimateMetadataKeys(ec); err != nil {
+		return false, err
 	}
 
 	// If at least one route is hostname-scoped, promote the unscoped models to ec.UnscopedModels

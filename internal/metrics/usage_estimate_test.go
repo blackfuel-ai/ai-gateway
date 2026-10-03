@@ -20,19 +20,21 @@ func TestUsageEstimate_RecordRequest(t *testing.T) {
 	mr := metric.NewManualReader()
 	m := NewUsageEstimate(metric.NewMeterProvider(metric.WithReader(mr)).Meter("test"))
 
-	m.RecordRequest(t.Context(), "estimated_input_token", "model-a", true)
-	m.RecordRequest(t.Context(), "estimated_input_token", "model-a", true)
-	m.RecordRequest(t.Context(), "estimated_input_token", "model-a", false)
+	m.RecordRequest(t.Context(), "estimated_input_token", "model-a", UsageEstimateOutcomeEstimated)
+	m.RecordRequest(t.Context(), "estimated_input_token", "model-a", UsageEstimateOutcomeEstimated)
+	m.RecordRequest(t.Context(), "estimated_input_token", "model-a", UsageEstimateOutcomeCold)
+	m.RecordRequest(t.Context(), "estimated_input_token", "model-a", UsageEstimateOutcomeError)
 
-	attrs := func(outcome string) attribute.Set {
+	attrs := func(outcome UsageEstimateOutcome) attribute.Set {
 		return attribute.NewSet(
 			attribute.Key(usageEstimateAttributeKey).String("estimated_input_token"),
 			attribute.Key(genaiAttributeOriginalModel).String("model-a"),
-			attribute.Key(usageEstimateAttributeOutcome).String(outcome),
+			attribute.Key(usageEstimateAttributeOutcome).String(string(outcome)),
 		)
 	}
-	require.Equal(t, 2.0, testotel.GetCounterValue(t, mr, usageEstimateMetricRequests, attrs(usageEstimateOutcomeEstimated)))
-	require.Equal(t, 1.0, testotel.GetCounterValue(t, mr, usageEstimateMetricRequests, attrs(usageEstimateOutcomeCold)))
+	require.Equal(t, 2.0, testotel.GetCounterValue(t, mr, usageEstimateMetricRequests, attrs(UsageEstimateOutcomeEstimated)))
+	require.Equal(t, 1.0, testotel.GetCounterValue(t, mr, usageEstimateMetricRequests, attrs(UsageEstimateOutcomeCold)))
+	require.Equal(t, 1.0, testotel.GetCounterValue(t, mr, usageEstimateMetricRequests, attrs(UsageEstimateOutcomeError)))
 }
 
 func TestUsageEstimate_RecordRatio(t *testing.T) {
