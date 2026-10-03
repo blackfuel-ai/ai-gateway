@@ -39,8 +39,14 @@ jobs:
       issues: read # read prior comments for previous-review carry-forward
 
     steps:
-      - name: Run Claudish code review
-        uses: blackfuel-ai/code-review@v1.0.3
+      - name: Run code review
+        # api.blackfuel.ai is Blackfuel's own inference gateway, serving an
+        # Anthropic-compatible API that the action's Claude Code CLI talks to.
+        # OPENAI_API_KEY holds a Blackfuel API key for that gateway, not an
+        # OpenAI credential; the `openai-*` input names are the action's own.
+        uses: blackfuel-ai/code-review@v1.0.5
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           github-token: ${{ github.token }}
+          model: deepseek-ai/deepseek-v4-flash-0731
+          openai-base-url: https://api.blackfuel.ai
