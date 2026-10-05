@@ -227,7 +227,7 @@ spec:
       byHeader: x-api-key-id
       emitMetric: true
     - metadataKey: estimated_fresh_input_token
-      cel: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+      cel: "input_tokens - cached_input_tokens"
       byHeader: x-api-key-id
     - metadataKey: estimated_cache_rate
       cel: "cache_rate"
@@ -236,7 +236,8 @@ spec:
 ```
 
 The estimated input tokens are the request body size times the input tokens per body byte observed in the
-last completed period, and the estimated cached input tokens are those input tokens times the period's cache rate. The `cel` expression is evaluated
+last completed period, and the estimated cached input tokens are those input tokens times the period's cache rate, so never
+more than the input tokens. The `cel` expression is evaluated
 on those estimates, with zero output tokens, and its result is stored under `metadataKey` in the
 `io.envoy.ai_gateway` metadata namespace. It can also read the measured ratios of the last completed period:
 

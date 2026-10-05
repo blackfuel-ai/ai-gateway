@@ -176,7 +176,7 @@ type UsageEstimate struct {
 	//	* model: the model name extracted from the request content.
 	//	* input_tokens: the estimated number of input tokens.
 	//	* cached_input_tokens: the estimated number of cached read input tokens,
-	//	  input_tokens times cache_rate.
+	//	  input_tokens times cache_rate, so never more than input_tokens.
 	//	* total_tokens: equal to input_tokens.
 	//	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.
 	//	* backend and route_name: empty, as no route is selected at admission.
@@ -186,7 +186,7 @@ type UsageEstimate struct {
 	//	  share of each response's input tokens that were cached, a double between
 	//	  0 and 1.
 	//
-	// For example, "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+	// For example, "input_tokens - cached_input_tokens"
 	// estimates the input tokens that are not served from the prompt cache, and
 	// "cache_rate" emits the measured cache rate. CEL does not convert between
 	// integers and doubles implicitly: write "double(input_tokens) * cache_rate".

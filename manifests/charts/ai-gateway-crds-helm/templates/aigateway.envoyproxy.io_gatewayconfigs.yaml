@@ -758,20 +758,19 @@ spec:
                         from the request content.\n\t* input_tokens: the estimated
                         number of input tokens.\n\t* cached_input_tokens: the estimated
                         number of cached read input tokens,\n\t  input_tokens times
-                        cache_rate.\n\t* total_tokens: equal to input_tokens.\n\t*
-                        output_tokens, reasoning_tokens and cache_creation_input_tokens:
-                        0.\n\t* backend and route_name: empty, as no route is selected
-                        at admission.\n\t* input_tokens_per_byte: the input tokens
-                        of the successful responses of the\n\t  period divided by
-                        the size of their request bodies, a double.\n\t* cache_rate:
-                        the mean, over the successful responses of the period, of
-                        the\n\t  share of each response's input tokens that were cached,
-                        a double between\n\t  0 and 1.\n\nFor example, \"input_tokens
-                        > cached_input_tokens ? input_tokens - cached_input_tokens
-                        : uint(0)\"\nestimates the input tokens that are not served
-                        from the prompt cache, and\n\"cache_rate\" emits the measured
-                        cache rate. CEL does not convert between\nintegers and doubles
-                        implicitly: write \"double(input_tokens) * cache_rate\"."
+                        cache_rate, so never more than input_tokens.\n\t* total_tokens:
+                        equal to input_tokens.\n\t* output_tokens, reasoning_tokens
+                        and cache_creation_input_tokens: 0.\n\t* backend and route_name:
+                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
+                        the input tokens of the successful responses of the\n\t  period
+                        divided by the size of their request bodies, a double.\n\t*
+                        cache_rate: the mean, over the successful responses of the
+                        period, of the\n\t  share of each response's input tokens
+                        that were cached, a double between\n\t  0 and 1.\n\nFor example,
+                        \"input_tokens - cached_input_tokens\"\nestimates the input
+                        tokens that are not served from the prompt cache, and\n\"cache_rate\"
+                        emits the measured cache rate. CEL does not convert between\nintegers
+                        and doubles implicitly: write \"double(input_tokens) * cache_rate\"."
                       minLength: 1
                       type: string
                     emitMetric:
@@ -1606,20 +1605,19 @@ spec:
                         from the request content.\n\t* input_tokens: the estimated
                         number of input tokens.\n\t* cached_input_tokens: the estimated
                         number of cached read input tokens,\n\t  input_tokens times
-                        cache_rate.\n\t* total_tokens: equal to input_tokens.\n\t*
-                        output_tokens, reasoning_tokens and cache_creation_input_tokens:
-                        0.\n\t* backend and route_name: empty, as no route is selected
-                        at admission.\n\t* input_tokens_per_byte: the input tokens
-                        of the successful responses of the\n\t  period divided by
-                        the size of their request bodies, a double.\n\t* cache_rate:
-                        the mean, over the successful responses of the period, of
-                        the\n\t  share of each response's input tokens that were cached,
-                        a double between\n\t  0 and 1.\n\nFor example, \"input_tokens
-                        > cached_input_tokens ? input_tokens - cached_input_tokens
-                        : uint(0)\"\nestimates the input tokens that are not served
-                        from the prompt cache, and\n\"cache_rate\" emits the measured
-                        cache rate. CEL does not convert between\nintegers and doubles
-                        implicitly: write \"double(input_tokens) * cache_rate\"."
+                        cache_rate, so never more than input_tokens.\n\t* total_tokens:
+                        equal to input_tokens.\n\t* output_tokens, reasoning_tokens
+                        and cache_creation_input_tokens: 0.\n\t* backend and route_name:
+                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
+                        the input tokens of the successful responses of the\n\t  period
+                        divided by the size of their request bodies, a double.\n\t*
+                        cache_rate: the mean, over the successful responses of the
+                        period, of the\n\t  share of each response's input tokens
+                        that were cached, a double between\n\t  0 and 1.\n\nFor example,
+                        \"input_tokens - cached_input_tokens\"\nestimates the input
+                        tokens that are not served from the prompt cache, and\n\"cache_rate\"
+                        emits the measured cache rate. CEL does not convert between\nintegers
+                        and doubles implicitly: write \"double(input_tokens) * cache_rate\"."
                       minLength: 1
                       type: string
                     emitMetric:
