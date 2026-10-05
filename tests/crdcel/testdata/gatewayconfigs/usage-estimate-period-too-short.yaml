@@ -6,15 +6,11 @@
 apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: GatewayConfig
 metadata:
-  name: usage-estimates
+  name: usage-estimate-period-too-short
   namespace: default
 spec:
   usageEstimates:
     - metadataKey: estimated_input_token
       cel: "input_tokens"
       byHeader: x-client-id
-      emitMetric: true
-    - metadataKey: estimated_fresh_input_token
-      cel: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
-      byHeader: x-client-id
-  usageEstimatePeriod: 30s
+  usageEstimatePeriod: 1s

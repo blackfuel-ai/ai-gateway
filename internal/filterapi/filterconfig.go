@@ -59,6 +59,9 @@ type Config struct {
 	// UsageEstimates configures the token usage estimates emitted as dynamic metadata
 	// when a request is admitted.
 	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
+	// UsageEstimatePeriod is the length of the periods the usage estimates accumulate
+	// completed requests over. It must be positive when UsageEstimates is set.
+	UsageEstimatePeriod time.Duration `json:"usageEstimatePeriod,omitempty"`
 }
 
 // UsageEstimate configures one token usage estimate emitted when a request is admitted.

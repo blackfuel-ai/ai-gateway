@@ -61,10 +61,11 @@ func (m *mockUsageEstimateMetrics) RecordRatio(_ context.Context, metadataKey, o
 const (
 	usageEstimateTestModel  = "some-model"
 	usageEstimateTestHeader = "x-client-id"
+	usageEstimateTestPeriod = time.Minute
 )
 
 func newUsageEstimateTestConfig(t *testing.T, estimates ...filterapi.UsageEstimate) *filterapi.RuntimeConfig {
-	cfg := &filterapi.RuntimeConfig{}
+	cfg := &filterapi.RuntimeConfig{UsageEstimatePeriod: usageEstimateTestPeriod}
 	for i := range estimates {
 		prog, err := llmcostcel.NewProgram(estimates[i].CEL)
 		require.NoError(t, err)
@@ -169,14 +170,18 @@ func (c *usageEstimateTestClock) Now() time.Time {
 // nextPeriod moves the clock to the next usage estimate period, which exposes
 // the outcomes recorded so far.
 func (c *usageEstimateTestClock) nextPeriod() {
+	c.advance(usageEstimateTestPeriod)
+}
+
+func (c *usageEstimateTestClock) advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.now = c.now.Add(usageestimate.Period)
+	c.now = c.now.Add(d)
 }
 
 func newTestUsageEstimates() (*usageEstimates, *mockUsageEstimateMetrics, *usageEstimateTestClock) {
 	m := &mockUsageEstimateMetrics{}
-	clock := &usageEstimateTestClock{now: time.Unix(1_700_000_000, 0).Truncate(usageestimate.Period)}
+	clock := &usageEstimateTestClock{now: time.Unix(1_700_000_000, 0).Truncate(usageEstimateTestPeriod)}
 	return &usageEstimates{store: usageestimate.NewStore(clock.Now), metrics: m}, m, clock
 }
 
@@ -219,9 +224,30 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 	// The estimate (100) against the actual input tokens (200).
 	require.Equal(t, []recordedUsageEstimateRatio{{"estimated_input_token", usageEstimateTestModel, 0.5}}, m.ratios)
 
-	st := ue.store.Stats(usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}, 1)
+	st := ue.store.Stats(usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}, usageEstimateTestPeriod, 1)
 	require.Equal(t, uint32(1), st.Samples)
 	require.Equal(t, uint32(0), st.Failures)
+}
+
+func TestUsageEstimate_ConfiguredPeriod(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateInput)
+	headers := map[string]string{usageEstimateTestHeader: "key-a"}
+
+	rp := newUsageEstimateTestRouter(cfg, ue, headers)
+	_, u := admitAndDispatch(t, rp)
+	completeWithUsage(t, rp, u, 100, 0)
+	rp.finishUsageEstimates()
+
+	// A quarter of the configured period later, the period is not over yet.
+	clock.advance(usageEstimateTestPeriod / 4)
+	resp := admit(t, newUsageEstimateTestRouter(cfg, ue, headers), false)
+	require.NotContains(t, usageEstimateFields(t, resp), "estimated_input_token")
+
+	// Once it is over, the response is exposed.
+	clock.advance(usageEstimateTestPeriod * 3 / 4)
+	resp = admit(t, newUsageEstimateTestRouter(cfg, ue, headers), false)
+	require.Equal(t, 100.0, usageEstimateFields(t, resp)["estimated_input_token"].GetNumberValue())
 }
 
 func TestUsageEstimate_RatioUsesAdmissionInputs(t *testing.T) {
@@ -273,7 +299,7 @@ func TestUsageEstimate_NotConfigured(t *testing.T) {
 	completeWithUsage(t, rp, u, 100, 0)
 	rp.finishUsageEstimates()
 	clock.nextPeriod()
-	require.Equal(t, usageestimate.Stats{}, ue.store.Stats(usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}, 1))
+	require.Equal(t, usageestimate.Stats{}, ue.store.Stats(usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}, usageEstimateTestPeriod, 1))
 }
 
 func TestUsageEstimate_CELErrorSkipsOnlyThatKey(t *testing.T) {
@@ -316,7 +342,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 		rp.finishUsageEstimates()
 		rp.finishUsageEstimates() // Recorded once.
 		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, 1))
+		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 
 	t.Run("response without usage", func(t *testing.T) {
@@ -330,7 +356,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 		require.NoError(t, err)
 		rp.finishUsageEstimates()
 		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, 1))
+		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 
 	t.Run("aborted before any upstream", func(t *testing.T) {
@@ -340,7 +366,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 		require.NoError(t, err)
 		rp.finishUsageEstimates()
 		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, 1))
+		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 
 	t.Run("mirror leg only", func(t *testing.T) {
@@ -352,7 +378,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 		require.NoError(t, err)
 		rp.finishUsageEstimates()
 		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, 1))
+		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 
 	// The gateway answering or failing the request itself is not an outcome of
@@ -381,7 +407,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 			}
 			rp.finishUsageEstimates()
 			clock.nextPeriod()
-			require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, 1))
+			require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 		})
 	}
 
@@ -398,7 +424,7 @@ func TestUsageEstimate_Failures(t *testing.T) {
 		require.NoError(t, err)
 		rp.finishUsageEstimates()
 		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, 1))
+		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 }
 
@@ -416,7 +442,7 @@ func TestUsageEstimate_RetryThenSuccess(t *testing.T) {
 	completeWithUsage(t, rp, u, 100, 0)
 	rp.finishUsageEstimates()
 	clock.nextPeriod()
-	st := ue.store.Stats(key, 1)
+	st := ue.store.Stats(key, usageEstimateTestPeriod, 1)
 	require.Equal(t, uint32(1), st.Samples)
 	require.Equal(t, uint32(0), st.Failures)
 }
@@ -440,7 +466,7 @@ func TestUsageEstimate_StreamSuccess(t *testing.T) {
 	}
 	rp.finishUsageEstimates()
 	clock.nextPeriod()
-	st := ue.store.Stats(key, 1)
+	st := ue.store.Stats(key, usageEstimateTestPeriod, 1)
 	require.Equal(t, uint32(1), st.Samples)
 	require.Equal(t, uint32(0), st.Failures)
 	require.True(t, st.Estimated)

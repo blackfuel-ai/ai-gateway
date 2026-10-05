@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -31,6 +32,7 @@ usageEstimates:
   cel: input_tokens
   byHeader: x-client-id
   emitMetric: true
+usageEstimatePeriod: 60000000000 # 1m, in nanoseconds
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
 	cfg, err := filterapi.UnmarshalConfigYaml(configPath)
@@ -53,6 +55,7 @@ usageEstimates:
 				EmitMetric:  true,
 			},
 		},
+		UsageEstimatePeriod: time.Minute,
 	}
 
 	require.Equal(t, expectedCfg, cfg)

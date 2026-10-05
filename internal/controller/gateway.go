@@ -170,16 +170,20 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var defaultLLMCosts []aigv1b1.LLMRequestCost
 	var emitErrorMetadata bool
 	var usageEstimates []aigv1b1.UsageEstimate
+	var usageEstimatePeriod time.Duration
 	if gwConfig != nil {
 		defaultLLMCosts = gwConfig.Spec.GlobalLLMRequestCosts
 		emitErrorMetadata = gwConfig.Spec.EmitErrorMetadata
 		usageEstimates = gwConfig.Spec.UsageEstimates
+		if usageEstimatePeriod, err = gwConfig.Spec.GetUsageEstimatePeriod(); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// We need to create the filter config in Envoy Gateway system namespace because the sidecar extproc need
 	// to access it.
 	var hasEffectiveRoutes bool // indicates whether the filter config is effective (i.e., there is at least one active route).
-	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, emitErrorMetadata, usageEstimates)
+	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, emitErrorMetadata, usageEstimates, usageEstimatePeriod)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -457,6 +461,7 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 	defaultLLMCosts []aigv1b1.LLMRequestCost,
 	emitErrorMetadata bool,
 	usageEstimates []aigv1b1.UsageEstimate,
+	usageEstimatePeriod time.Duration,
 ) (hasEffectiveRoute bool, _ error) {
 	// Precondition: aiGatewayRoutes is not empty as we early return if it is empty.
 	ec := &filterapi.Config{UUID: uuid, Version: version.Parse(), EmitErrorMetadata: emitErrorMetadata}
@@ -481,6 +486,9 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 			return false, fmt.Errorf("invalid usage estimate %q: %w", usageEstimates[i].MetadataKey, convErr)
 		}
 		ec.UsageEstimates = append(ec.UsageEstimates, fe)
+	}
+	if len(ec.UsageEstimates) > 0 {
+		ec.UsageEstimatePeriod = usageEstimatePeriod
 	}
 
 	// Models contributed by routes with no Spec.Hostnames. We only promote these to

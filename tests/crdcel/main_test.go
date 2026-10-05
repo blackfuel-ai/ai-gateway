@@ -383,6 +383,14 @@ func TestGatewayConfigs(t *testing.T) {
 			name:   "usage-estimate-derived-key-collision.yaml",
 			expErr: "metadataKey must not equal another item's metadataKey with a _samples or _failures suffix",
 		},
+		{
+			name:   "usage-estimate-period-too-short.yaml",
+			expErr: "usageEstimatePeriod must be between 5s and 10m",
+		},
+		{
+			name:   "usage-estimate-period-too-long.yaml",
+			expErr: "usageEstimatePeriod must be between 5s and 10m",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/gatewayconfigs", tc.name))

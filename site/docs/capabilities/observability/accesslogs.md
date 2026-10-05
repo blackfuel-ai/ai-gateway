@@ -208,8 +208,10 @@ This applies only to errors returned by the upstream LLM provider. Errors genera
 The AI Gateway can estimate the token usage of a request when it is admitted, before any upstream has
 answered, from the responses recently completed for requests carrying the same value of a request header
 (for example the API key identity stamped by an external authorization service) and the same model.
-Completed requests are accumulated over fixed 15-second periods, and a request is estimated from the last
-completed period.
+Completed requests are accumulated over fixed periods aligned on the clock, and a request is estimated from the
+last completed period. `usageEstimatePeriod` sets their length, from `5s` to `10m`, and defaults to `60s`. A longer
+period gathers more responses per estimate and leaves fewer clients without one, but follows a change in a client's
+requests more slowly. Changing it starts every estimate over.
 Configure the estimates on the `GatewayConfig`:
 
 ```yaml
@@ -227,6 +229,7 @@ spec:
     - metadataKey: estimated_fresh_input_token
       cel: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
       byHeader: x-api-key-id
+  usageEstimatePeriod: 60s
 ```
 
 The estimated input tokens are the request body size times the input tokens per body byte observed in the
@@ -249,7 +252,7 @@ three keys with an `LLMRequestCost` `metadataKey`, global, per route or added by
 controller stops updating the gateway's filter configuration, which keeps serving the last valid one, until the
 collision is removed. The `byHeader` header should be set by the gateway, for example by an external authorization
 service, rather than by clients. Each distinct value of a request that reached an upstream is kept in memory while it
-has requests, and for 15 to 60 seconds after its last one.
+has requests, and for one to two periods, plus up to 30 seconds, after its last one.
 
 With `emitMetric: true`, the estimate is also recorded in the `aigw.usage_estimate.requests` counter (with an
 `aigw.usage_estimate.outcome` of `estimated`, `cold` when the last completed period holds no successful response, or

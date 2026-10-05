@@ -1562,7 +1562,12 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   name="usageEstimates"
   type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate) array"
   required="false"
-  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed 15-second period (periods<br />are aligned on the clock) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not be another item's metadataKey followed by `_samples` or<br />`_failures`, nor share any of its three keys with an LLMRequestCost metadataKey,<br />global, per route or added by a QuotaPolicy. On such a collision the controller<br />stops updating the gateway's filter configuration, which keeps serving the last<br />valid one, until the collision is removed."
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not be another item's metadataKey followed by `_samples` or<br />`_failures`, nor share any of its three keys with an LLMRequestCost metadataKey,<br />global, per route or added by a QuotaPolicy. On such a collision the controller<br />stops updating the gateway's filter configuration, which keeps serving the last<br />valid one, until the collision is removed."
+/><ApiField
+  name="usageEstimatePeriod"
+  type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
+  required="false"
+  description="UsageEstimatePeriod is the length of the periods UsageEstimates accumulates<br />completed requests over. Periods are aligned on the clock, and a request is<br />estimated from the last completed one. A longer period gathers more responses<br />per estimate and leaves fewer clients without one, but follows a change in a<br />client's requests more slowly. Changing it starts every estimate over.<br />Defaults to 60s."
 />
 
 
@@ -2673,8 +2678,9 @@ UsageEstimate estimates one value of a request's token usage when the request
 is admitted, before any upstream has answered.
 
 Completed requests are accumulated per ByHeader value and model over fixed
-15-second periods aligned on the clock. A request is estimated from the
-successful responses of the last completed period:
+periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+request is estimated from the successful responses of the last completed
+period:
 
   - input tokens: the request body size times the input tokens per body byte
     observed in those responses;
@@ -2708,7 +2714,7 @@ Each gateway replica estimates from the responses it served itself.
   name="byHeader"
   type="string"
   required="true"
-  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value of a<br />request that reached an upstream is kept in memory while it has requests,<br />and for 15 to 60 seconds after its last one."
+  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value of a<br />request that reached an upstream is kept in memory while it has requests,<br />and for one to two periods, plus up to 30 seconds, after its last one."
 /><ApiField
   name="emitMetric"
   type="boolean"
@@ -4356,7 +4362,12 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   name="usageEstimates"
   type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate) array"
   required="false"
-  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed 15-second period (periods<br />are aligned on the clock) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not be another item's metadataKey followed by `_samples` or<br />`_failures`, nor share any of its three keys with an LLMRequestCost metadataKey,<br />global, per route or added by a QuotaPolicy. On such a collision the controller<br />stops updating the gateway's filter configuration, which keeps serving the last<br />valid one, until the collision is removed."
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not be another item's metadataKey followed by `_samples` or<br />`_failures`, nor share any of its three keys with an LLMRequestCost metadataKey,<br />global, per route or added by a QuotaPolicy. On such a collision the controller<br />stops updating the gateway's filter configuration, which keeps serving the last<br />valid one, until the collision is removed."
+/><ApiField
+  name="usageEstimatePeriod"
+  type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
+  required="false"
+  description="UsageEstimatePeriod is the length of the periods UsageEstimates accumulates<br />completed requests over. Periods are aligned on the clock, and a request is<br />estimated from the last completed one. A longer period gathers more responses<br />per estimate and leaves fewer clients without one, but follows a change in a<br />client's requests more slowly. Changing it starts every estimate over.<br />Defaults to 60s."
 />
 
 
@@ -5185,8 +5196,9 @@ UsageEstimate estimates one value of a request's token usage when the request
 is admitted, before any upstream has answered.
 
 Completed requests are accumulated per ByHeader value and model over fixed
-15-second periods aligned on the clock. A request is estimated from the
-successful responses of the last completed period:
+periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+request is estimated from the successful responses of the last completed
+period:
 
   - input tokens: the request body size times the input tokens per body byte
     observed in those responses;
@@ -5220,7 +5232,7 @@ Each gateway replica estimates from the responses it served itself.
   name="byHeader"
   type="string"
   required="true"
-  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value of a<br />request that reached an upstream is kept in memory while it has requests,<br />and for 15 to 60 seconds after its last one."
+  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value of a<br />request that reached an upstream is kept in memory while it has requests,<br />and for one to two periods, plus up to 30 seconds, after its last one."
 /><ApiField
   name="emitMetric"
   type="boolean"

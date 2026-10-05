@@ -9,6 +9,7 @@ import (
 	"context"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -40,6 +41,9 @@ type usageEstimateProcessor interface {
 // upstreamStarted is written from the upstream filter stream.
 type usageEstimateState struct {
 	shared *usageEstimates
+	// period is the length of the periods the request is estimated from and its
+	// outcome is recorded in.
+	period time.Duration
 	// requestBytes is the size of the request body the client sent.
 	requestBytes int
 	// keys are the keys the outcome of the request is recorded under.
@@ -72,6 +76,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 	if st.shared == nil || len(r.config.UsageEstimates) == 0 {
 		return nil
 	}
+	st.period = r.config.UsageEstimatePeriod
 	st.requestBytes = requestBytes
 	stats := make(map[usageestimate.Key]usageestimate.Stats)
 	fields := make(map[string]*structpb.Value)
@@ -88,7 +93,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 		st.keys[key] = struct{}{}
 		s, ok := stats[key]
 		if !ok {
-			s = st.shared.store.Stats(key, requestBytes)
+			s = st.shared.store.Stats(key, st.period, requestBytes)
 			stats[key] = s
 		}
 		fields[e.MetadataKey+"_samples"] = structpb.NewNumberValue(float64(s.Samples))
@@ -169,6 +174,6 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) finishUsageEst
 
 func (st *usageEstimateState) record(o usageestimate.Outcome) {
 	for key := range st.keys {
-		st.shared.store.Record(key, o)
+		st.shared.store.Record(key, st.period, o)
 	}
 }

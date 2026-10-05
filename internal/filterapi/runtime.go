@@ -8,6 +8,7 @@ package filterapi
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/cel-go/cel"
 
@@ -50,6 +51,9 @@ type RuntimeConfig struct {
 	EmitErrorMetadata bool
 	// UsageEstimates is the list of token usage estimates emitted when a request is admitted.
 	UsageEstimates []RuntimeUsageEstimate
+	// UsageEstimatePeriod is the length of the periods the usage estimates accumulate
+	// completed requests over.
+	UsageEstimatePeriod time.Duration
 }
 
 // RuntimeUsageEstimate is a usage estimate with its compiled CEL program.
@@ -134,6 +138,9 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		costs = append(costs, RuntimeRequestCost{LLMRequestCost: c, CELProg: prog})
 	}
 
+	if len(config.UsageEstimates) > 0 && config.UsageEstimatePeriod <= 0 {
+		return nil, fmt.Errorf("usage estimate period must be positive, got %s", config.UsageEstimatePeriod)
+	}
 	usageEstimates := make([]RuntimeUsageEstimate, 0, len(config.UsageEstimates))
 	for i := range config.UsageEstimates {
 		e := &config.UsageEstimates[i]
@@ -145,14 +152,15 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 	}
 
 	return &RuntimeConfig{
-		UUID:               config.UUID,
-		Backends:           backends,
-		GlobalRequestCosts: globalCosts,
-		RequestCosts:       costs,
-		DeclaredModels:     config.Models,
-		ModelsByHost:       config.ModelsByHost,
-		UnscopedModels:     config.UnscopedModels,
-		EmitErrorMetadata:  config.EmitErrorMetadata,
-		UsageEstimates:     usageEstimates,
+		UUID:                config.UUID,
+		Backends:            backends,
+		GlobalRequestCosts:  globalCosts,
+		RequestCosts:        costs,
+		DeclaredModels:      config.Models,
+		ModelsByHost:        config.ModelsByHost,
+		UnscopedModels:      config.UnscopedModels,
+		EmitErrorMetadata:   config.EmitErrorMetadata,
+		UsageEstimates:      usageEstimates,
+		UsageEstimatePeriod: config.UsageEstimatePeriod,
 	}, nil
 }

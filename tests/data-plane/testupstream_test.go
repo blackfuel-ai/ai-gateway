@@ -40,6 +40,10 @@ func failIf5xx(t *testing.T, resp *http.Response, was5xx *bool) {
 	}
 }
 
+// dataPlaneUsageEstimatePeriod is the usage estimate period of the data plane tests,
+// the shortest the GatewayConfig accepts, to keep the wait for a period to complete short.
+const dataPlaneUsageEstimatePeriod = 5 * time.Second
+
 // TestWithTestUpstream tests the end-to-end flow of the external processor with Envoy and the test upstream.
 //
 // This does not require any environment variables to be set as it relies on the test upstream.
@@ -62,6 +66,7 @@ func TestWithTestUpstream(t *testing.T) {
 		UsageEstimates: []filterapi.UsageEstimate{
 			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-usage-estimate-key"},
 		},
+		UsageEstimatePeriod: dataPlaneUsageEstimatePeriod,
 		Backends: []filterapi.Backend{
 			alwaysFailingBackend,
 			testUpstreamOpenAIBackend,
@@ -1625,7 +1630,7 @@ data: {"type":"message_stop"}`,
 	})
 
 	// A request is estimated from the responses of the same x-usage-estimate-key and model
-	// completed in the previous 15-second period, and the estimate is logged from the
+	// completed in the previous period, and the estimate is logged from the
 	// dynamic metadata.
 	t.Run("usage-estimate-access-log", func(t *testing.T) {
 		const requestBody = `{"model":"something","messages":[{"role":"user","content":"usage estimate"}]}`
@@ -1646,8 +1651,8 @@ data: {"type":"message_stop"}`,
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 		}
 		send()
-		// The first response is exposed once its 15-second period is over.
-		time.Sleep(time.Until(time.Now().Truncate(15 * time.Second).Add(15 * time.Second)))
+		// The first response is exposed once its period is over.
+		time.Sleep(time.Until(time.Now().Truncate(dataPlaneUsageEstimatePeriod).Add(dataPlaneUsageEstimatePeriod)))
 		send()
 
 		require.Eventually(t, func() bool {

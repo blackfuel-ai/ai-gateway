@@ -8,6 +8,7 @@ package v1alpha1
 import (
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // GatewayConfig provides configuration for the AI Gateway external processor
@@ -105,8 +106,8 @@ type GatewayConfigSpec struct {
 	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
 
 	// UsageEstimates estimates the token usage of each request when it is admitted,
-	// from the responses completed during the last completed 15-second period (periods
-	// are aligned on the clock) for requests carrying the same value of a request header
+	// from the responses completed during the last completed period (see
+	// UsageEstimatePeriod) for requests carrying the same value of a request header
 	// (for example the API key identity stamped by an external authorization service)
 	// and the same model, and emits each estimate as Envoy dynamic metadata under the
 	// "io.envoy.ai_gateway" namespace.
@@ -129,14 +130,27 @@ type GatewayConfigSpec struct {
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:XValidation:rule="self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_samples' && a.metadataKey != b.metadataKey + '_failures'))",message="metadataKey must not equal another item's metadataKey with a _samples or _failures suffix"
 	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
+
+	// UsageEstimatePeriod is the length of the periods UsageEstimates accumulates
+	// completed requests over. Periods are aligned on the clock, and a request is
+	// estimated from the last completed one. A longer period gathers more responses
+	// per estimate and leaves fewer clients without one, but follows a change in a
+	// client's requests more slowly. Changing it starts every estimate over.
+	//
+	// Defaults to 60s.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5s') && duration(self) <= duration('10m')",message="usageEstimatePeriod must be between 5s and 10m"
+	UsageEstimatePeriod *gwapiv1.Duration `json:"usageEstimatePeriod,omitempty"`
 }
 
 // UsageEstimate estimates one value of a request's token usage when the request
 // is admitted, before any upstream has answered.
 //
 // Completed requests are accumulated per ByHeader value and model over fixed
-// 15-second periods aligned on the clock. A request is estimated from the
-// successful responses of the last completed period:
+// periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+// request is estimated from the successful responses of the last completed
+// period:
 //
 //   - input tokens: the request body size times the input tokens per body byte
 //     observed in those responses;
@@ -181,7 +195,7 @@ type UsageEstimate struct {
 	// The header should be set by the gateway, for example by an external
 	// authorization service, rather than by clients. Each distinct value of a
 	// request that reached an upstream is kept in memory while it has requests,
-	// and for 15 to 60 seconds after its last one.
+	// and for one to two periods, plus up to 30 seconds, after its last one.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1

@@ -14,6 +14,10 @@
 //   - cached input tokens: the mean cached input tokens per successful response
 //     of that period, which fits a fixed shared prompt prefix.
 //
+// Periods have the length the caller passes, are aligned on the clock, and the
+// outcomes of a period are exposed during the next one. A key accumulated under
+// another period length starts over.
+//
 // The store is per process: each gateway replica estimates from the requests it
 // served itself.
 package usageestimate
@@ -24,11 +28,6 @@ import (
 	"sync"
 	"time"
 )
-
-// Period is the length of the periods the outcomes are accumulated over. Periods
-// are aligned on the clock, and the outcomes of a period are exposed during the
-// next one.
-const Period = 15 * time.Second
 
 // Key identifies the requests one estimate draws on.
 type Key struct {
@@ -78,7 +77,9 @@ type Store struct {
 // periods holds the outcomes of a key in the current period and the last
 // completed one.
 type periods struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// length is the length of the periods the outcomes were accumulated over.
+	length   time.Duration
 	current  aggregate
 	previous aggregate
 	// dead marks an entry Sweep has removed from the store; a Record that loaded
@@ -103,18 +104,19 @@ func NewStore(now func() time.Time) *Store {
 	return &Store{now: now}
 }
 
-// Record adds the outcome of a request of key k to the current period.
-func (s *Store) Record(k Key, o Outcome) {
-	period := periodOf(s.now())
+// Record adds the outcome of a request of key k to the current period of the
+// given length.
+func (s *Store) Record(k Key, length time.Duration, o Outcome) {
+	now := s.now()
 	for {
-		v, _ := s.keys.LoadOrStore(k, &periods{current: aggregate{period: period}})
+		v, _ := s.keys.LoadOrStore(k, &periods{length: length, current: aggregate{period: periodOf(now, length)}})
 		p := v.(*periods)
 		p.mu.Lock()
 		if p.dead {
 			p.mu.Unlock()
 			continue
 		}
-		p.rotateLocked(period)
+		p.rotateLocked(now, length)
 		a := &p.current
 		a.samples++
 		if o.Failed {
@@ -130,16 +132,17 @@ func (s *Store) Record(k Key, o Outcome) {
 	}
 }
 
-// Stats returns the outcomes of key k in the last completed period and the
-// estimated usage of a new request of k whose body is requestBytes long.
-func (s *Store) Stats(k Key, requestBytes int) Stats {
+// Stats returns the outcomes of key k in the last completed period of the given
+// length and the estimated usage of a new request of k whose body is
+// requestBytes long.
+func (s *Store) Stats(k Key, length time.Duration, requestBytes int) Stats {
 	v, ok := s.keys.Load(k)
 	if !ok {
 		return Stats{}
 	}
 	p := v.(*periods)
 	p.mu.Lock()
-	p.rotateLocked(periodOf(s.now()))
+	p.rotateLocked(s.now(), length)
 	a := p.previous
 	p.mu.Unlock()
 
@@ -158,13 +161,13 @@ func (s *Store) Stats(k Key, requestBytes int) Stats {
 }
 
 // Sweep removes the keys with no outcome in the current or the last completed
-// period.
+// period, each by the length of its own periods.
 func (s *Store) Sweep() {
-	period := periodOf(s.now())
+	now := s.now()
 	s.keys.Range(func(k, v any) bool {
 		p := v.(*periods)
 		p.mu.Lock()
-		p.rotateLocked(period)
+		p.rotateLocked(now, p.length)
 		if p.current.samples == 0 && p.previous.samples == 0 {
 			p.dead = true
 			s.keys.CompareAndDelete(k, p)
@@ -199,9 +202,14 @@ func (s *Store) len() int {
 }
 
 // rotateLocked moves the current period to the previous one once it is over.
-// p.mu must be held.
-func (p *periods) rotateLocked(period int64) {
+// Outcomes accumulated under another period length share no period index with
+// this one, so the key starts over. p.mu must be held.
+func (p *periods) rotateLocked(now time.Time, length time.Duration) {
+	period := periodOf(now, length)
 	switch {
+	case p.length != length:
+		p.length = length
+		p.previous = aggregate{period: period - 1}
 	case p.current.period >= period:
 		return
 	case p.current.period == period-1:
@@ -213,6 +221,6 @@ func (p *periods) rotateLocked(period int64) {
 	p.current = aggregate{period: period}
 }
 
-func periodOf(t time.Time) int64 {
-	return t.UnixNano() / int64(Period)
+func periodOf(t time.Time, length time.Duration) int64 {
+	return t.UnixNano() / int64(length)
 }
