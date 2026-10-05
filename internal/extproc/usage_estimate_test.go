@@ -224,6 +224,36 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 	require.Equal(t, uint32(0), st.Failures)
 }
 
+func TestUsageEstimate_RatioUsesAdmissionInputs(t *testing.T) {
+	ue, m, clock := newTestUsageEstimates()
+	// The expression depends on the inputs that are only known after routing: the
+	// ratio must evaluate it on the same model, backend and route as the estimate.
+	cfg := newUsageEstimateTestConfig(t, filterapi.UsageEstimate{
+		MetadataKey: "estimated_input_token",
+		CEL:         `model == "` + usageEstimateTestModel + `" && backend == "" && route_name == "" ? input_tokens : input_tokens * uint(2)`,
+		ByHeader:    usageEstimateTestHeader,
+		EmitMetric:  true,
+	})
+	headers := map[string]string{usageEstimateTestHeader: "key-a"}
+	run := func() {
+		rp := newUsageEstimateTestRouter(cfg, ue, headers)
+		admit(t, rp, false)
+		u := &chatCompletionProcessorUpstreamFilter{requestHeaders: map[string]string{":path": "/v1/chat/completions"}, metrics: &mockMetrics{}}
+		require.NoError(t, u.SetBackend(t.Context(), &filterapi.RuntimeBackend{Backend: &filterapi.Backend{
+			Name: "primary", Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}, ModelNameOverride: "overridden-model",
+		}}, "route", rp))
+		_, err := dispatch(t, u, &mockBackendAuthHandler{}, nil)
+		require.NoError(t, err)
+		completeWithUsage(t, rp, u, 100, 0)
+		rp.finishUsageEstimates()
+		clock.nextPeriod()
+	}
+	run()
+	run()
+	// The estimate (100) against the same expression on the actual usage (100).
+	require.Equal(t, []recordedUsageEstimateRatio{{"estimated_input_token", usageEstimateTestModel, 1}}, m.ratios)
+}
+
 func TestUsageEstimate_NoHeader(t *testing.T) {
 	ue, m, _ := newTestUsageEstimates()
 	rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, nil)

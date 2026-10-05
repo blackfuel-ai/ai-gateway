@@ -678,7 +678,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	}
 
 	if body.EndOfStream && !u.isMirror {
-		u.parent.recordUsageEstimateSuccess(ctx, &u.costs, u.requestHeaders, u.backendName, u.routeName)
+		u.parent.recordUsageEstimateSuccess(ctx, &u.costs)
 	}
 
 	// Mirror (shadow) backends must not emit LLMRequestCost dynamic metadata: the primary

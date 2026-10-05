@@ -245,14 +245,17 @@ streaming OpenAI-compatible request gets `stream_options.include_usage` set, as 
 receives the final usage chunk.
 
 A `metadataKey` must not be another item's `metadataKey` followed by `_samples` or `_failures`, nor share any of its
-three keys with an `LLMRequestCost` `metadataKey`. The `byHeader` header should be set by the gateway, for example by an
-external authorization service, rather than by clients: each distinct value is kept in memory until it has had no
-request for up to about a minute.
+three keys with an `LLMRequestCost` `metadataKey`, global, per route or added by a `QuotaPolicy`. On such a collision the
+controller stops updating the gateway's filter configuration, which keeps serving the last valid one, until the
+collision is removed. The `byHeader` header should be set by the gateway, for example by an external authorization
+service, rather than by clients. Each distinct value of a request that reached an upstream is kept in memory while it
+has requests, and for 15 to 60 seconds after its last one.
 
 With `emitMetric: true`, the estimate is also recorded in the `aigw.usage_estimate.requests` counter (with an
 `aigw.usage_estimate.outcome` of `estimated`, `cold` when the last completed period holds no successful response, or
 `error` when the expression failed) and the `aigw.usage_estimate.ratio` histogram (the estimate divided by the same
-expression evaluated on the actual usage of the response). The header value is never a metric attribute.
+expression evaluated on the actual usage of the response, with the model, `backend` and `route_name` of the estimate, so
+the ratio measures the usage estimation alone). The header value is never a metric attribute.
 
 ## MCP Metadata in Access Logs
 

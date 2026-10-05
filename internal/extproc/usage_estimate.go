@@ -34,7 +34,10 @@ type usageEstimateProcessor interface {
 	finishUsageEstimates()
 }
 
-// usageEstimateState is the usage estimate state of one request.
+// usageEstimateState is the usage estimate state of one request. Its fields are
+// written at admission and read at completion, both on the router stream: the
+// router processor delegates the response phases to its upstream processor. Only
+// upstreamStarted is written from the upstream filter stream.
 type usageEstimateState struct {
 	shared *usageEstimates
 	// requestBytes is the size of the request body the client sent.
@@ -122,7 +125,11 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 // recordUsageEstimateSuccess records the usage of a successful response, and the
 // ratio of each admitted estimate to its actual value. A response without input
 // usage is not a success: the end of the router stream records it as a failure.
-func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEstimateSuccess(ctx context.Context, usage *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName string) {
+//
+// The actual value is the estimate's expression evaluated on the actual usage and
+// on the inputs of the estimate (the client's model, no backend, no route), so the
+// ratio measures the usage estimation alone.
+func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEstimateSuccess(ctx context.Context, usage *metrics.TokenUsage) {
 	st := &r.usageEstimate
 	if len(st.keys) == 0 {
 		return
@@ -138,7 +145,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEst
 		if !a.estimate.EmitMetric {
 			continue
 		}
-		actual, err := evalCost(filterapi.LLMRequestCostTypeCEL, a.estimate.CELProg, usage, requestHeaders, backendName, routeName)
+		actual, err := evalCost(filterapi.LLMRequestCostTypeCEL, a.estimate.CELProg, usage, r.requestHeaders, "", "")
 		if err != nil || actual == 0 {
 			continue
 		}

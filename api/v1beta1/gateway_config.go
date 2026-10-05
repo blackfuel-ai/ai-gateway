@@ -118,7 +118,10 @@ type GatewayConfigSpec struct {
 	// the final usage chunk.
 	//
 	// A metadataKey must not be another item's metadataKey followed by "_samples" or
-	// "_failures", nor share any of its three keys with an LLMRequestCost metadataKey.
+	// "_failures", nor share any of its three keys with an LLMRequestCost metadataKey,
+	// global, per route or added by a QuotaPolicy. On such a collision the controller
+	// stops updating the gateway's filter configuration, which keeps serving the last
+	// valid one, until the collision is removed.
 	//
 	// +optional
 	// +listType=map
@@ -176,8 +179,9 @@ type UsageEstimate struct {
 	// estimate is drawn from. Requests without the header get no estimate.
 	//
 	// The header should be set by the gateway, for example by an external
-	// authorization service, rather than by clients: each distinct value is kept
-	// in memory until it has had no request for up to about a minute.
+	// authorization service, rather than by clients. Each distinct value of a
+	// request that reached an upstream is kept in memory while it has requests,
+	// and for 15 to 60 seconds after its last one.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
@@ -185,8 +189,10 @@ type UsageEstimate struct {
 	ByHeader string `json:"byHeader"`
 	// EmitMetric also records the estimate in metrics: a counter of the requests
 	// that got an estimate or none, and a histogram of the estimate divided by
-	// the same CEL expression evaluated on the actual usage of the response.
-	// The header value is never a metric attribute.
+	// the same CEL expression evaluated on the actual usage of the response. The
+	// actual value keeps the model, backend and route_name of the estimate, so the
+	// ratio measures the usage estimation alone. The header value is never a
+	// metric attribute.
 	//
 	// Defaults to false.
 	//
