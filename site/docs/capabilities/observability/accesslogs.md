@@ -236,12 +236,13 @@ spec:
 ```
 
 The estimated input tokens are the request body size times the input tokens per body byte observed in the
-last completed period, and the estimated cached input tokens are their mean per response. The `cel` expression is evaluated
+last completed period, and the estimated cached input tokens are those input tokens times the period's cache rate. The `cel` expression is evaluated
 on those estimates, with zero output tokens, and its result is stored under `metadataKey` in the
 `io.envoy.ai_gateway` metadata namespace. It can also read the measured ratios of the last completed period:
 
 - `input_tokens_per_byte` — the input tokens of its successful responses divided by the size of their request bodies.
-- `cache_rate` — the share of those input tokens that were cached, between 0 and 1.
+- `cache_rate` — the mean, over its successful responses, of the share of each response's input tokens that were
+  cached, between 0 and 1. Each response counts the same whatever its size.
 
 Both are doubles, so `cel: "cache_rate"` emits the measured cache rate. The expression must return an int, a uint or a
 double that is finite and not negative. CEL does not convert between integers and doubles implicitly: write

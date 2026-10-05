@@ -1,3 +1,8 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -722,7 +727,9 @@ spec:
 
                       - input tokens: the request body size times the input tokens per body byte
                         observed in those responses;
-                      - cached input tokens: the mean cached input tokens per response.
+                      - cached input tokens: those input tokens times the cache rate of those
+                        responses, the mean of the share of each response's input tokens that
+                        were cached.
 
                     The CEL expression is evaluated on that estimated usage and on the measured
                     ratios of that period, and its result is stored under MetadataKey. Nothing is
@@ -750,14 +757,16 @@ spec:
                         usage of the request:\n\n\t* model: the model name extracted
                         from the request content.\n\t* input_tokens: the estimated
                         number of input tokens.\n\t* cached_input_tokens: the estimated
-                        number of cached read input tokens.\n\t* total_tokens: equal
-                        to input_tokens.\n\t* output_tokens, reasoning_tokens and
-                        cache_creation_input_tokens: 0.\n\t* backend and route_name:
-                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
-                        the input tokens of the successful responses of the\n\t  period
-                        divided by the size of their request bodies, a double.\n\t*
-                        cache_rate: the share of those input tokens that were cached,
-                        a double\n\t  between 0 and 1.\n\nFor example, \"input_tokens
+                        number of cached read input tokens,\n\t  input_tokens times
+                        cache_rate.\n\t* total_tokens: equal to input_tokens.\n\t*
+                        output_tokens, reasoning_tokens and cache_creation_input_tokens:
+                        0.\n\t* backend and route_name: empty, as no route is selected
+                        at admission.\n\t* input_tokens_per_byte: the input tokens
+                        of the successful responses of the\n\t  period divided by
+                        the size of their request bodies, a double.\n\t* cache_rate:
+                        the mean, over the successful responses of the period, of
+                        the\n\t  share of each response's input tokens that were cached,
+                        a double between\n\t  0 and 1.\n\nFor example, \"input_tokens
                         > cached_input_tokens ? input_tokens - cached_input_tokens
                         : uint(0)\"\nestimates the input tokens that are not served
                         from the prompt cache, and\n\"cache_rate\" emits the measured
@@ -1566,7 +1575,9 @@ spec:
 
                       - input tokens: the request body size times the input tokens per body byte
                         observed in those responses;
-                      - cached input tokens: the mean cached input tokens per response.
+                      - cached input tokens: those input tokens times the cache rate of those
+                        responses, the mean of the share of each response's input tokens that
+                        were cached.
 
                     The CEL expression is evaluated on that estimated usage and on the measured
                     ratios of that period, and its result is stored under MetadataKey. Nothing is
@@ -1594,14 +1605,16 @@ spec:
                         usage of the request:\n\n\t* model: the model name extracted
                         from the request content.\n\t* input_tokens: the estimated
                         number of input tokens.\n\t* cached_input_tokens: the estimated
-                        number of cached read input tokens.\n\t* total_tokens: equal
-                        to input_tokens.\n\t* output_tokens, reasoning_tokens and
-                        cache_creation_input_tokens: 0.\n\t* backend and route_name:
-                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
-                        the input tokens of the successful responses of the\n\t  period
-                        divided by the size of their request bodies, a double.\n\t*
-                        cache_rate: the share of those input tokens that were cached,
-                        a double\n\t  between 0 and 1.\n\nFor example, \"input_tokens
+                        number of cached read input tokens,\n\t  input_tokens times
+                        cache_rate.\n\t* total_tokens: equal to input_tokens.\n\t*
+                        output_tokens, reasoning_tokens and cache_creation_input_tokens:
+                        0.\n\t* backend and route_name: empty, as no route is selected
+                        at admission.\n\t* input_tokens_per_byte: the input tokens
+                        of the successful responses of the\n\t  period divided by
+                        the size of their request bodies, a double.\n\t* cache_rate:
+                        the mean, over the successful responses of the period, of
+                        the\n\t  share of each response's input tokens that were cached,
+                        a double between\n\t  0 and 1.\n\nFor example, \"input_tokens
                         > cached_input_tokens ? input_tokens - cached_input_tokens
                         : uint(0)\"\nestimates the input tokens that are not served
                         from the prompt cache, and\n\"cache_rate\" emits the measured

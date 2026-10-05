@@ -84,7 +84,7 @@ func TestStore_CurrentPeriodIsNotExposed(t *testing.T) {
 func TestStore_EstimateFromPreviousPeriod(t *testing.T) {
 	s, clock := newTestStore()
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 250, CachedInputTokens: 100})
-	s.Record(testKey, testPeriod, Outcome{RequestBytes: 3000, InputTokens: 750, CachedInputTokens: 300})
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 3000, InputTokens: 750})
 	clock.Advance(testPeriod)
 
 	// Requests of the next period are estimated from the completed one, while
@@ -93,9 +93,9 @@ func TestStore_EstimateFromPreviousPeriod(t *testing.T) {
 	require.Equal(t, Stats{
 		Estimated:          true,
 		InputTokens:        500, // 2000 bytes * (1000 tokens / 4000 bytes)
-		CachedInputTokens:  200, // mean of 100 and 300
+		CachedInputTokens:  100, // 500 input tokens * 0.2
 		InputTokensPerByte: 0.25,
-		CacheRate:          0.4, // 400 cached of 1000 input tokens
+		CacheRate:          0.2, // mean of 100/250 and 0/750, where the period's sums give 0.1
 	}, s.Stats(testKey, testPeriod, 2000))
 
 	// The period after exposes only what the previous one accumulated.
@@ -125,7 +125,7 @@ func TestStore_KeysAreIndependent(t *testing.T) {
 	}
 }
 
-func TestStore_MeasuredRatiosAreWeightedBySize(t *testing.T) {
+func TestStore_MeasuredRatios(t *testing.T) {
 	s, clock := newTestStore()
 	// A small request hitting the prompt cache and a large one missing it.
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 200, CachedInputTokens: 150})
@@ -134,15 +134,29 @@ func TestStore_MeasuredRatiosAreWeightedBySize(t *testing.T) {
 
 	st := s.Stats(testKey, testPeriod, 1000)
 	require.Equal(t, uint32(200), st.InputTokens)
-	require.Equal(t, uint32(75), st.CachedInputTokens)
-	// The ratios are the period's sums, not derived from the estimate of this
-	// request: 2000 tokens over 10000 bytes, and 150 cached of 2000 input tokens
-	// where the estimate alone would suggest 75 of 200.
+	// The input tokens per byte are the period's sums, 2000 tokens over 10000
+	// bytes, while the cache rate is the mean of the cache rate of each request,
+	// 0.75 and 0, not the 150 cached of 2000 input tokens of the period.
 	require.Equal(t, 0.2, st.InputTokensPerByte)
-	require.Equal(t, 0.075, st.CacheRate)
+	require.Equal(t, 0.375, st.CacheRate)
+	require.Equal(t, uint32(75), st.CachedInputTokens)
 	// They do not depend on the size of the request being estimated.
 	require.Equal(t, st.InputTokensPerByte, s.Stats(testKey, testPeriod, 50).InputTokensPerByte)
 	require.Equal(t, st.CacheRate, s.Stats(testKey, testPeriod, 50).CacheRate)
+}
+
+func TestStore_CachedInputTokensScaleWithTheRequest(t *testing.T) {
+	s, clock := newTestStore()
+	// Large requests sharing a 20000-token cached prefix.
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 100_000, InputTokens: 25_000, CachedInputTokens: 20_000})
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 100_000, InputTokens: 25_000, CachedInputTokens: 20_000})
+	clock.Advance(testPeriod)
+
+	// A small request is estimated with the measured cache rate of its own input
+	// tokens, never with more cached tokens than input tokens.
+	st := s.Stats(testKey, testPeriod, 4000)
+	require.Equal(t, uint32(1000), st.InputTokens)
+	require.Equal(t, uint32(800), st.CachedInputTokens)
 }
 
 func TestStore_NoInputTokens(t *testing.T) {
@@ -151,6 +165,22 @@ func TestStore_NoInputTokens(t *testing.T) {
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000})
 	clock.Advance(testPeriod)
 	require.Equal(t, Stats{Estimated: true}, s.Stats(testKey, testPeriod, 1000))
+
+	// They have no cache rate of their own and leave the mean of the others.
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000})
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100, CachedInputTokens: 50})
+	clock.Advance(testPeriod)
+	require.Equal(t, 0.5, s.Stats(testKey, testPeriod, 1000).CacheRate)
+}
+
+func TestStore_CacheRateIsAtMostOne(t *testing.T) {
+	s, clock := newTestStore()
+	// A response reporting more cached than input tokens counts as fully cached.
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100, CachedInputTokens: 150})
+	clock.Advance(testPeriod)
+	st := s.Stats(testKey, testPeriod, 1000)
+	require.Equal(t, 1.0, st.CacheRate)
+	require.Equal(t, uint32(100), st.CachedInputTokens)
 }
 
 func TestStore_NoBytes(t *testing.T) {
@@ -163,11 +193,13 @@ func TestStore_NoBytes(t *testing.T) {
 
 func TestStore_SameSizeEstimatesTheSameTokens(t *testing.T) {
 	s, clock := newTestStore()
-	// 40/77 is not exact in floating point: multiplying the size by the rounded
-	// ratio would truncate the estimate to 39.
-	s.Record(testKey, testPeriod, Outcome{RequestBytes: 77, InputTokens: 40})
+	// 43/77 and 23/43 are not exact in floating point: multiplying by the rounded
+	// ratios would truncate the estimates to 42 and 22.
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 77, InputTokens: 43, CachedInputTokens: 23})
 	clock.Advance(testPeriod)
-	require.Equal(t, uint32(40), s.Stats(testKey, testPeriod, 77).InputTokens)
+	st := s.Stats(testKey, testPeriod, 77)
+	require.Equal(t, uint32(43), st.InputTokens)
+	require.Equal(t, uint32(23), st.CachedInputTokens)
 }
 
 func TestStore_ClampsToUint32(t *testing.T) {

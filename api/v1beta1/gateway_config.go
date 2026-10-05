@@ -152,7 +152,9 @@ type GatewayConfigSpec struct {
 //
 //   - input tokens: the request body size times the input tokens per body byte
 //     observed in those responses;
-//   - cached input tokens: the mean cached input tokens per response.
+//   - cached input tokens: those input tokens times the cache rate of those
+//     responses, the mean of the share of each response's input tokens that
+//     were cached.
 //
 // The CEL expression is evaluated on that estimated usage and on the measured
 // ratios of that period, and its result is stored under MetadataKey. Nothing is
@@ -173,14 +175,16 @@ type UsageEstimate struct {
 	//
 	//	* model: the model name extracted from the request content.
 	//	* input_tokens: the estimated number of input tokens.
-	//	* cached_input_tokens: the estimated number of cached read input tokens.
+	//	* cached_input_tokens: the estimated number of cached read input tokens,
+	//	  input_tokens times cache_rate.
 	//	* total_tokens: equal to input_tokens.
 	//	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.
 	//	* backend and route_name: empty, as no route is selected at admission.
 	//	* input_tokens_per_byte: the input tokens of the successful responses of the
 	//	  period divided by the size of their request bodies, a double.
-	//	* cache_rate: the share of those input tokens that were cached, a double
-	//	  between 0 and 1.
+	//	* cache_rate: the mean, over the successful responses of the period, of the
+	//	  share of each response's input tokens that were cached, a double between
+	//	  0 and 1.
 	//
 	// For example, "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
 	// estimates the input tokens that are not served from the prompt cache, and

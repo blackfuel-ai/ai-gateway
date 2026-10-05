@@ -11,11 +11,12 @@
 // the model the client asked for. The estimate for a new request is:
 //   - input tokens: the request's body size times the input tokens per body byte
 //     of the successful responses of the last completed period;
-//   - cached input tokens: the mean cached input tokens per successful response
-//     of that period, which fits a fixed shared prompt prefix.
+//   - cached input tokens: those estimated input tokens times the cache rate of
+//     that period, the mean over its successful responses of the share of their
+//     input tokens that were cached.
 //
 // The measured ratios of that period are exposed as well: its input tokens per
-// body byte, and its cache rate, the share of its input tokens that were cached.
+// body byte and its cache rate.
 //
 // Periods have the length the caller passes, are aligned on the clock, and the
 // outcomes of a period are exposed during the next one. A key accumulated under
@@ -61,14 +62,15 @@ type Stats struct {
 	Estimated bool
 	// InputTokens is the estimated number of input tokens.
 	InputTokens uint32
-	// CachedInputTokens is the estimated number of cached input tokens.
+	// CachedInputTokens is the estimated number of cached input tokens:
+	// InputTokens times CacheRate.
 	CachedInputTokens uint32
 	// InputTokensPerByte is the input tokens of the successful responses of the
 	// period divided by the size of their request bodies.
 	InputTokensPerByte float64
-	// CacheRate is the cached input tokens of the successful responses of the
-	// period divided by their input tokens, between 0 and 1. It is 0 when they
-	// reported no input tokens.
+	// CacheRate is the mean, over the successful responses of the period that
+	// reported input tokens, of their cached input tokens divided by their input
+	// tokens, between 0 and 1. It is 0 when none reported input tokens.
 	CacheRate float64
 }
 
@@ -98,7 +100,10 @@ type aggregate struct {
 	successes uint64
 	bytes     uint64
 	input     uint64
-	cached    uint64
+	// cacheRates is the sum of the cache rate of each success that reported
+	// input tokens, and rated their number.
+	cacheRates float64
+	rated      uint64
 }
 
 // NewStore returns an empty store reading time from now.
@@ -123,7 +128,10 @@ func (s *Store) Record(k Key, length time.Duration, o Outcome) {
 		a.successes++
 		a.bytes += uint64(max(o.RequestBytes, 0)) //nolint:gosec // non-negative after max.
 		a.input += uint64(o.InputTokens)
-		a.cached += uint64(o.CachedInputTokens)
+		if o.InputTokens > 0 {
+			a.cacheRates += min(float64(o.CachedInputTokens)/float64(o.InputTokens), 1)
+			a.rated++
+		}
 		p.mu.Unlock()
 		return
 	}
@@ -151,14 +159,16 @@ func (s *Store) Stats(k Key, length time.Duration, requestBytes int) Stats {
 	// the integer range. The estimate multiplies before dividing, so a request of
 	// a measured size is estimated at exactly its measured tokens.
 	st.InputTokensPerByte = float64(a.input) / float64(a.bytes)
-	if a.input > 0 {
-		st.CacheRate = float64(a.cached) / float64(a.input)
+	if a.rated > 0 {
+		st.CacheRate = a.cacheRates / float64(a.rated)
 	}
 	input := float64(max(requestBytes, 0)) * float64(a.input) / float64(a.bytes)
 	st.Estimated = true
 	st.InputTokens = uint32(min(input, math.MaxUint32))
-	// A mean of uint32 values fits a uint32.
-	st.CachedInputTokens = uint32(a.cached / a.successes) //nolint:gosec
+	// Rounded, as the rate of a single response times its input tokens is not
+	// exact in floating point. A cache rate of at most 1 keeps the result within
+	// InputTokens.
+	st.CachedInputTokens = uint32(math.Round(float64(st.InputTokens) * st.CacheRate))
 	return st
 }
 
