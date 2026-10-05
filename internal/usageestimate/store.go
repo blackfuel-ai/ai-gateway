@@ -14,6 +14,9 @@
 //   - cached input tokens: the mean cached input tokens per successful response
 //     of that period, which fits a fixed shared prompt prefix.
 //
+// The measured ratios of that period are exposed as well: its input tokens per
+// body byte, and its cache rate, the share of its input tokens that were cached.
+//
 // Periods have the length the caller passes, are aligned on the clock, and the
 // outcomes of a period are exposed during the next one. A key accumulated under
 // another period length starts over.
@@ -58,14 +61,21 @@ type Stats struct {
 	Samples uint32
 	// Failures is the number of those outcomes that failed.
 	Failures uint32
-	// Estimated reports whether InputTokens and CachedInputTokens hold an
-	// estimate. It is false when the period holds no successful response with a
-	// request body.
+	// Estimated reports whether InputTokens, CachedInputTokens,
+	// InputTokensPerByte and CacheRate hold a value. It is false when the period
+	// holds no successful response with a request body.
 	Estimated bool
 	// InputTokens is the estimated number of input tokens.
 	InputTokens uint32
 	// CachedInputTokens is the estimated number of cached input tokens.
 	CachedInputTokens uint32
+	// InputTokensPerByte is the input tokens of the successful responses of the
+	// period divided by the size of their request bodies.
+	InputTokensPerByte float64
+	// CacheRate is the cached input tokens of the successful responses of the
+	// period divided by their input tokens, between 0 and 1. It is 0 when they
+	// reported no input tokens.
+	CacheRate float64
 }
 
 // Store holds the accumulated outcomes of every key. It is safe for concurrent use.
@@ -150,8 +160,13 @@ func (s *Store) Stats(k Key, length time.Duration, requestBytes int) Stats {
 	if a.successes == 0 || a.bytes == 0 {
 		return st
 	}
-	// The ratio is taken in floating point: bytes times summed tokens can exceed
-	// the integer range.
+	// The ratios are taken in floating point: bytes times summed tokens can exceed
+	// the integer range. The estimate multiplies before dividing, so a request of
+	// a measured size is estimated at exactly its measured tokens.
+	st.InputTokensPerByte = float64(a.input) / float64(a.bytes)
+	if a.input > 0 {
+		st.CacheRate = float64(a.cached) / float64(a.input)
+	}
 	input := float64(max(requestBytes, 0)) * float64(a.input) / float64(a.bytes)
 	st.Estimated = true
 	st.InputTokens = uint32(min(input, math.MaxUint32))

@@ -381,7 +381,11 @@ func TestGatewayConfigs(t *testing.T) {
 		},
 		{
 			name:   "usage-estimate-derived-key-collision.yaml",
-			expErr: "metadataKey must not equal another item's metadataKey with a _samples or _failures suffix",
+			expErr: "metadataKey must not equal another item's metadataKey with a _samples, _failures, _input_tokens_per_byte or _cache_rate suffix",
+		},
+		{
+			name:   "usage-estimate-ratio-key-collision.yaml",
+			expErr: "metadataKey must not equal another item's metadataKey with a _samples, _failures, _input_tokens_per_byte or _cache_rate suffix",
 		},
 		{
 			name:   "usage-estimate-period-too-short.yaml",

@@ -51,7 +51,7 @@ func TestStore_PeriodChangeStartsOver(t *testing.T) {
 	require.Equal(t, Stats{}, s.Stats(testKey, 4*testPeriod, 1000))
 	s.Record(testKey, 4*testPeriod, Outcome{RequestBytes: 1000, InputTokens: 500})
 	clock.Advance(4 * testPeriod)
-	require.Equal(t, Stats{Samples: 1, Estimated: true, InputTokens: 500}, s.Stats(testKey, 4*testPeriod, 1000))
+	require.Equal(t, Stats{Samples: 1, Estimated: true, InputTokens: 500, InputTokensPerByte: 0.5}, s.Stats(testKey, 4*testPeriod, 1000))
 }
 
 func TestStore_SweepUsesTheKeyPeriod(t *testing.T) {
@@ -91,15 +91,17 @@ func TestStore_EstimateFromPreviousPeriod(t *testing.T) {
 	// that period accumulates on its own.
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 1000})
 	require.Equal(t, Stats{
-		Samples:           2,
-		Estimated:         true,
-		InputTokens:       500, // 2000 bytes * (1000 tokens / 4000 bytes)
-		CachedInputTokens: 200, // mean of 100 and 300
+		Samples:            2,
+		Estimated:          true,
+		InputTokens:        500, // 2000 bytes * (1000 tokens / 4000 bytes)
+		CachedInputTokens:  200, // mean of 100 and 300
+		InputTokensPerByte: 0.25,
+		CacheRate:          0.4, // 400 cached of 1000 input tokens
 	}, s.Stats(testKey, testPeriod, 2000))
 
 	// The period after exposes only what the previous one accumulated.
 	clock.Advance(testPeriod)
-	require.Equal(t, Stats{Samples: 1, Estimated: true, InputTokens: 1000}, s.Stats(testKey, testPeriod, 1000))
+	require.Equal(t, Stats{Samples: 1, Estimated: true, InputTokens: 1000, InputTokensPerByte: 1}, s.Stats(testKey, testPeriod, 1000))
 }
 
 func TestStore_IdlePeriodClearsEstimate(t *testing.T) {
@@ -135,12 +137,42 @@ func TestStore_Failures(t *testing.T) {
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 500, Failed: true})
 	clock.Advance(testPeriod)
 	require.Equal(t, Stats{
-		Samples:           3,
-		Failures:          2,
-		Estimated:         true,
-		InputTokens:       400,
-		CachedInputTokens: 50,
+		Samples:            3,
+		Failures:           2,
+		Estimated:          true,
+		InputTokens:        400,
+		CachedInputTokens:  50,
+		InputTokensPerByte: 0.4, // failures carry no usage: 400 tokens / 1000 bytes
+		CacheRate:          0.125,
 	}, s.Stats(testKey, testPeriod, 1000))
+}
+
+func TestStore_MeasuredRatiosAreWeightedBySize(t *testing.T) {
+	s, clock := newTestStore()
+	// A small request hitting the prompt cache and a large one missing it.
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 200, CachedInputTokens: 150})
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 9000, InputTokens: 1800})
+	clock.Advance(testPeriod)
+
+	st := s.Stats(testKey, testPeriod, 1000)
+	require.Equal(t, uint32(200), st.InputTokens)
+	require.Equal(t, uint32(75), st.CachedInputTokens)
+	// The ratios are the period's sums, not derived from the estimate of this
+	// request: 2000 tokens over 10000 bytes, and 150 cached of 2000 input tokens
+	// where the estimate alone would suggest 75 of 200.
+	require.Equal(t, 0.2, st.InputTokensPerByte)
+	require.Equal(t, 0.075, st.CacheRate)
+	// They do not depend on the size of the request being estimated.
+	require.Equal(t, st.InputTokensPerByte, s.Stats(testKey, testPeriod, 50).InputTokensPerByte)
+	require.Equal(t, st.CacheRate, s.Stats(testKey, testPeriod, 50).CacheRate)
+}
+
+func TestStore_NoInputTokens(t *testing.T) {
+	s, clock := newTestStore()
+	// Successes reporting zero input tokens give a zero ratio and cache rate.
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000})
+	clock.Advance(testPeriod)
+	require.Equal(t, Stats{Samples: 1, Estimated: true}, s.Stats(testKey, testPeriod, 1000))
 }
 
 func TestStore_NoBytes(t *testing.T) {
@@ -149,6 +181,15 @@ func TestStore_NoBytes(t *testing.T) {
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 0, InputTokens: 10})
 	clock.Advance(testPeriod)
 	require.Equal(t, Stats{Samples: 1}, s.Stats(testKey, testPeriod, 1000))
+}
+
+func TestStore_SameSizeEstimatesTheSameTokens(t *testing.T) {
+	s, clock := newTestStore()
+	// 40/77 is not exact in floating point: multiplying the size by the rounded
+	// ratio would truncate the estimate to 39.
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 77, InputTokens: 40})
+	clock.Advance(testPeriod)
+	require.Equal(t, uint32(40), s.Stats(testKey, testPeriod, 77).InputTokens)
 }
 
 func TestStore_ClampsToUint32(t *testing.T) {

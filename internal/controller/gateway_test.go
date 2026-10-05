@@ -3943,6 +3943,14 @@ func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing
 		require.ErrorContains(t, err, `usage estimate "estimated_input_token": metadata key "estimated_input_token_samples" collides with an LLMRequestCost metadataKey`)
 	})
 
+	t.Run("measured ratio key collides with a global cost", func(t *testing.T) {
+		c, _ := newController(t)
+		globalCosts := []aigv1b1.LLMRequestCost{{MetadataKey: "estimated_input_token_cache_rate", Type: aigv1b1.LLMRequestCostTypeInputToken}}
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", globalCosts, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `usage estimate "estimated_input_token": metadata key "estimated_input_token_cache_rate" collides with an LLMRequestCost metadataKey`)
+	})
+
 	t.Run("distinct from the costs", func(t *testing.T) {
 		c, _ := newController(t)
 		withCost := []aigv1b1.AIGatewayRoute{*routes[0].DeepCopy()}

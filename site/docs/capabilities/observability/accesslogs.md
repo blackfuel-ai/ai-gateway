@@ -235,20 +235,26 @@ spec:
 The estimated input tokens are the request body size times the input tokens per body byte observed in the
 last completed period, and the estimated cached input tokens are their mean per response. The `cel` expression is evaluated
 on those estimates, with zero output tokens, and its result is stored under `metadataKey` in the
-`io.envoy.ai_gateway` metadata namespace. Two more keys are emitted whenever the request carries the header:
+`io.envoy.ai_gateway` metadata namespace. The measured ratios of the last completed period are stored next to it:
+
+- `<metadataKey>_input_tokens_per_byte` — the input tokens of its successful responses divided by the size of their
+  request bodies.
+- `<metadataKey>_cache_rate` — the share of those input tokens that were cached, between 0 and 1.
+
+Two more keys are emitted whenever the request carries the header:
 
 - `<metadataKey>_samples` — the number of requests completed in the last completed period.
 - `<metadataKey>_failures` — how many of them failed: an error status, a response without usage, or a
   stream aborted after reaching an upstream.
 
-No estimate is emitted when the last completed period holds no successful response. Estimates change no routing, cost
+No estimate or ratio is emitted when the last completed period holds no successful response. Estimates change no routing, cost
 or rate limit decision. Each gateway replica estimates from the responses it served. A request the gateway answers or
 fails itself, for example for a missing upstream credential, is not counted. To learn from streamed responses, a
 streaming OpenAI-compatible request gets `stream_options.include_usage` set, as with `llmRequestCosts`, so its client
 receives the final usage chunk.
 
-A `metadataKey` must not be another item's `metadataKey` followed by `_samples` or `_failures`, nor share any of its
-three keys with an `LLMRequestCost` `metadataKey`, global, per route or added by a `QuotaPolicy`. On such a collision the
+A `metadataKey` must not be another item's `metadataKey` followed by `_samples`, `_failures`,
+`_input_tokens_per_byte` or `_cache_rate`, nor share any of its five keys with an `LLMRequestCost` `metadataKey`, global, per route or added by a `QuotaPolicy`. On such a collision the
 controller stops updating the gateway's filter configuration, which keeps serving the last valid one, until the
 collision is removed. The `byHeader` header should be set by the gateway, for example by an external authorization
 service, rather than by clients. Each distinct value of a request that reached an upstream is kept in memory while it

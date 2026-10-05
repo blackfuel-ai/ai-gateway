@@ -287,9 +287,9 @@ func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEsti
 }
 
 // checkUsageEstimateMetadataKeys rejects a usage estimate whose dynamic metadata
-// keys (the estimate, "_samples" and "_failures") are also LLMRequestCost metadata
-// keys: the cost written at completion would overwrite the value written at
-// admission. Collisions between usage estimates are rejected by the CRD.
+// keys (the estimate and its suffixed keys) are also LLMRequestCost metadata keys:
+// the cost written at completion would overwrite the value written at admission.
+// Collisions between usage estimates are rejected by the CRD.
 func checkUsageEstimateMetadataKeys(ec *filterapi.Config) error {
 	if len(ec.UsageEstimates) == 0 {
 		return nil
@@ -302,10 +302,10 @@ func checkUsageEstimateMetadataKeys(ec *filterapi.Config) error {
 		costKeys[ec.LLMRequestCosts[i].MetadataKey] = struct{}{}
 	}
 	for i := range ec.UsageEstimates {
-		k := ec.UsageEstimates[i].MetadataKey
-		for _, key := range []string{k, k + "_samples", k + "_failures"} {
+		e := &ec.UsageEstimates[i]
+		for _, key := range e.MetadataKeys() {
 			if _, ok := costKeys[key]; ok {
-				return fmt.Errorf("usage estimate %q: metadata key %q collides with an LLMRequestCost metadataKey", k, key)
+				return fmt.Errorf("usage estimate %q: metadata key %q collides with an LLMRequestCost metadataKey", e.MetadataKey, key)
 			}
 		}
 	}

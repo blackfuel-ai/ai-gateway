@@ -96,11 +96,13 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 			s = st.shared.store.Stats(key, st.period, requestBytes)
 			stats[key] = s
 		}
-		fields[e.MetadataKey+"_samples"] = structpb.NewNumberValue(float64(s.Samples))
-		fields[e.MetadataKey+"_failures"] = structpb.NewNumberValue(float64(s.Failures))
+		fields[e.MetadataKey+filterapi.UsageEstimateSamplesSuffix] = structpb.NewNumberValue(float64(s.Samples))
+		fields[e.MetadataKey+filterapi.UsageEstimateFailuresSuffix] = structpb.NewNumberValue(float64(s.Failures))
 
 		outcome := metrics.UsageEstimateOutcomeCold
 		if s.Estimated {
+			fields[e.MetadataKey+filterapi.UsageEstimateInputTokensPerByteSuffix] = structpb.NewNumberValue(s.InputTokensPerByte)
+			fields[e.MetadataKey+filterapi.UsageEstimateCacheRateSuffix] = structpb.NewNumberValue(s.CacheRate)
 			var usage metrics.TokenUsage
 			usage.SetInputTokens(s.InputTokens)
 			usage.SetCachedInputTokens(s.CachedInputTokens)

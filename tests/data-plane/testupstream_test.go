@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -1634,7 +1635,7 @@ data: {"type":"message_stop"}`,
 	// dynamic metadata.
 	t.Run("usage-estimate-access-log", func(t *testing.T) {
 		const requestBody = `{"model":"something","messages":[{"role":"user","content":"usage estimate"}]}`
-		const responseBody = `{"choices":[{"message":{"content":"This is a test."}}],"usage":{"prompt_tokens":40,"completion_tokens":5,"total_tokens":45}}`
+		const responseBody = `{"choices":[{"message":{"content":"This is a test."}}],"usage":{"prompt_tokens":40,"completion_tokens":5,"total_tokens":45,"prompt_tokens_details":{"cached_tokens":10}}}`
 		send := func() {
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 				fmt.Sprintf("http://localhost:%d/v1/chat/completions", listenerPort), strings.NewReader(requestBody))
@@ -1657,16 +1658,21 @@ data: {"type":"message_stop"}`,
 
 		require.Eventually(t, func() bool {
 			type lineFormat struct {
-				Estimate *float64 `json:"estimated_input_token"`
-				Samples  *float64 `json:"estimated_input_token_samples"`
+				Estimate      *float64 `json:"estimated_input_token"`
+				Samples       *float64 `json:"estimated_input_token_samples"`
+				TokensPerByte *float64 `json:"estimated_input_token_input_tokens_per_byte"`
+				CacheRate     *float64 `json:"estimated_input_token_cache_rate"`
 			}
 			for _, line := range strings.Split(env.EnvoyStdout(), "\n") {
 				var l lineFormat
-				if json.Unmarshal([]byte(line), &l) != nil || l.Estimate == nil || l.Samples == nil {
+				if json.Unmarshal([]byte(line), &l) != nil || l.Estimate == nil || l.Samples == nil || l.TokensPerByte == nil || l.CacheRate == nil {
 					continue
 				}
-				// Same body, so the estimate is the input tokens of the first response.
-				if *l.Estimate == 40 && *l.Samples == 1 {
+				// Same body, so the estimate is the input tokens of the first response,
+				// and the measured ratios are those of that response: 40 input tokens
+				// over the body size, 10 of them cached.
+				if *l.Estimate == 40 && *l.Samples == 1 &&
+					math.Abs(*l.TokensPerByte-40/float64(len(requestBody))) < 1e-9 && math.Abs(*l.CacheRate-0.25) < 1e-9 {
 					return true
 				}
 			}

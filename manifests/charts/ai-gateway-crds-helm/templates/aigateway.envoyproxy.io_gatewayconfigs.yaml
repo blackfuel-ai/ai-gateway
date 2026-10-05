@@ -711,11 +711,12 @@ spec:
                   stream_options.include_usage set, as with LLMRequestCosts, so its client receives
                   the final usage chunk.
 
-                  A metadataKey must not be another item's metadataKey followed by "_samples" or
-                  "_failures", nor share any of its three keys with an LLMRequestCost metadataKey,
-                  global, per route or added by a QuotaPolicy. On such a collision the controller
-                  stops updating the gateway's filter configuration, which keeps serving the last
-                  valid one, until the collision is removed.
+                  A metadataKey must not be another item's metadataKey followed by "_samples",
+                  "_failures", "_input_tokens_per_byte" or "_cache_rate", nor share any of its
+                  five keys with an LLMRequestCost metadataKey, global, per route or added by a
+                  QuotaPolicy. On such a collision the controller stops updating the gateway's
+                  filter configuration, which keeps serving the last valid one, until the
+                  collision is removed.
                 items:
                   description: |-
                     UsageEstimate estimates one value of a request's token usage when the request
@@ -731,11 +732,15 @@ spec:
                       - cached input tokens: the mean cached input tokens per response.
 
                     The CEL expression is evaluated on that estimated usage and its result is
-                    stored under MetadataKey. No estimate is emitted when the last completed
-                    period holds no successful response. Two more keys are always emitted when the
-                    header is present: "<metadataKey>_samples", the number of requests completed
-                    in that period, and "<metadataKey>_failures", how many of them failed (an
-                    error status, a response without usage, or a stream aborted after reaching an
+                    stored under MetadataKey. The measured ratios of that period are stored next
+                    to it: "<metadataKey>_input_tokens_per_byte", the input tokens of its
+                    successful responses divided by the size of their request bodies, and
+                    "<metadataKey>_cache_rate", the share of those input tokens that were cached,
+                    between 0 and 1. None of the three is emitted when the last completed period
+                    holds no successful response. Two more keys are always emitted when the header
+                    is present: "<metadataKey>_samples", the number of requests completed in that
+                    period, and "<metadataKey>_failures", how many of them failed (an error
+                    status, a response without usage, or a stream aborted after reaching an
                     upstream).
 
                     Each gateway replica estimates from the responses it served itself.
@@ -797,9 +802,11 @@ spec:
                 x-kubernetes-list-type: map
                 x-kubernetes-validations:
                 - message: metadataKey must not equal another item's metadataKey with
-                    a _samples or _failures suffix
+                    a _samples, _failures, _input_tokens_per_byte or _cache_rate suffix
                   rule: self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_samples'
-                    && a.metadataKey != b.metadataKey + '_failures'))
+                    && a.metadataKey != b.metadataKey + '_failures' && a.metadataKey
+                    != b.metadataKey + '_input_tokens_per_byte' && a.metadataKey !=
+                    b.metadataKey + '_cache_rate'))
             type: object
           status:
             description: Status defines the status of the GatewayConfig.
@@ -1558,11 +1565,12 @@ spec:
                   stream_options.include_usage set, as with LLMRequestCosts, so its client receives
                   the final usage chunk.
 
-                  A metadataKey must not be another item's metadataKey followed by "_samples" or
-                  "_failures", nor share any of its three keys with an LLMRequestCost metadataKey,
-                  global, per route or added by a QuotaPolicy. On such a collision the controller
-                  stops updating the gateway's filter configuration, which keeps serving the last
-                  valid one, until the collision is removed.
+                  A metadataKey must not be another item's metadataKey followed by "_samples",
+                  "_failures", "_input_tokens_per_byte" or "_cache_rate", nor share any of its
+                  five keys with an LLMRequestCost metadataKey, global, per route or added by a
+                  QuotaPolicy. On such a collision the controller stops updating the gateway's
+                  filter configuration, which keeps serving the last valid one, until the
+                  collision is removed.
                 items:
                   description: |-
                     UsageEstimate estimates one value of a request's token usage when the request
@@ -1578,11 +1586,15 @@ spec:
                       - cached input tokens: the mean cached input tokens per response.
 
                     The CEL expression is evaluated on that estimated usage and its result is
-                    stored under MetadataKey. No estimate is emitted when the last completed
-                    period holds no successful response. Two more keys are always emitted when the
-                    header is present: "<metadataKey>_samples", the number of requests completed
-                    in that period, and "<metadataKey>_failures", how many of them failed (an
-                    error status, a response without usage, or a stream aborted after reaching an
+                    stored under MetadataKey. The measured ratios of that period are stored next
+                    to it: "<metadataKey>_input_tokens_per_byte", the input tokens of its
+                    successful responses divided by the size of their request bodies, and
+                    "<metadataKey>_cache_rate", the share of those input tokens that were cached,
+                    between 0 and 1. None of the three is emitted when the last completed period
+                    holds no successful response. Two more keys are always emitted when the header
+                    is present: "<metadataKey>_samples", the number of requests completed in that
+                    period, and "<metadataKey>_failures", how many of them failed (an error
+                    status, a response without usage, or a stream aborted after reaching an
                     upstream).
 
                     Each gateway replica estimates from the responses it served itself.
@@ -1644,9 +1656,11 @@ spec:
                 x-kubernetes-list-type: map
                 x-kubernetes-validations:
                 - message: metadataKey must not equal another item's metadataKey with
-                    a _samples or _failures suffix
+                    a _samples, _failures, _input_tokens_per_byte or _cache_rate suffix
                   rule: self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_samples'
-                    && a.metadataKey != b.metadataKey + '_failures'))
+                    && a.metadataKey != b.metadataKey + '_failures' && a.metadataKey
+                    != b.metadataKey + '_input_tokens_per_byte' && a.metadataKey !=
+                    b.metadataKey + '_cache_rate'))
             type: object
           status:
             description: Status defines the status of the GatewayConfig.
