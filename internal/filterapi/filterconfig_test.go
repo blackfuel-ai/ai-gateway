@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -26,6 +27,12 @@ llmRequestCosts:
 - metadataKey: token_usage_key
   routeName: ns/my-route
   type: OutputToken
+usageEstimates:
+- metadataKey: estimated_input_token
+  cel: input_tokens
+  byHeader: x-client-id
+  emitMetric: true
+usageEstimatePeriod: 60000000000 # 1m, in nanoseconds
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
 	cfg, err := filterapi.UnmarshalConfigYaml(configPath)
@@ -40,6 +47,15 @@ llmRequestCosts:
 				Type:        filterapi.LLMRequestCostTypeOutputToken,
 			},
 		},
+		UsageEstimates: []filterapi.UsageEstimate{
+			{
+				MetadataKey: "estimated_input_token",
+				CEL:         "input_tokens",
+				ByHeader:    "x-client-id",
+				EmitMetric:  true,
+			},
+		},
+		UsageEstimatePeriod: time.Minute,
 	}
 
 	require.Equal(t, expectedCfg, cfg)

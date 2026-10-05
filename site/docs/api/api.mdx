@@ -622,6 +622,7 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
 - [ServiceQuotaDefinition](#github-com-envoyproxy-ai-gateway-api-v1alpha1-servicequotadefinition)
 - [ToolCall](#github-com-envoyproxy-ai-gateway-api-v1alpha1-toolcall)
+- [UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate)
 - [VersionedAPISchema](#github-com-envoyproxy-ai-gateway-api-v1alpha1-versionedapischema)
 
 ### Type Definitions
@@ -1557,6 +1558,16 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   type="boolean"
   required="false"
   description="EmitErrorMetadata enables emission of Envoy dynamic metadata describing upstream<br />LLM error responses (non-2xx). When enabled, the AI Gateway filter sets<br />`llm_error_type` and `llm_error_code` (falling back to the HTTP status code when the<br />provider reports no code), along with `backend_name`, `route_name`, and<br />`model_name_override`, under the `io.envoy.ai_gateway` metadata namespace.<br />These can be referenced in access logs via<br />%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.<br />This applies only to errors returned by the upstream LLM provider. Errors generated<br />before backend selection (e.g. an unknown model) do not carry this metadata.<br />Defaults to false."
+/><ApiField
+  name="usageEstimates"
+  type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate) array"
+  required="false"
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
+/><ApiField
+  name="usageEstimatePeriod"
+  type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
+  required="false"
+  description="UsageEstimatePeriod is the length of the periods UsageEstimates accumulates<br />completed requests over. Periods are aligned on the clock, and a request is<br />estimated from the last completed one. A longer period gathers more responses<br />per estimate and leaves fewer clients without one, but follows a change in a<br />client's requests more slowly. Changing it starts every estimate over.<br />Defaults to 60s."
 />
 
 
@@ -2656,6 +2667,60 @@ ToolCall represents a tool call in the MCP authorization target.
 />
 
 
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate">UsageEstimate</a>
+
+
+
+**Appears in:**
+- [GatewayConfigSpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-gatewayconfigspec)
+
+UsageEstimate estimates one value of a request's token usage when the request
+is admitted, before any upstream has answered.
+
+Completed requests are accumulated per ByHeader value and model over fixed
+periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+request is estimated from the successful responses of the last completed
+period:
+
+  - input tokens: the request body size times the input tokens per body byte
+    observed in those responses;
+  - cached input tokens: those input tokens times the cache rate of those
+    responses, the mean of the share of each response's input tokens that
+    were cached.
+
+The CEL expression is evaluated on that estimated usage and on the measured
+ratios of that period, and its result is stored under MetadataKey. Nothing is
+emitted when the last completed period holds no successful response.
+
+Each gateway replica estimates from the responses it served itself.
+
+##### Fields
+
+
+
+<ApiField
+  name="metadataKey"
+  type="string"
+  required="true"
+  description="MetadataKey is the key of the dynamic metadata storing the estimate."
+/><ApiField
+  name="cel"
+  type="string"
+  required="true"
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
+/><ApiField
+  name="byHeader"
+  type="string"
+  required="true"
+  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value with a<br />successful response is kept in memory while it has successful responses,<br />and for one to two periods, plus up to 30 seconds, after its last one."
+/><ApiField
+  name="emitMetric"
+  type="boolean"
+  required="false"
+  description="EmitMetric also records the estimate in metrics: a counter of the requests<br />that got an estimate or none, and a histogram of the estimate divided by<br />the same CEL expression evaluated on the actual usage of the response. The<br />actual value keeps the model, backend and route_name of the estimate, so the<br />ratio measures the usage estimation alone. The header value is never a<br />metric attribute.<br />Defaults to false."
+/>
+
+
 #### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-versionedapischema">VersionedAPISchema</a>
 
 
@@ -3216,6 +3281,7 @@ MCPRouteList contains a list of MCPRoute.
 - [MCPToolFilter](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcptoolfilter)
 - [ProtectedResourceMetadata](#github-com-envoyproxy-ai-gateway-api-v1beta1-protectedresourcemetadata)
 - [ToolCall](#github-com-envoyproxy-ai-gateway-api-v1beta1-toolcall)
+- [UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate)
 - [VersionedAPISchema](#github-com-envoyproxy-ai-gateway-api-v1beta1-versionedapischema)
 
 ### Type Definitions
@@ -4290,6 +4356,16 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   type="boolean"
   required="false"
   description="EmitErrorMetadata enables emission of Envoy dynamic metadata describing upstream<br />LLM error responses (non-2xx). When enabled, the AI Gateway filter sets<br />`llm_error_type` and `llm_error_code` (falling back to the HTTP status code when the<br />provider reports no code), along with `backend_name`, `route_name`, and<br />`model_name_override`, under the `io.envoy.ai_gateway` metadata namespace.<br />These can be referenced in access logs via<br />%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.<br />This applies only to errors returned by the upstream LLM provider. Errors generated<br />before backend selection (e.g. an unknown model) do not carry this metadata.<br />Defaults to false."
+/><ApiField
+  name="usageEstimates"
+  type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate) array"
+  required="false"
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
+/><ApiField
+  name="usageEstimatePeriod"
+  type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
+  required="false"
+  description="UsageEstimatePeriod is the length of the periods UsageEstimates accumulates<br />completed requests over. Periods are aligned on the clock, and a request is<br />estimated from the last completed one. A longer period gathers more responses<br />per estimate and leaves fewer clients without one, but follows a change in a<br />client's requests more slowly. Changing it starts every estimate over.<br />Defaults to 60s."
 />
 
 
@@ -5104,6 +5180,60 @@ ToolCall represents a tool call in the MCP authorization target.
   type="string"
   required="true"
   description="Tool is the name of the tool."
+/>
+
+
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate">UsageEstimate</a>
+
+
+
+**Appears in:**
+- [GatewayConfigSpec](#github-com-envoyproxy-ai-gateway-api-v1beta1-gatewayconfigspec)
+
+UsageEstimate estimates one value of a request's token usage when the request
+is admitted, before any upstream has answered.
+
+Completed requests are accumulated per ByHeader value and model over fixed
+periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+request is estimated from the successful responses of the last completed
+period:
+
+  - input tokens: the request body size times the input tokens per body byte
+    observed in those responses;
+  - cached input tokens: those input tokens times the cache rate of those
+    responses, the mean of the share of each response's input tokens that
+    were cached.
+
+The CEL expression is evaluated on that estimated usage and on the measured
+ratios of that period, and its result is stored under MetadataKey. Nothing is
+emitted when the last completed period holds no successful response.
+
+Each gateway replica estimates from the responses it served itself.
+
+##### Fields
+
+
+
+<ApiField
+  name="metadataKey"
+  type="string"
+  required="true"
+  description="MetadataKey is the key of the dynamic metadata storing the estimate."
+/><ApiField
+  name="cel"
+  type="string"
+  required="true"
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
+/><ApiField
+  name="byHeader"
+  type="string"
+  required="true"
+  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value with a<br />successful response is kept in memory while it has successful responses,<br />and for one to two periods, plus up to 30 seconds, after its last one."
+/><ApiField
+  name="emitMetric"
+  type="boolean"
+  required="false"
+  description="EmitMetric also records the estimate in metrics: a counter of the requests<br />that got an estimate or none, and a histogram of the estimate divided by<br />the same CEL expression evaluated on the actual usage of the response. The<br />actual value keeps the model, backend and route_name of the estimate, so the<br />ratio measures the usage estimation alone. The header value is never a<br />metric attribute.<br />Defaults to false."
 />
 
 

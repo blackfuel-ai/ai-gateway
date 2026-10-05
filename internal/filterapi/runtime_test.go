@@ -107,6 +107,59 @@ func TestServer_LoadConfig(t *testing.T) {
 		require.Contains(t, err.Error(), "cannot create CEL program for global cost")
 	})
 
+	t.Run("with usage estimates", func(t *testing.T) {
+		config := &Config{
+			UsageEstimates: []UsageEstimate{
+				{MetadataKey: "estimated_input", CEL: "input_tokens", ByHeader: "x-client-id", EmitMetric: true},
+				{MetadataKey: "estimated_cached", CEL: "cached_input_tokens", ByHeader: "x-client-id"},
+				{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+			},
+			UsageEstimatePeriod: time.Minute,
+		}
+		rc, err := NewRuntimeConfig(t.Context(), config, func(_ context.Context, _ *BackendAuth) (BackendAuthHandler, error) {
+			return nil, nil
+		})
+		require.NoError(t, err)
+
+		require.Equal(t, time.Minute, rc.UsageEstimatePeriod)
+		require.Len(t, rc.UsageEstimates, 3)
+		for i := range config.UsageEstimates {
+			require.Equal(t, &config.UsageEstimates[i], rc.UsageEstimates[i].UsageEstimate)
+		}
+		in := llmcostcel.EstimateInputs{InputTokens: 10, CachedInputTokens: 7, TotalTokens: 10, CacheRate: 0.7}
+		val, err := llmcostcel.EvaluateEstimateProgram(rc.UsageEstimates[1].CELProg, in)
+		require.NoError(t, err)
+		require.Equal(t, float64(7), val)
+		val, err = llmcostcel.EvaluateEstimateProgram(rc.UsageEstimates[2].CELProg, in)
+		require.NoError(t, err)
+		require.Equal(t, 0.7, val)
+	})
+
+	t.Run("error - invalid CEL in usage estimate", func(t *testing.T) {
+		config := &Config{
+			UsageEstimates: []UsageEstimate{
+				{MetadataKey: "bad_cel", CEL: "bad syntax @@", ByHeader: "x-client-id"},
+			},
+			UsageEstimatePeriod: time.Minute,
+		}
+		_, err := NewRuntimeConfig(t.Context(), config, func(_ context.Context, _ *BackendAuth) (BackendAuthHandler, error) {
+			return nil, nil
+		})
+		require.ErrorContains(t, err, `cannot create CEL program for usage estimate "bad_cel"`)
+	})
+
+	t.Run("error - usage estimates without a period", func(t *testing.T) {
+		config := &Config{
+			UsageEstimates: []UsageEstimate{
+				{MetadataKey: "estimated_input", CEL: "input_tokens", ByHeader: "x-client-id"},
+			},
+		}
+		_, err := NewRuntimeConfig(t.Context(), config, func(_ context.Context, _ *BackendAuth) (BackendAuthHandler, error) {
+			return nil, nil
+		})
+		require.ErrorContains(t, err, "usage estimate period must be positive, got 0s")
+	})
+
 	t.Run("error - invalid CEL in route cost", func(t *testing.T) {
 		config := &Config{
 			LLMRequestCosts: []LLMRequestCost{

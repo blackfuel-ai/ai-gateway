@@ -682,6 +682,124 @@ spec:
                 x-kubernetes-list-map-keys:
                 - metadataKey
                 x-kubernetes-list-type: map
+              usageEstimatePeriod:
+                description: |-
+                  UsageEstimatePeriod is the length of the periods UsageEstimates accumulates
+                  completed requests over. Periods are aligned on the clock, and a request is
+                  estimated from the last completed one. A longer period gathers more responses
+                  per estimate and leaves fewer clients without one, but follows a change in a
+                  client's requests more slowly. Changing it starts every estimate over.
+
+                  Defaults to 60s.
+                pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                type: string
+                x-kubernetes-validations:
+                - message: usageEstimatePeriod must be between 5s and 10m
+                  rule: duration(self) >= duration('5s') && duration(self) <= duration('10m')
+              usageEstimates:
+                description: |-
+                  UsageEstimates estimates the token usage of each request when it is admitted,
+                  from the responses completed during the last completed period (see
+                  UsageEstimatePeriod) for requests carrying the same value of a request header
+                  (for example the API key identity stamped by an external authorization service)
+                  and the same model, and emits each estimate as Envoy dynamic metadata under the
+                  "io.envoy.ai_gateway" namespace.
+
+                  Estimates change no routing, cost or quota decision. They can be referenced in
+                  access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+                  To learn from streamed responses, a streaming OpenAI-compatible request gets
+                  stream_options.include_usage set, as with LLMRequestCosts, so its client receives
+                  the final usage chunk.
+
+                  A metadataKey must not equal an LLMRequestCost metadataKey, global, per route
+                  or added by a QuotaPolicy. On such a collision the controller stops updating
+                  the gateway's filter configuration, which keeps serving the last valid one,
+                  until the collision is removed.
+                items:
+                  description: |-
+                    UsageEstimate estimates one value of a request's token usage when the request
+                    is admitted, before any upstream has answered.
+
+                    Completed requests are accumulated per ByHeader value and model over fixed
+                    periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+                    request is estimated from the successful responses of the last completed
+                    period:
+
+                      - input tokens: the request body size times the input tokens per body byte
+                        observed in those responses;
+                      - cached input tokens: those input tokens times the cache rate of those
+                        responses, the mean of the share of each response's input tokens that
+                        were cached.
+
+                    The CEL expression is evaluated on that estimated usage and on the measured
+                    ratios of that period, and its result is stored under MetadataKey. Nothing is
+                    emitted when the last completed period holds no successful response.
+
+                    Each gateway replica estimates from the responses it served itself.
+                  properties:
+                    byHeader:
+                      description: |-
+                        ByHeader names the request header whose value groups the responses the
+                        estimate is drawn from. Requests without the header get no estimate.
+
+                        The header should be set by the gateway, for example by an external
+                        authorization service, rather than by clients. Each distinct value with a
+                        successful response is kept in memory while it has successful responses,
+                        and for one to two periods, plus up to 30 seconds, after its last one.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    cel:
+                      description: "CEL is the CEL expression computing the estimate.
+                        It accepts the variables\nof LLMRequestCost.CEL and the measured
+                        ratios, and must return an int, a uint\nor a double that is
+                        finite and not negative. It is evaluated on the\nestimated
+                        usage of the request:\n\n\t* model: the model name extracted
+                        from the request content.\n\t* input_tokens: the estimated
+                        number of input tokens.\n\t* cached_input_tokens: the estimated
+                        number of cached read input tokens,\n\t  input_tokens times
+                        cache_rate, so never more than input_tokens.\n\t* total_tokens:
+                        equal to input_tokens.\n\t* output_tokens, reasoning_tokens
+                        and cache_creation_input_tokens: 0.\n\t* backend and route_name:
+                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
+                        the input tokens of the successful responses of the\n\t  period
+                        divided by the size of their request bodies, a double.\n\t*
+                        cache_rate: the mean, over the successful responses of the
+                        period, of the\n\t  share of each response's input tokens
+                        that were cached, a double between\n\t  0 and 1.\n\nFor example,
+                        \"input_tokens - cached_input_tokens\"\nestimates the input
+                        tokens that are not served from the prompt cache, and\n\"cache_rate\"
+                        emits the measured cache rate. CEL does not convert between\nintegers
+                        and doubles implicitly: write \"double(input_tokens) * cache_rate\"."
+                      minLength: 1
+                      type: string
+                    emitMetric:
+                      description: |-
+                        EmitMetric also records the estimate in metrics: a counter of the requests
+                        that got an estimate or none, and a histogram of the estimate divided by
+                        the same CEL expression evaluated on the actual usage of the response. The
+                        actual value keeps the model, backend and route_name of the estimate, so the
+                        ratio measures the usage estimation alone. The header value is never a
+                        metric attribute.
+
+                        Defaults to false.
+                      type: boolean
+                    metadataKey:
+                      description: MetadataKey is the key of the dynamic metadata
+                        storing the estimate.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - byHeader
+                  - cel
+                  - metadataKey
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - metadataKey
+                x-kubernetes-list-type: map
             type: object
           status:
             description: Status defines the status of the GatewayConfig.
@@ -1407,6 +1525,124 @@ spec:
                   - metadataKey
                   - type
                   type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - metadataKey
+                x-kubernetes-list-type: map
+              usageEstimatePeriod:
+                description: |-
+                  UsageEstimatePeriod is the length of the periods UsageEstimates accumulates
+                  completed requests over. Periods are aligned on the clock, and a request is
+                  estimated from the last completed one. A longer period gathers more responses
+                  per estimate and leaves fewer clients without one, but follows a change in a
+                  client's requests more slowly. Changing it starts every estimate over.
+
+                  Defaults to 60s.
+                pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                type: string
+                x-kubernetes-validations:
+                - message: usageEstimatePeriod must be between 5s and 10m
+                  rule: duration(self) >= duration('5s') && duration(self) <= duration('10m')
+              usageEstimates:
+                description: |-
+                  UsageEstimates estimates the token usage of each request when it is admitted,
+                  from the responses completed during the last completed period (see
+                  UsageEstimatePeriod) for requests carrying the same value of a request header
+                  (for example the API key identity stamped by an external authorization service)
+                  and the same model, and emits each estimate as Envoy dynamic metadata under the
+                  "io.envoy.ai_gateway" namespace.
+
+                  Estimates change no routing, cost or quota decision. They can be referenced in
+                  access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+                  To learn from streamed responses, a streaming OpenAI-compatible request gets
+                  stream_options.include_usage set, as with LLMRequestCosts, so its client receives
+                  the final usage chunk.
+
+                  A metadataKey must not equal an LLMRequestCost metadataKey, global, per route
+                  or added by a QuotaPolicy. On such a collision the controller stops updating
+                  the gateway's filter configuration, which keeps serving the last valid one,
+                  until the collision is removed.
+                items:
+                  description: |-
+                    UsageEstimate estimates one value of a request's token usage when the request
+                    is admitted, before any upstream has answered.
+
+                    Completed requests are accumulated per ByHeader value and model over fixed
+                    periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+                    request is estimated from the successful responses of the last completed
+                    period:
+
+                      - input tokens: the request body size times the input tokens per body byte
+                        observed in those responses;
+                      - cached input tokens: those input tokens times the cache rate of those
+                        responses, the mean of the share of each response's input tokens that
+                        were cached.
+
+                    The CEL expression is evaluated on that estimated usage and on the measured
+                    ratios of that period, and its result is stored under MetadataKey. Nothing is
+                    emitted when the last completed period holds no successful response.
+
+                    Each gateway replica estimates from the responses it served itself.
+                  properties:
+                    byHeader:
+                      description: |-
+                        ByHeader names the request header whose value groups the responses the
+                        estimate is drawn from. Requests without the header get no estimate.
+
+                        The header should be set by the gateway, for example by an external
+                        authorization service, rather than by clients. Each distinct value with a
+                        successful response is kept in memory while it has successful responses,
+                        and for one to two periods, plus up to 30 seconds, after its last one.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    cel:
+                      description: "CEL is the CEL expression computing the estimate.
+                        It accepts the variables\nof LLMRequestCost.CEL and the measured
+                        ratios, and must return an int, a uint\nor a double that is
+                        finite and not negative. It is evaluated on the\nestimated
+                        usage of the request:\n\n\t* model: the model name extracted
+                        from the request content.\n\t* input_tokens: the estimated
+                        number of input tokens.\n\t* cached_input_tokens: the estimated
+                        number of cached read input tokens,\n\t  input_tokens times
+                        cache_rate, so never more than input_tokens.\n\t* total_tokens:
+                        equal to input_tokens.\n\t* output_tokens, reasoning_tokens
+                        and cache_creation_input_tokens: 0.\n\t* backend and route_name:
+                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
+                        the input tokens of the successful responses of the\n\t  period
+                        divided by the size of their request bodies, a double.\n\t*
+                        cache_rate: the mean, over the successful responses of the
+                        period, of the\n\t  share of each response's input tokens
+                        that were cached, a double between\n\t  0 and 1.\n\nFor example,
+                        \"input_tokens - cached_input_tokens\"\nestimates the input
+                        tokens that are not served from the prompt cache, and\n\"cache_rate\"
+                        emits the measured cache rate. CEL does not convert between\nintegers
+                        and doubles implicitly: write \"double(input_tokens) * cache_rate\"."
+                      minLength: 1
+                      type: string
+                    emitMetric:
+                      description: |-
+                        EmitMetric also records the estimate in metrics: a counter of the requests
+                        that got an estimate or none, and a histogram of the estimate divided by
+                        the same CEL expression evaluated on the actual usage of the response. The
+                        actual value keeps the model, backend and route_name of the estimate, so the
+                        ratio measures the usage estimation alone. The header value is never a
+                        metric attribute.
+
+                        Defaults to false.
+                      type: boolean
+                    metadataKey:
+                      description: MetadataKey is the key of the dynamic metadata
+                        storing the estimate.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - byHeader
+                  - cel
+                  - metadataKey
+                  type: object
+                maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
                 - metadataKey

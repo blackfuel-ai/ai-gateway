@@ -34,8 +34,13 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/requestheaderattrs"
 	"github.com/envoyproxy/ai-gateway/internal/tracing"
+	"github.com/envoyproxy/ai-gateway/internal/usageestimate"
 	"github.com/envoyproxy/ai-gateway/internal/version"
 )
+
+// usageEstimateSweepInterval is how often the usage estimate store drops the keys
+// with no recent request.
+const usageEstimateSweepInterval = 30 * time.Second
 
 // extProcFlags is the struct that holds the flags passed to the external processor.
 type extProcFlags struct {
@@ -319,7 +324,13 @@ func Main(ctx context.Context, args []string, stderr io.Writer) (err error) {
 
 	extproc.LogRequestHeaderAttributes = logRequestHeaderAttributes
 
-	server, err := extproc.NewServer(l, flags.enableRedaction)
+	// The usage estimate store outlives configuration reloads; idle keys are swept
+	// in the background until the process stops.
+	usageEstimateStore := usageestimate.NewStore(time.Now)
+	go usageEstimateStore.Run(ctx, usageEstimateSweepInterval)
+
+	server, err := extproc.NewServer(l, flags.enableRedaction,
+		extproc.WithUsageEstimates(usageEstimateStore, metrics.NewUsageEstimate(meter)))
 	if err != nil {
 		return fmt.Errorf("failed to create external processor server: %w", err)
 	}

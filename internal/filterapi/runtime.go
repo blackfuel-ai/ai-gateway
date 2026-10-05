@@ -8,6 +8,7 @@ package filterapi
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/cel-go/cel"
 
@@ -48,6 +49,17 @@ type RuntimeConfig struct {
 	// EmitErrorMetadata mirrors filterapi.Config.EmitErrorMetadata: when true, the
 	// filter emits error dynamic metadata for non-2xx upstream responses.
 	EmitErrorMetadata bool
+	// UsageEstimates is the list of token usage estimates emitted when a request is admitted.
+	UsageEstimates []RuntimeUsageEstimate
+	// UsageEstimatePeriod is the length of the periods the usage estimates accumulate
+	// completed requests over.
+	UsageEstimatePeriod time.Duration
+}
+
+// RuntimeUsageEstimate is a usage estimate with its compiled CEL program.
+type RuntimeUsageEstimate struct {
+	*UsageEstimate
+	CELProg cel.Program
 }
 
 // RuntimeBackend is a filter backend with its auth handler that is derived from the filterapi.Backend configuration.
@@ -126,14 +138,29 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		costs = append(costs, RuntimeRequestCost{LLMRequestCost: c, CELProg: prog})
 	}
 
+	if len(config.UsageEstimates) > 0 && config.UsageEstimatePeriod <= 0 {
+		return nil, fmt.Errorf("usage estimate period must be positive, got %s", config.UsageEstimatePeriod)
+	}
+	usageEstimates := make([]RuntimeUsageEstimate, 0, len(config.UsageEstimates))
+	for i := range config.UsageEstimates {
+		e := &config.UsageEstimates[i]
+		prog, err := llmcostcel.NewEstimateProgram(e.CEL)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create CEL program for usage estimate %q: %w", e.MetadataKey, err)
+		}
+		usageEstimates = append(usageEstimates, RuntimeUsageEstimate{UsageEstimate: e, CELProg: prog})
+	}
+
 	return &RuntimeConfig{
-		UUID:               config.UUID,
-		Backends:           backends,
-		GlobalRequestCosts: globalCosts,
-		RequestCosts:       costs,
-		DeclaredModels:     config.Models,
-		ModelsByHost:       config.ModelsByHost,
-		UnscopedModels:     config.UnscopedModels,
-		EmitErrorMetadata:  config.EmitErrorMetadata,
+		UUID:                config.UUID,
+		Backends:            backends,
+		GlobalRequestCosts:  globalCosts,
+		RequestCosts:        costs,
+		DeclaredModels:      config.Models,
+		ModelsByHost:        config.ModelsByHost,
+		UnscopedModels:      config.UnscopedModels,
+		EmitErrorMetadata:   config.EmitErrorMetadata,
+		UsageEstimates:      usageEstimates,
+		UsageEstimatePeriod: config.UsageEstimatePeriod,
 	}, nil
 }

@@ -434,7 +434,7 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 	for range 2 { // Reconcile twice to make sure the secret update path is working.
 		const someNamespace = "some-namespace"
 		configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
-		effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false)
+		effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false, nil, 0)
 		require.NoError(t, err)
 		require.True(t, effective, "expected filter config to be effective")
 
@@ -567,7 +567,7 @@ func TestGatewayController_reconcileFilterConfigSecret_HostnameScopedModels(t *t
 	}
 
 	const someNamespace = "some-namespace"
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-hostname", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-hostname", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -631,7 +631,7 @@ func TestGatewayController_reconcileFilterConfigSecret_AllUnscopedRoutesLeaveUns
 	}))
 
 	const someNamespace = "some-namespace"
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-unscoped-only", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-unscoped-only", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective)
 
@@ -705,7 +705,7 @@ func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostA
 
 	const someNamespace = "some-namespace"
 
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
@@ -774,7 +774,7 @@ func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostA
 	require.NoError(t, err)
 
 	const someNamespace = "some-namespace"
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -825,7 +825,7 @@ func TestGatewayController_reconcileFilterConfigSecret_InvalidCELExpression(t *t
 	require.NoError(t, err)
 
 	const someNamespace = "some-namespace"
-	_, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false)
+	_, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false, nil, 0)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid CEL expression")
 }
@@ -919,7 +919,7 @@ func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *tes
 	configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
 
 	// Reconcile filter config secret.
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -1603,7 +1603,7 @@ func TestGatewayController_reconcileFilterConfigSecret_BailsOnContextCanceled(t 
 		}},
 	}}
 
-	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, false)
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, false, nil, 0)
 	require.ErrorIs(t, err, context.Canceled)
 
 	_, getErr := kube.CoreV1().Secrets(configNamespace).Get(t.Context(),
@@ -1645,7 +1645,7 @@ func TestGatewayController_reconcileFilterConfigSecret_BailsOnContextDeadlineRea
 		}},
 	}}
 
-	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, false)
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, false, nil, 0)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	_, getErr := kube.CoreV1().Secrets(configNamespace).Get(t.Context(),
@@ -1708,7 +1708,7 @@ func TestGatewayController_reconcileFilterConfigSecret_ReadsCredentialsFromCache
 		Spec:       aigv1b1.AIGatewayRouteSpec{Rules: []aigv1b1.AIGatewayRouteRule{rule}},
 	}}
 
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, false)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective)
 	require.Zero(t, credentialGets, "the credential must come from the cache, not the API server")
@@ -3070,10 +3070,10 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 	const someNamespace = "some-namespace"
 	configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
 
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, nil, "mcp-uuid", nil, false)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, nil, "mcp-uuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.False(t, effective) // No MCP routes, so not effective.
-	effective, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, mcpRoutes, "mcp-uuid", nil, false)
+	effective, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, mcpRoutes, "mcp-uuid", nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective)
 
@@ -3775,7 +3775,7 @@ func TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults(t *testing
 			require.NoError(t, err)
 
 			const someNamespace = "some-namespace"
-			effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, tt.routes, nil, "test-uuid", tt.globalCosts, false)
+			effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, tt.routes, nil, "test-uuid", tt.globalCosts, false, nil, 0)
 			require.NoError(t, err)
 			require.True(t, effective)
 
@@ -3829,7 +3829,7 @@ func TestGatewayController_reconcileFilterConfigSecret_EmitErrorMetadata(t *test
 
 			const someNamespace = "some-namespace"
 			configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
-			_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, emit)
+			_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, emit, nil, 0)
 			require.NoError(t, err)
 
 			secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
@@ -3860,6 +3860,107 @@ func TestGatewayController_reconcileFilterConfigSecret_EmitErrorMetadata(t *test
 			require.Equal(t, emit, cfg.EmitErrorMetadata)
 		})
 	}
+}
+
+func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing.T) {
+	const gwNamespace, someNamespace = "ns", "some-namespace"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+				},
+			},
+		},
+	}
+	newController := func(t *testing.T) (*GatewayController, *fake2.Clientset) {
+		fakeClient := requireNewFakeClientWithIndexes(t)
+		kube := fake2.NewClientset()
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+			"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+		require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		}))
+		return c, kube
+	}
+
+	t.Run("converted", func(t *testing.T) {
+		c, kube := newController(t)
+		estimates := []aigv1b1.UsageEstimate{
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "X-Client-Id", EmitMetric: true},
+			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
+			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+		}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, estimates, 30*time.Second)
+		require.NoError(t, err)
+
+		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+		require.Equal(t, []filterapi.UsageEstimate{
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id", EmitMetric: true},
+			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
+			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+		}, cfg.UsageEstimates)
+		require.Equal(t, 30*time.Second, cfg.UsageEstimatePeriod)
+	})
+
+	t.Run("no period without estimates", func(t *testing.T) {
+		c, kube := newController(t)
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, nil, time.Minute)
+		require.NoError(t, err)
+
+		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+		require.Zero(t, cfg.UsageEstimatePeriod)
+	})
+
+	t.Run("invalid CEL", func(t *testing.T) {
+		c, _ := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "bad", CEL: "input_tokens +", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `invalid usage estimate "bad"`)
+	})
+
+	t.Run("CEL not returning a number", func(t *testing.T) {
+		c, _ := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "bad", CEL: "model", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `invalid usage estimate "bad": invalid CEL expression: CEL expression must return an int, uint or double, got string`)
+	})
+
+	// An LLMRequestCost written at completion under the same dynamic metadata key
+	// would overwrite the estimate written at admission.
+	t.Run("collides with a global cost", func(t *testing.T) {
+		c, _ := newController(t)
+		gwConfig := &aigv1b1.GatewayConfig{Spec: aigv1b1.GatewayConfigSpec{
+			GlobalLLMRequestCosts: []aigv1b1.LLMRequestCost{{MetadataKey: "estimated_input_token", Type: aigv1b1.LLMRequestCostTypeInputToken}},
+		}}
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid",
+			gwConfig.Spec.GlobalLLMRequestCosts, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `usage estimate metadataKey "estimated_input_token" collides with an LLMRequestCost metadataKey`)
+	})
+
+	t.Run("collides with a route cost", func(t *testing.T) {
+		c, _ := newController(t)
+		withCost := []aigv1b1.AIGatewayRoute{*routes[0].DeepCopy()}
+		withCost[0].Spec.LLMRequestCosts = []aigv1b1.LLMRequestCost{{MetadataKey: "estimated_cache_rate", Type: aigv1b1.LLMRequestCostTypeInputToken}}
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, withCost, nil, "test-uuid", nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `usage estimate metadataKey "estimated_cache_rate" collides with an LLMRequestCost metadataKey`)
+	})
+
+	t.Run("distinct from the costs", func(t *testing.T) {
+		c, _ := newController(t)
+		withCost := []aigv1b1.AIGatewayRoute{*routes[0].DeepCopy()}
+		withCost[0].Spec.LLMRequestCosts = []aigv1b1.LLMRequestCost{{MetadataKey: "used_token", Type: aigv1b1.LLMRequestCostTypeInputToken}}
+		globalCosts := []aigv1b1.LLMRequestCost{{MetadataKey: "billing", Type: aigv1b1.LLMRequestCostTypeTotalToken}}
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, withCost, nil, "test-uuid", globalCosts, false, estimates, time.Minute)
+		require.NoError(t, err)
+	})
 }
 
 // TestGatewayController_reconcileFilterConfigSecret_Mirrors exercises the shadow
@@ -3933,7 +4034,7 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 	}
 
 	const someNamespace = "some-namespace"
-	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false)
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, nil, 0)
 	require.NoError(t, err)
 
 	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
