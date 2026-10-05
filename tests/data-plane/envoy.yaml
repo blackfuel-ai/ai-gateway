@@ -34,7 +34,6 @@ static_resources:
                           llm_error_type: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%"
                           llm_error_code: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_code)%"
                           estimated_input_token: "%DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%"
-                          estimated_input_token_samples: "%DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token_samples)%"
                           estimated_input_token_input_tokens_per_byte: "%DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token_input_tokens_per_byte)%"
                           estimated_input_token_cache_rate: "%DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token_cache_rate)%"
                   - name: default

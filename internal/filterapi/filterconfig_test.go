@@ -75,7 +75,7 @@ usageEstimatePeriod: 60000000000 # 1m, in nanoseconds
 
 func TestUsageEstimate_MetadataKeys(t *testing.T) {
 	e := filterapi.UsageEstimate{MetadataKey: "est"}
-	require.Equal(t, []string{"est", "est_samples", "est_failures", "est_input_tokens_per_byte", "est_cache_rate"}, e.MetadataKeys())
+	require.Equal(t, []string{"est", "est_input_tokens_per_byte", "est_cache_rate"}, e.MetadataKeys())
 }
 
 func TestVersionedAPISchemaAnthropicPrefix(t *testing.T) {

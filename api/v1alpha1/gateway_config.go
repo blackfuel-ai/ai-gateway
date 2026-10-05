@@ -118,9 +118,9 @@ type GatewayConfigSpec struct {
 	// stream_options.include_usage set, as with LLMRequestCosts, so its client receives
 	// the final usage chunk.
 	//
-	// A metadataKey must not be another item's metadataKey followed by "_samples",
-	// "_failures", "_input_tokens_per_byte" or "_cache_rate", nor share any of its
-	// five keys with an LLMRequestCost metadataKey, global, per route or added by a
+	// A metadataKey must not be another item's metadataKey followed by
+	// "_input_tokens_per_byte" or "_cache_rate", nor share any of its three keys
+	// with an LLMRequestCost metadataKey, global, per route or added by a
 	// QuotaPolicy. On such a collision the controller stops updating the gateway's
 	// filter configuration, which keeps serving the last valid one, until the
 	// collision is removed.
@@ -129,7 +129,7 @@ type GatewayConfigSpec struct {
 	// +listType=map
 	// +listMapKey=metadataKey
 	// +kubebuilder:validation:MaxItems=16
-	// +kubebuilder:validation:XValidation:rule="self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_samples' && a.metadataKey != b.metadataKey + '_failures' && a.metadataKey != b.metadataKey + '_input_tokens_per_byte' && a.metadataKey != b.metadataKey + '_cache_rate'))",message="metadataKey must not equal another item's metadataKey with a _samples, _failures, _input_tokens_per_byte or _cache_rate suffix"
+	// +kubebuilder:validation:XValidation:rule="self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_input_tokens_per_byte' && a.metadataKey != b.metadataKey + '_cache_rate'))",message="metadataKey must not equal another item's metadataKey with an _input_tokens_per_byte or _cache_rate suffix"
 	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
 
 	// UsageEstimatePeriod is the length of the periods UsageEstimates accumulates
@@ -163,11 +163,7 @@ type GatewayConfigSpec struct {
 // successful responses divided by the size of their request bodies, and
 // "<metadataKey>_cache_rate", the share of those input tokens that were cached,
 // between 0 and 1. None of the three is emitted when the last completed period
-// holds no successful response. Two more keys are always emitted when the header
-// is present: "<metadataKey>_samples", the number of requests completed in that
-// period, and "<metadataKey>_failures", how many of them failed (an error
-// status, a response without usage, or a stream aborted after reaching an
-// upstream).
+// holds no successful response.
 //
 // Each gateway replica estimates from the responses it served itself.
 type UsageEstimate struct {
@@ -198,8 +194,8 @@ type UsageEstimate struct {
 	// estimate is drawn from. Requests without the header get no estimate.
 	//
 	// The header should be set by the gateway, for example by an external
-	// authorization service, rather than by clients. Each distinct value of a
-	// request that reached an upstream is kept in memory while it has requests,
+	// authorization service, rather than by clients. Each distinct value with a
+	// successful response is kept in memory while it has successful responses,
 	// and for one to two periods, plus up to 30 seconds, after its last one.
 	//
 	// +kubebuilder:validation:Required

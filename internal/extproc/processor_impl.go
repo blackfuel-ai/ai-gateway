@@ -364,12 +364,6 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	defer func() {
 		if err != nil {
 			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
-			return
-		}
-		// The request goes upstream unless the gateway answered it itself. Mirror
-		// legs are fire-and-forget and never count as reaching an upstream.
-		if res.GetImmediateResponse() == nil && !u.isMirror {
-			u.parent.usageEstimate.upstreamStarted.Store(true)
 		}
 	}()
 

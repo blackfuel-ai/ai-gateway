@@ -8,7 +8,6 @@ package extproc
 import (
 	"context"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/types/known/structpb"
@@ -31,31 +30,22 @@ type usageEstimates struct {
 type usageEstimateProcessor interface {
 	// setUsageEstimates hands the processor the per-process usage estimate state.
 	setUsageEstimates(*usageEstimates)
-	// finishUsageEstimates is called when the router stream of the request ends.
-	finishUsageEstimates()
 }
 
 // usageEstimateState is the usage estimate state of one request. Its fields are
 // written at admission and read at completion, both on the router stream: the
-// router processor delegates the response phases to its upstream processor. Only
-// upstreamStarted is written from the upstream filter stream.
+// router processor delegates the response phases to its upstream processor.
 type usageEstimateState struct {
 	shared *usageEstimates
 	// period is the length of the periods the request is estimated from and its
-	// outcome is recorded in.
+	// usage is recorded in.
 	period time.Duration
 	// requestBytes is the size of the request body the client sent.
 	requestBytes int
-	// keys are the keys the outcome of the request is recorded under.
+	// keys are the keys the usage of the request is recorded under.
 	keys map[usageestimate.Key]struct{}
 	// admitted are the estimates computed at admission, for the ratio metric.
 	admitted []admittedUsageEstimate
-	// upstreamStarted is set when a primary upstream leg sends the request
-	// upstream, not when the gateway answers or fails it itself. It is set from
-	// the upstream filter stream, hence atomic.
-	upstreamStarted atomic.Bool
-	// outcomeRecorded guards against recording the outcome of the request twice.
-	outcomeRecorded atomic.Bool
 }
 
 type admittedUsageEstimate struct {
@@ -96,9 +86,6 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 			s = st.shared.store.Stats(key, st.period, requestBytes)
 			stats[key] = s
 		}
-		fields[e.MetadataKey+filterapi.UsageEstimateSamplesSuffix] = structpb.NewNumberValue(float64(s.Samples))
-		fields[e.MetadataKey+filterapi.UsageEstimateFailuresSuffix] = structpb.NewNumberValue(float64(s.Failures))
-
 		outcome := metrics.UsageEstimateOutcomeCold
 		if s.Estimated {
 			fields[e.MetadataKey+filterapi.UsageEstimateInputTokensPerByteSuffix] = structpb.NewNumberValue(s.InputTokensPerByte)
@@ -131,7 +118,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 
 // recordUsageEstimateSuccess records the usage of a successful response, and the
 // ratio of each admitted estimate to its actual value. A response without input
-// usage is not a success: the end of the router stream records it as a failure.
+// usage records nothing.
 //
 // The actual value is the estimate's expression evaluated on the actual usage and
 // on the inputs of the estimate (the client's model, no backend, no route), so the
@@ -142,11 +129,14 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEst
 		return
 	}
 	input, ok := usage.InputTokens()
-	if !ok || !st.outcomeRecorded.CompareAndSwap(false, true) {
+	if !ok {
 		return
 	}
 	cached, _ := usage.CachedInputTokens()
-	st.record(usageestimate.Outcome{RequestBytes: st.requestBytes, InputTokens: input, CachedInputTokens: cached})
+	o := usageestimate.Outcome{RequestBytes: st.requestBytes, InputTokens: input, CachedInputTokens: cached}
+	for key := range st.keys {
+		st.shared.store.Record(key, st.period, o)
+	}
 
 	for _, a := range st.admitted {
 		if !a.estimate.EmitMetric {
@@ -160,22 +150,3 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEst
 	}
 }
 
-// finishUsageEstimates implements [usageEstimateProcessor]. A request that reached
-// an upstream but recorded no successful response failed: an error status, a
-// response without usage, failed retries, or a stream aborted early. A request
-// that never reached an upstream records nothing, including one the gateway
-// answered or failed itself (missing upstream credential, upstream auth error,
-// request rejected by the translator).
-func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) finishUsageEstimates() {
-	st := &r.usageEstimate
-	if len(st.keys) == 0 || !st.upstreamStarted.Load() || !st.outcomeRecorded.CompareAndSwap(false, true) {
-		return
-	}
-	st.record(usageestimate.Outcome{RequestBytes: st.requestBytes, Failed: true})
-}
-
-func (st *usageEstimateState) record(o usageestimate.Outcome) {
-	for key := range st.keys {
-		st.shared.store.Record(key, st.period, o)
-	}
-}

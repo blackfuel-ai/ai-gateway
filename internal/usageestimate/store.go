@@ -3,8 +3,8 @@
 // The full text of the Apache license is available in the LICENSE file at
 // the root of the repo.
 
-// Package usageestimate accumulates the completed requests of each key over fixed
-// periods and estimates from the last completed period the token usage of a new
+// Package usageestimate accumulates the successful responses of each key over
+// fixed periods and estimates from the last completed period the token usage of a new
 // request of the same key.
 //
 // A key is the value of a request header (for example the API key identity) and
@@ -42,25 +42,19 @@ type Key struct {
 	Model string
 }
 
-// Outcome is what a request that reached an upstream ended with.
+// Outcome is the usage a successful response reported for its request.
 type Outcome struct {
 	// RequestBytes is the size of the request body.
 	RequestBytes int
 	// InputTokens and CachedInputTokens are the usage the response reported.
 	InputTokens       uint32
 	CachedInputTokens uint32
-	// Failed marks a request that ended without a successful response: an
-	// error status, a response without usage, or a stream aborted early.
-	Failed bool
 }
 
-// Stats summarizes the outcomes of a key in the last completed period and, when
-// that period holds a successful response, the estimated usage of a new request.
+// Stats is the estimated usage of a new request of a key, and the measured
+// ratios it is drawn from, when the last completed period holds a successful
+// response.
 type Stats struct {
-	// Samples is the number of outcomes in the period.
-	Samples uint32
-	// Failures is the number of those outcomes that failed.
-	Failures uint32
 	// Estimated reports whether InputTokens, CachedInputTokens,
 	// InputTokensPerByte and CacheRate hold a value. It is false when the period
 	// holds no successful response with a request body.
@@ -101,8 +95,6 @@ type periods struct {
 type aggregate struct {
 	// period is the index of the period since the Unix epoch.
 	period    int64
-	samples   uint32
-	failures  uint32
 	successes uint64
 	bytes     uint64
 	input     uint64
@@ -114,7 +106,7 @@ func NewStore(now func() time.Time) *Store {
 	return &Store{now: now}
 }
 
-// Record adds the outcome of a request of key k to the current period of the
+// Record adds a successful response of key k to the current period of the
 // given length.
 func (s *Store) Record(k Key, length time.Duration, o Outcome) {
 	now := s.now()
@@ -128,22 +120,17 @@ func (s *Store) Record(k Key, length time.Duration, o Outcome) {
 		}
 		p.rotateLocked(now, length)
 		a := &p.current
-		a.samples++
-		if o.Failed {
-			a.failures++
-		} else {
-			a.successes++
-			a.bytes += uint64(max(o.RequestBytes, 0)) //nolint:gosec // non-negative after max.
-			a.input += uint64(o.InputTokens)
-			a.cached += uint64(o.CachedInputTokens)
-		}
+		a.successes++
+		a.bytes += uint64(max(o.RequestBytes, 0)) //nolint:gosec // non-negative after max.
+		a.input += uint64(o.InputTokens)
+		a.cached += uint64(o.CachedInputTokens)
 		p.mu.Unlock()
 		return
 	}
 }
 
-// Stats returns the outcomes of key k in the last completed period of the given
-// length and the estimated usage of a new request of k whose body is
+// Stats returns the measured ratios of key k in the last completed period of the
+// given length and the estimated usage of a new request of k whose body is
 // requestBytes long.
 func (s *Store) Stats(k Key, length time.Duration, requestBytes int) Stats {
 	v, ok := s.keys.Load(k)
@@ -156,10 +143,10 @@ func (s *Store) Stats(k Key, length time.Duration, requestBytes int) Stats {
 	a := p.previous
 	p.mu.Unlock()
 
-	st := Stats{Samples: a.samples, Failures: a.failures}
 	if a.successes == 0 || a.bytes == 0 {
-		return st
+		return Stats{}
 	}
+	var st Stats
 	// The ratios are taken in floating point: bytes times summed tokens can exceed
 	// the integer range. The estimate multiplies before dividing, so a request of
 	// a measured size is estimated at exactly its measured tokens.
@@ -183,7 +170,7 @@ func (s *Store) Sweep() {
 		p := v.(*periods)
 		p.mu.Lock()
 		p.rotateLocked(now, p.length)
-		if p.current.samples == 0 && p.previous.samples == 0 {
+		if p.current.successes == 0 && p.previous.successes == 0 {
 			p.dead = true
 			s.keys.CompareAndDelete(k, p)
 		}

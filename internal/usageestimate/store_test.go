@@ -51,7 +51,7 @@ func TestStore_PeriodChangeStartsOver(t *testing.T) {
 	require.Equal(t, Stats{}, s.Stats(testKey, 4*testPeriod, 1000))
 	s.Record(testKey, 4*testPeriod, Outcome{RequestBytes: 1000, InputTokens: 500})
 	clock.Advance(4 * testPeriod)
-	require.Equal(t, Stats{Samples: 1, Estimated: true, InputTokens: 500, InputTokensPerByte: 0.5}, s.Stats(testKey, 4*testPeriod, 1000))
+	require.Equal(t, Stats{Estimated: true, InputTokens: 500, InputTokensPerByte: 0.5}, s.Stats(testKey, 4*testPeriod, 1000))
 }
 
 func TestStore_SweepUsesTheKeyPeriod(t *testing.T) {
@@ -91,7 +91,6 @@ func TestStore_EstimateFromPreviousPeriod(t *testing.T) {
 	// that period accumulates on its own.
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 1000})
 	require.Equal(t, Stats{
-		Samples:            2,
 		Estimated:          true,
 		InputTokens:        500, // 2000 bytes * (1000 tokens / 4000 bytes)
 		CachedInputTokens:  200, // mean of 100 and 300
@@ -101,7 +100,7 @@ func TestStore_EstimateFromPreviousPeriod(t *testing.T) {
 
 	// The period after exposes only what the previous one accumulated.
 	clock.Advance(testPeriod)
-	require.Equal(t, Stats{Samples: 1, Estimated: true, InputTokens: 1000, InputTokensPerByte: 1}, s.Stats(testKey, testPeriod, 1000))
+	require.Equal(t, Stats{Estimated: true, InputTokens: 1000, InputTokensPerByte: 1}, s.Stats(testKey, testPeriod, 1000))
 }
 
 func TestStore_IdlePeriodClearsEstimate(t *testing.T) {
@@ -124,27 +123,6 @@ func TestStore_KeysAreIndependent(t *testing.T) {
 	} {
 		require.Equal(t, Stats{}, s.Stats(k, testPeriod, 1000), "%+v", k)
 	}
-}
-
-func TestStore_Failures(t *testing.T) {
-	s, clock := newTestStore()
-	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, Failed: true})
-	clock.Advance(testPeriod)
-	require.Equal(t, Stats{Samples: 1, Failures: 1}, s.Stats(testKey, testPeriod, 1000))
-
-	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 400, CachedInputTokens: 50})
-	s.Record(testKey, testPeriod, Outcome{RequestBytes: 500, Failed: true})
-	s.Record(testKey, testPeriod, Outcome{RequestBytes: 500, Failed: true})
-	clock.Advance(testPeriod)
-	require.Equal(t, Stats{
-		Samples:            3,
-		Failures:           2,
-		Estimated:          true,
-		InputTokens:        400,
-		CachedInputTokens:  50,
-		InputTokensPerByte: 0.4, // failures carry no usage: 400 tokens / 1000 bytes
-		CacheRate:          0.125,
-	}, s.Stats(testKey, testPeriod, 1000))
 }
 
 func TestStore_MeasuredRatiosAreWeightedBySize(t *testing.T) {
@@ -172,7 +150,7 @@ func TestStore_NoInputTokens(t *testing.T) {
 	// Successes reporting zero input tokens give a zero ratio and cache rate.
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000})
 	clock.Advance(testPeriod)
-	require.Equal(t, Stats{Samples: 1, Estimated: true}, s.Stats(testKey, testPeriod, 1000))
+	require.Equal(t, Stats{Estimated: true}, s.Stats(testKey, testPeriod, 1000))
 }
 
 func TestStore_NoBytes(t *testing.T) {
@@ -180,7 +158,7 @@ func TestStore_NoBytes(t *testing.T) {
 	// A success with an empty body gives no tokens-per-byte ratio.
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 0, InputTokens: 10})
 	clock.Advance(testPeriod)
-	require.Equal(t, Stats{Samples: 1}, s.Stats(testKey, testPeriod, 1000))
+	require.Equal(t, Stats{}, s.Stats(testKey, testPeriod, 1000))
 }
 
 func TestStore_SameSizeEstimatesTheSameTokens(t *testing.T) {
@@ -216,7 +194,7 @@ func TestStore_Sweep(t *testing.T) {
 	// A swept key starts over.
 	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100})
 	clock.Advance(testPeriod)
-	require.Equal(t, uint32(1), s.Stats(testKey, testPeriod, 1000).Samples)
+	require.Equal(t, uint32(100), s.Stats(testKey, testPeriod, 1000).InputTokens)
 }
 
 func TestStore_ConcurrentRecordAndSweep(_ *testing.T) {

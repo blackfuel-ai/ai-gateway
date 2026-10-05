@@ -69,9 +69,7 @@ type Config struct {
 // requests carrying the same ByHeader value and model, and computed by the CEL expression.
 type UsageEstimate struct {
 	// MetadataKey is the key of the dynamic metadata storing the estimate. The keys made of
-	// MetadataKey and a suffix store the measurements of that period:
-	//   - UsageEstimateSamplesSuffix: the number of requests completed in it;
-	//   - UsageEstimateFailuresSuffix: how many of them failed;
+	// MetadataKey and a suffix store the measured ratios of that period:
 	//   - UsageEstimateInputTokensPerByteSuffix: the input tokens per request body byte of
 	//     its successful responses;
 	//   - UsageEstimateCacheRateSuffix: the share of their input tokens that were cached.
@@ -86,8 +84,6 @@ type UsageEstimate struct {
 
 // Suffixes of the dynamic metadata keys a UsageEstimate emits next to its MetadataKey.
 const (
-	UsageEstimateSamplesSuffix            = "_samples"
-	UsageEstimateFailuresSuffix           = "_failures"
 	UsageEstimateInputTokensPerByteSuffix = "_input_tokens_per_byte" // #nosec G101
 	UsageEstimateCacheRateSuffix          = "_cache_rate"
 )
@@ -96,8 +92,6 @@ const (
 func (u *UsageEstimate) MetadataKeys() []string {
 	return []string{
 		u.MetadataKey,
-		u.MetadataKey + UsageEstimateSamplesSuffix,
-		u.MetadataKey + UsageEstimateFailuresSuffix,
 		u.MetadataKey + UsageEstimateInputTokensPerByteSuffix,
 		u.MetadataKey + UsageEstimateCacheRateSuffix,
 	}

@@ -7,8 +7,6 @@ package extproc
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -20,7 +18,6 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
-	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
@@ -190,30 +187,20 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 	cfg := newUsageEstimateTestConfig(t, testEstimateInput, testEstimateFresh)
 	headers := map[string]string{usageEstimateTestHeader: "key-a"}
 
-	// A cold key emits only the period counts.
+	// A cold key emits nothing.
 	rp := newUsageEstimateTestRouter(cfg, ue, headers)
 	resp, u := admitAndDispatch(t, rp)
-	fields := usageEstimateFields(t, resp)
-	require.Len(t, fields, 4)
-	for _, key := range []string{"estimated_input_token", "estimated_fresh_input_token"} {
-		require.Equal(t, 0.0, fields[key+"_samples"].GetNumberValue())
-		require.Equal(t, 0.0, fields[key+"_failures"].GetNumberValue())
-		require.NotContains(t, fields, key)
-		require.NotContains(t, fields, key+"_input_tokens_per_byte")
-		require.NotContains(t, fields, key+"_cache_rate")
-	}
+	require.Nil(t, resp.DynamicMetadata)
 	completeWithUsage(t, rp, u, 100, 40)
-	rp.finishUsageEstimates()
 	clock.nextPeriod()
 
 	// The same key and body size is estimated from the first response.
 	rp = newUsageEstimateTestRouter(cfg, ue, headers)
 	resp, u = admitAndDispatch(t, rp)
-	fields = usageEstimateFields(t, resp)
+	fields := usageEstimateFields(t, resp)
+	require.Len(t, fields, 6)
 	require.Equal(t, 100.0, fields["estimated_input_token"].GetNumberValue())
 	require.Equal(t, 60.0, fields["estimated_fresh_input_token"].GetNumberValue())
-	require.Equal(t, 1.0, fields["estimated_input_token_samples"].GetNumberValue())
-	require.Equal(t, 0.0, fields["estimated_input_token_failures"].GetNumberValue())
 	// The measured ratios of the period: 100 input tokens over the body size, 40
 	// of them cached.
 	bodyBytes := len(bodyFromModel(t, usageEstimateTestModel, false, nil))
@@ -222,7 +209,6 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 		require.Equal(t, 0.4, fields[key+"_cache_rate"].GetNumberValue())
 	}
 	completeWithUsage(t, rp, u, 200, 40)
-	rp.finishUsageEstimates()
 	clock.nextPeriod()
 
 	// Only the item with EmitMetric records metrics.
@@ -233,9 +219,10 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 	// The estimate (100) against the actual input tokens (200).
 	require.Equal(t, []recordedUsageEstimateRatio{{"estimated_input_token", usageEstimateTestModel, 0.5}}, m.ratios)
 
+	// The second response is the only one of its period.
 	st := ue.store.Stats(usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}, usageEstimateTestPeriod, 1)
-	require.Equal(t, uint32(1), st.Samples)
-	require.Equal(t, uint32(0), st.Failures)
+	require.Equal(t, 200/float64(bodyBytes), st.InputTokensPerByte)
+	require.Equal(t, 0.2, st.CacheRate)
 }
 
 func TestUsageEstimate_ConfiguredPeriod(t *testing.T) {
@@ -246,12 +233,11 @@ func TestUsageEstimate_ConfiguredPeriod(t *testing.T) {
 	rp := newUsageEstimateTestRouter(cfg, ue, headers)
 	_, u := admitAndDispatch(t, rp)
 	completeWithUsage(t, rp, u, 100, 0)
-	rp.finishUsageEstimates()
 
 	// A quarter of the configured period later, the period is not over yet.
 	clock.advance(usageEstimateTestPeriod / 4)
 	resp := admit(t, newUsageEstimateTestRouter(cfg, ue, headers), false)
-	require.NotContains(t, usageEstimateFields(t, resp), "estimated_input_token")
+	require.Nil(t, resp.DynamicMetadata)
 
 	// Once it is over, the response is exposed.
 	clock.advance(usageEstimateTestPeriod * 3 / 4)
@@ -280,7 +266,6 @@ func TestUsageEstimate_RatioUsesAdmissionInputs(t *testing.T) {
 		_, err := dispatch(t, u, &mockBackendAuthHandler{}, nil)
 		require.NoError(t, err)
 		completeWithUsage(t, rp, u, 100, 0)
-		rp.finishUsageEstimates()
 		clock.nextPeriod()
 	}
 	run()
@@ -295,7 +280,6 @@ func TestUsageEstimate_NoHeader(t *testing.T) {
 	resp, u := admitAndDispatch(t, rp)
 	require.Nil(t, resp.DynamicMetadata)
 	completeWithUsage(t, rp, u, 100, 0)
-	rp.finishUsageEstimates()
 	require.Empty(t, m.requests)
 	require.Empty(t, m.ratios)
 }
@@ -306,7 +290,6 @@ func TestUsageEstimate_NotConfigured(t *testing.T) {
 	resp, u := admitAndDispatch(t, rp)
 	require.Nil(t, resp.DynamicMetadata)
 	completeWithUsage(t, rp, u, 100, 0)
-	rp.finishUsageEstimates()
 	clock.nextPeriod()
 	require.Equal(t, usageestimate.Stats{}, ue.store.Stats(usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}, usageEstimateTestPeriod, 1))
 }
@@ -330,7 +313,6 @@ func TestUsageEstimate_CELErrorSkipsOnlyThatKey(t *testing.T) {
 	fields := usageEstimateFields(t, resp)
 	require.Equal(t, 100.0, fields["estimated_input_token"].GetNumberValue())
 	require.NotContains(t, fields, "failing")
-	require.Equal(t, 1.0, fields["failing_samples"].GetNumberValue())
 	// The measured ratios do not depend on the CEL expression.
 	require.Contains(t, fields, "failing_input_tokens_per_byte")
 	require.Contains(t, fields, "failing_cache_rate")
@@ -338,11 +320,11 @@ func TestUsageEstimate_CELErrorSkipsOnlyThatKey(t *testing.T) {
 	require.Equal(t, recordedUsageEstimateRequest{"failing", usageEstimateTestModel, metrics.UsageEstimateOutcomeError}, m.requests[len(m.requests)-1])
 }
 
-func TestUsageEstimate_Failures(t *testing.T) {
+func TestUsageEstimate_NoUsageRecordsNothing(t *testing.T) {
 	key := usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}
 	headers := map[string]string{usageEstimateTestHeader: "key-a"}
 
-	t.Run("error status after reaching an upstream", func(t *testing.T) {
+	t.Run("error status", func(t *testing.T) {
 		ue, _, clock := newTestUsageEstimates()
 		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
 		_, u := admitAndDispatch(t, rp)
@@ -351,10 +333,8 @@ func TestUsageEstimate_Failures(t *testing.T) {
 		u.responseHeaders = map[string]string{":status": "500"}
 		_, err := rp.ProcessResponseBody(t.Context(), inBody)
 		require.NoError(t, err)
-		rp.finishUsageEstimates()
-		rp.finishUsageEstimates() // Recorded once.
 		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
+		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 
 	t.Run("response without usage", func(t *testing.T) {
@@ -366,77 +346,25 @@ func TestUsageEstimate_Failures(t *testing.T) {
 		u.responseHeaders = map[string]string{":status": "200"}
 		_, err := rp.ProcessResponseBody(t.Context(), inBody)
 		require.NoError(t, err)
-		rp.finishUsageEstimates()
-		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
-	})
-
-	t.Run("aborted before any upstream", func(t *testing.T) {
-		ue, _, clock := newTestUsageEstimates()
-		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
-		_, err := rp.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, usageEstimateTestModel, false, nil)})
-		require.NoError(t, err)
-		rp.finishUsageEstimates()
 		clock.nextPeriod()
 		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 
-	t.Run("mirror leg only", func(t *testing.T) {
-		ue, _, clock := newTestUsageEstimates()
-		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
-		admit(t, rp, false)
-		mirror := setBackend(t, rp, true)
-		_, err := dispatch(t, mirror, &mockBackendAuthHandler{}, nil)
-		require.NoError(t, err)
-		rp.finishUsageEstimates()
-		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
-	})
-
-	// The gateway answering or failing the request itself is not an outcome of
-	// the key: the request never reached an upstream.
-	for _, tc := range []struct {
-		name         string
-		handler      filterapi.BackendAuthHandler
-		translateErr error
-		expErr       bool
-	}{
-		{name: "missing upstream credential", handler: &mockBackendAuthHandlerError{err: backendauth.ErrCredentialMissing}},
-		{name: "upstream auth error", handler: &mockBackendAuthHandlerError{err: errors.New("authentication failed")}, expErr: true},
-		{name: "request rejected by the translator", translateErr: fmt.Errorf("%w: missing required field", internalapi.ErrInvalidRequestBody)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ue, _, clock := newTestUsageEstimates()
-			rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
-			admit(t, rp, false)
-			u := setBackend(t, rp, false)
-			resp, err := dispatch(t, u, tc.handler, tc.translateErr)
-			if tc.expErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				require.NotNil(t, resp.GetImmediateResponse())
-			}
-			rp.finishUsageEstimates()
-			clock.nextPeriod()
-			require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
-		})
-	}
-
-	t.Run("stream aborted after reaching an upstream", func(t *testing.T) {
+	t.Run("stream aborted before its end", func(t *testing.T) {
 		ue, _, clock := newTestUsageEstimates()
 		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue, headers)
 		admit(t, rp, true)
 		u := setBackend(t, rp, false)
 		_, err := dispatch(t, u, &mockBackendAuthHandler{}, nil)
 		require.NoError(t, err)
-		u.translator = &mockTranslator{t: t}
+		mt := &mockTranslator{t: t}
+		mt.retUsedToken.SetInputTokens(100)
+		u.translator = mt
 		u.responseHeaders = map[string]string{":status": "200"}
 		_, err = rp.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("data: {}\n\n")})
 		require.NoError(t, err)
-		rp.finishUsageEstimates()
 		clock.nextPeriod()
-		require.Equal(t, usageestimate.Stats{Samples: 1, Failures: 1}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
+		require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 	})
 }
 
@@ -452,11 +380,9 @@ func TestUsageEstimate_RetryThenSuccess(t *testing.T) {
 	_, err = dispatch(t, u, &mockBackendAuthHandler{}, nil)
 	require.NoError(t, err)
 	completeWithUsage(t, rp, u, 100, 0)
-	rp.finishUsageEstimates()
 	clock.nextPeriod()
 	st := ue.store.Stats(key, usageEstimateTestPeriod, 1)
-	require.Equal(t, uint32(1), st.Samples)
-	require.Equal(t, uint32(0), st.Failures)
+	require.Equal(t, 100/float64(len(bodyFromModel(t, usageEstimateTestModel, false, nil))), st.InputTokensPerByte)
 }
 
 func TestUsageEstimate_StreamSuccess(t *testing.T) {
@@ -476,12 +402,8 @@ func TestUsageEstimate_StreamSuccess(t *testing.T) {
 		_, err = rp.ProcessResponseBody(t.Context(), &extprocv3.HttpBody{Body: []byte("data: {}\n\n"), EndOfStream: eos})
 		require.NoError(t, err)
 	}
-	rp.finishUsageEstimates()
 	clock.nextPeriod()
-	st := ue.store.Stats(key, usageEstimateTestPeriod, 1)
-	require.Equal(t, uint32(1), st.Samples)
-	require.Equal(t, uint32(0), st.Failures)
-	require.True(t, st.Estimated)
+	require.True(t, ue.store.Stats(key, usageEstimateTestPeriod, 1).Estimated)
 }
 
 func TestUsageEstimate_ForcesStreamUsage(t *testing.T) {
@@ -496,12 +418,10 @@ func TestUsageEstimate_ForcesStreamUsage(t *testing.T) {
 // usageEstimateRecordingProcessor records the usage estimate calls of the server.
 type usageEstimateRecordingProcessor struct {
 	passThroughProcessor
-	set      *usageEstimates
-	finished int
+	set *usageEstimates
 }
 
 func (p *usageEstimateRecordingProcessor) setUsageEstimates(ue *usageEstimates) { p.set = ue }
-func (p *usageEstimateRecordingProcessor) finishUsageEstimates()                { p.finished++ }
 
 func TestNewServer_UsageEstimatesOff(t *testing.T) {
 	s, err := NewServer(slog.Default(), false)
@@ -526,5 +446,4 @@ func TestServer_Process_UsageEstimates(t *testing.T) {
 	}
 	require.NoError(t, s.Process(stream))
 	require.Same(t, ue.store, p.set.store)
-	require.Equal(t, 1, p.finished)
 }

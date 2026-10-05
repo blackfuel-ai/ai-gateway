@@ -187,9 +187,6 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 	ctx = context.WithValue(ctx, loggerContextKey, s.logger)
 	defer func() {
 		if !isUpstreamFilter {
-			if up, ok := p.(usageEstimateProcessor); ok {
-				up.finishUsageEstimates()
-			}
 			s.routerProcessorsPerReqIDMutex.Lock()
 			defer s.routerProcessorsPerReqIDMutex.Unlock()
 			delete(s.routerProcessorsPerReqID, internalReqID)
