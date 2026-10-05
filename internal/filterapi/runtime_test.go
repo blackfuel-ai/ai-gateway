@@ -112,6 +112,7 @@ func TestServer_LoadConfig(t *testing.T) {
 			UsageEstimates: []UsageEstimate{
 				{MetadataKey: "estimated_input", CEL: "input_tokens", ByHeader: "x-client-id", EmitMetric: true},
 				{MetadataKey: "estimated_cached", CEL: "cached_input_tokens", ByHeader: "x-client-id"},
+				{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
 			},
 			UsageEstimatePeriod: time.Minute,
 		}
@@ -121,12 +122,17 @@ func TestServer_LoadConfig(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, time.Minute, rc.UsageEstimatePeriod)
-		require.Len(t, rc.UsageEstimates, 2)
-		require.Equal(t, &config.UsageEstimates[0], rc.UsageEstimates[0].UsageEstimate)
-		require.Equal(t, &config.UsageEstimates[1], rc.UsageEstimates[1].UsageEstimate)
-		val, err := llmcostcel.EvaluateProgram(rc.UsageEstimates[1].CELProg, "", "", "", 10, 7, 0, 0, 10, 0)
+		require.Len(t, rc.UsageEstimates, 3)
+		for i := range config.UsageEstimates {
+			require.Equal(t, &config.UsageEstimates[i], rc.UsageEstimates[i].UsageEstimate)
+		}
+		in := llmcostcel.EstimateInputs{InputTokens: 10, CachedInputTokens: 7, TotalTokens: 10, CacheRate: 0.7}
+		val, err := llmcostcel.EvaluateEstimateProgram(rc.UsageEstimates[1].CELProg, in)
 		require.NoError(t, err)
-		require.Equal(t, uint64(7), val)
+		require.Equal(t, float64(7), val)
+		val, err = llmcostcel.EvaluateEstimateProgram(rc.UsageEstimates[2].CELProg, in)
+		require.NoError(t, err)
+		require.Equal(t, 0.7, val)
 	})
 
 	t.Run("error - invalid CEL in usage estimate", func(t *testing.T) {

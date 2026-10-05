@@ -380,14 +380,6 @@ func TestGatewayConfigs(t *testing.T) {
 			expErr: "Duplicate value",
 		},
 		{
-			name:   "usage-estimate-derived-key-collision.yaml",
-			expErr: "metadataKey must not equal another item's metadataKey with an _input_tokens_per_byte or _cache_rate suffix",
-		},
-		{
-			name:   "usage-estimate-ratio-key-collision.yaml",
-			expErr: "metadataKey must not equal another item's metadataKey with an _input_tokens_per_byte or _cache_rate suffix",
-		},
-		{
 			name:   "usage-estimate-period-too-short.yaml",
 			expErr: "usageEstimatePeriod must be between 5s and 10m",
 		},

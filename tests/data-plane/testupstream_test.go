@@ -66,6 +66,8 @@ func TestWithTestUpstream(t *testing.T) {
 		},
 		UsageEstimates: []filterapi.UsageEstimate{
 			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-usage-estimate-key"},
+			{MetadataKey: "estimated_input_token_input_tokens_per_byte", CEL: "input_tokens_per_byte", ByHeader: "x-usage-estimate-key"},
+			{MetadataKey: "estimated_input_token_cache_rate", CEL: "cache_rate", ByHeader: "x-usage-estimate-key"},
 		},
 		UsageEstimatePeriod: dataPlaneUsageEstimatePeriod,
 		Backends: []filterapi.Backend{

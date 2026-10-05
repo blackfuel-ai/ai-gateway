@@ -1,8 +1,3 @@
-# Copyright Envoy AI Gateway Authors
-# SPDX-License-Identifier: Apache-2.0
-# The full text of the Apache license is available in the LICENSE file at
-# the root of the repo.
-
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -711,12 +706,10 @@ spec:
                   stream_options.include_usage set, as with LLMRequestCosts, so its client receives
                   the final usage chunk.
 
-                  A metadataKey must not be another item's metadataKey followed by
-                  "_input_tokens_per_byte" or "_cache_rate", nor share any of its three keys
-                  with an LLMRequestCost metadataKey, global, per route or added by a
-                  QuotaPolicy. On such a collision the controller stops updating the gateway's
-                  filter configuration, which keeps serving the last valid one, until the
-                  collision is removed.
+                  A metadataKey must not equal an LLMRequestCost metadataKey, global, per route
+                  or added by a QuotaPolicy. On such a collision the controller stops updating
+                  the gateway's filter configuration, which keeps serving the last valid one,
+                  until the collision is removed.
                 items:
                   description: |-
                     UsageEstimate estimates one value of a request's token usage when the request
@@ -731,13 +724,9 @@ spec:
                         observed in those responses;
                       - cached input tokens: the mean cached input tokens per response.
 
-                    The CEL expression is evaluated on that estimated usage and its result is
-                    stored under MetadataKey. The measured ratios of that period are stored next
-                    to it: "<metadataKey>_input_tokens_per_byte", the input tokens of its
-                    successful responses divided by the size of their request bodies, and
-                    "<metadataKey>_cache_rate", the share of those input tokens that were cached,
-                    between 0 and 1. None of the three is emitted when the last completed period
-                    holds no successful response.
+                    The CEL expression is evaluated on that estimated usage and on the measured
+                    ratios of that period, and its result is stored under MetadataKey. Nothing is
+                    emitted when the last completed period holds no successful response.
 
                     Each gateway replica estimates from the responses it served itself.
                   properties:
@@ -755,18 +744,25 @@ spec:
                       type: string
                     cel:
                       description: "CEL is the CEL expression computing the estimate.
-                        It accepts the variables\nof LLMRequestCost.CEL and must return
-                        a signed or unsigned integer. It is\nevaluated on the estimated
+                        It accepts the variables\nof LLMRequestCost.CEL and the measured
+                        ratios, and must return an int, a uint\nor a double that is
+                        finite and not negative. It is evaluated on the\nestimated
                         usage of the request:\n\n\t* model: the model name extracted
                         from the request content.\n\t* input_tokens: the estimated
                         number of input tokens.\n\t* cached_input_tokens: the estimated
                         number of cached read input tokens.\n\t* total_tokens: equal
                         to input_tokens.\n\t* output_tokens, reasoning_tokens and
                         cache_creation_input_tokens: 0.\n\t* backend and route_name:
-                        empty, as no route is selected at admission.\n\nFor example,
-                        \"input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens
+                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
+                        the input tokens of the successful responses of the\n\t  period
+                        divided by the size of their request bodies, a double.\n\t*
+                        cache_rate: the share of those input tokens that were cached,
+                        a double\n\t  between 0 and 1.\n\nFor example, \"input_tokens
+                        > cached_input_tokens ? input_tokens - cached_input_tokens
                         : uint(0)\"\nestimates the input tokens that are not served
-                        from the prompt cache."
+                        from the prompt cache, and\n\"cache_rate\" emits the measured
+                        cache rate. CEL does not convert between\nintegers and doubles
+                        implicitly: write \"double(input_tokens) * cache_rate\"."
                       minLength: 1
                       type: string
                     emitMetric:
@@ -796,11 +792,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - metadataKey
                 x-kubernetes-list-type: map
-                x-kubernetes-validations:
-                - message: metadataKey must not equal another item's metadataKey with
-                    an _input_tokens_per_byte or _cache_rate suffix
-                  rule: self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_input_tokens_per_byte'
-                    && a.metadataKey != b.metadataKey + '_cache_rate'))
             type: object
           status:
             description: Status defines the status of the GatewayConfig.
@@ -1559,12 +1550,10 @@ spec:
                   stream_options.include_usage set, as with LLMRequestCosts, so its client receives
                   the final usage chunk.
 
-                  A metadataKey must not be another item's metadataKey followed by
-                  "_input_tokens_per_byte" or "_cache_rate", nor share any of its three keys
-                  with an LLMRequestCost metadataKey, global, per route or added by a
-                  QuotaPolicy. On such a collision the controller stops updating the gateway's
-                  filter configuration, which keeps serving the last valid one, until the
-                  collision is removed.
+                  A metadataKey must not equal an LLMRequestCost metadataKey, global, per route
+                  or added by a QuotaPolicy. On such a collision the controller stops updating
+                  the gateway's filter configuration, which keeps serving the last valid one,
+                  until the collision is removed.
                 items:
                   description: |-
                     UsageEstimate estimates one value of a request's token usage when the request
@@ -1579,13 +1568,9 @@ spec:
                         observed in those responses;
                       - cached input tokens: the mean cached input tokens per response.
 
-                    The CEL expression is evaluated on that estimated usage and its result is
-                    stored under MetadataKey. The measured ratios of that period are stored next
-                    to it: "<metadataKey>_input_tokens_per_byte", the input tokens of its
-                    successful responses divided by the size of their request bodies, and
-                    "<metadataKey>_cache_rate", the share of those input tokens that were cached,
-                    between 0 and 1. None of the three is emitted when the last completed period
-                    holds no successful response.
+                    The CEL expression is evaluated on that estimated usage and on the measured
+                    ratios of that period, and its result is stored under MetadataKey. Nothing is
+                    emitted when the last completed period holds no successful response.
 
                     Each gateway replica estimates from the responses it served itself.
                   properties:
@@ -1603,18 +1588,25 @@ spec:
                       type: string
                     cel:
                       description: "CEL is the CEL expression computing the estimate.
-                        It accepts the variables\nof LLMRequestCost.CEL and must return
-                        a signed or unsigned integer. It is\nevaluated on the estimated
+                        It accepts the variables\nof LLMRequestCost.CEL and the measured
+                        ratios, and must return an int, a uint\nor a double that is
+                        finite and not negative. It is evaluated on the\nestimated
                         usage of the request:\n\n\t* model: the model name extracted
                         from the request content.\n\t* input_tokens: the estimated
                         number of input tokens.\n\t* cached_input_tokens: the estimated
                         number of cached read input tokens.\n\t* total_tokens: equal
                         to input_tokens.\n\t* output_tokens, reasoning_tokens and
                         cache_creation_input_tokens: 0.\n\t* backend and route_name:
-                        empty, as no route is selected at admission.\n\nFor example,
-                        \"input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens
+                        empty, as no route is selected at admission.\n\t* input_tokens_per_byte:
+                        the input tokens of the successful responses of the\n\t  period
+                        divided by the size of their request bodies, a double.\n\t*
+                        cache_rate: the share of those input tokens that were cached,
+                        a double\n\t  between 0 and 1.\n\nFor example, \"input_tokens
+                        > cached_input_tokens ? input_tokens - cached_input_tokens
                         : uint(0)\"\nestimates the input tokens that are not served
-                        from the prompt cache."
+                        from the prompt cache, and\n\"cache_rate\" emits the measured
+                        cache rate. CEL does not convert between\nintegers and doubles
+                        implicitly: write \"double(input_tokens) * cache_rate\"."
                       minLength: 1
                       type: string
                     emitMetric:
@@ -1644,11 +1636,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - metadataKey
                 x-kubernetes-list-type: map
-                x-kubernetes-validations:
-                - message: metadataKey must not equal another item's metadataKey with
-                    an _input_tokens_per_byte or _cache_rate suffix
-                  rule: self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_input_tokens_per_byte'
-                    && a.metadataKey != b.metadataKey + '_cache_rate'))
             type: object
           status:
             description: Status defines the status of the GatewayConfig.

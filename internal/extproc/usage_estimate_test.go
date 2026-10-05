@@ -64,7 +64,7 @@ const (
 func newUsageEstimateTestConfig(t *testing.T, estimates ...filterapi.UsageEstimate) *filterapi.RuntimeConfig {
 	cfg := &filterapi.RuntimeConfig{UsageEstimatePeriod: usageEstimateTestPeriod}
 	for i := range estimates {
-		prog, err := llmcostcel.NewProgram(estimates[i].CEL)
+		prog, err := llmcostcel.NewEstimateProgram(estimates[i].CEL)
 		require.NoError(t, err)
 		cfg.UsageEstimates = append(cfg.UsageEstimates, filterapi.RuntimeUsageEstimate{UsageEstimate: &estimates[i], CELProg: prog})
 	}
@@ -79,6 +79,12 @@ var (
 		MetadataKey: "estimated_fresh_input_token",
 		CEL:         "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)",
 		ByHeader:    usageEstimateTestHeader,
+	}
+	testEstimateCacheRate = filterapi.UsageEstimate{
+		MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: usageEstimateTestHeader, EmitMetric: true,
+	}
+	testEstimateInputTokensPerByte = filterapi.UsageEstimate{
+		MetadataKey: "estimated_input_tokens_per_byte", CEL: "input_tokens_per_byte", ByHeader: usageEstimateTestHeader,
 	}
 )
 
@@ -184,7 +190,7 @@ func newTestUsageEstimates() (*usageEstimates, *mockUsageEstimateMetrics, *usage
 
 func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 	ue, m, clock := newTestUsageEstimates()
-	cfg := newUsageEstimateTestConfig(t, testEstimateInput, testEstimateFresh)
+	cfg := newUsageEstimateTestConfig(t, testEstimateInput, testEstimateFresh, testEstimateCacheRate, testEstimateInputTokensPerByte)
 	headers := map[string]string{usageEstimateTestHeader: "key-a"}
 
 	// A cold key emits nothing.
@@ -198,26 +204,30 @@ func TestUsageEstimate_ColdThenEstimated(t *testing.T) {
 	rp = newUsageEstimateTestRouter(cfg, ue, headers)
 	resp, u = admitAndDispatch(t, rp)
 	fields := usageEstimateFields(t, resp)
-	require.Len(t, fields, 6)
+	require.Len(t, fields, 4)
 	require.Equal(t, 100.0, fields["estimated_input_token"].GetNumberValue())
 	require.Equal(t, 60.0, fields["estimated_fresh_input_token"].GetNumberValue())
 	// The measured ratios of the period: 100 input tokens over the body size, 40
 	// of them cached.
 	bodyBytes := len(bodyFromModel(t, usageEstimateTestModel, false, nil))
-	for _, key := range []string{"estimated_input_token", "estimated_fresh_input_token"} {
-		require.Equal(t, 100/float64(bodyBytes), fields[key+"_input_tokens_per_byte"].GetNumberValue())
-		require.Equal(t, 0.4, fields[key+"_cache_rate"].GetNumberValue())
-	}
+	require.Equal(t, 100/float64(bodyBytes), fields["estimated_input_tokens_per_byte"].GetNumberValue())
+	require.Equal(t, 0.4, fields["estimated_cache_rate"].GetNumberValue())
 	completeWithUsage(t, rp, u, 200, 40)
 	clock.nextPeriod()
 
 	// Only the item with EmitMetric records metrics.
 	require.Equal(t, []recordedUsageEstimateRequest{
 		{"estimated_input_token", usageEstimateTestModel, metrics.UsageEstimateOutcomeCold},
+		{"estimated_cache_rate", usageEstimateTestModel, metrics.UsageEstimateOutcomeCold},
 		{"estimated_input_token", usageEstimateTestModel, metrics.UsageEstimateOutcomeEstimated},
+		{"estimated_cache_rate", usageEstimateTestModel, metrics.UsageEstimateOutcomeEstimated},
 	}, m.requests)
-	// The estimate (100) against the actual input tokens (200).
-	require.Equal(t, []recordedUsageEstimateRatio{{"estimated_input_token", usageEstimateTestModel, 0.5}}, m.ratios)
+	// The estimate (100) against the actual input tokens (200), and the estimated
+	// cache rate (0.4) against the actual one (40 of 200 input tokens).
+	require.Equal(t, []recordedUsageEstimateRatio{
+		{"estimated_input_token", usageEstimateTestModel, 0.5},
+		{"estimated_cache_rate", usageEstimateTestModel, 2},
+	}, m.ratios)
 
 	// The second response is the only one of its period.
 	st := ue.store.Stats(usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}, usageEstimateTestPeriod, 1)
@@ -313,9 +323,7 @@ func TestUsageEstimate_CELErrorSkipsOnlyThatKey(t *testing.T) {
 	fields := usageEstimateFields(t, resp)
 	require.Equal(t, 100.0, fields["estimated_input_token"].GetNumberValue())
 	require.NotContains(t, fields, "failing")
-	// The measured ratios do not depend on the CEL expression.
-	require.Contains(t, fields, "failing_input_tokens_per_byte")
-	require.Contains(t, fields, "failing_cache_rate")
+	require.Len(t, fields, 1)
 	// A failed evaluation is not reported as a cold key.
 	require.Equal(t, recordedUsageEstimateRequest{"failing", usageEstimateTestModel, metrics.UsageEstimateOutcomeError}, m.requests[len(m.requests)-1])
 }

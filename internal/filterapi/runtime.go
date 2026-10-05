@@ -144,7 +144,7 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 	usageEstimates := make([]RuntimeUsageEstimate, 0, len(config.UsageEstimates))
 	for i := range config.UsageEstimates {
 		e := &config.UsageEstimates[i]
-		prog, err := llmcostcel.NewProgram(e.CEL)
+		prog, err := llmcostcel.NewEstimateProgram(e.CEL)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create CEL program for usage estimate %q: %w", e.MetadataKey, err)
 		}

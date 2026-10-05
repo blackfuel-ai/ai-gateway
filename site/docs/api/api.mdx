@@ -1562,7 +1562,7 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   name="usageEstimates"
   type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate) array"
   required="false"
-  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not be another item's metadataKey followed by<br />`_input_tokens_per_byte` or `_cache_rate`, nor share any of its three keys<br />with an LLMRequestCost metadataKey, global, per route or added by a<br />QuotaPolicy. On such a collision the controller stops updating the gateway's<br />filter configuration, which keeps serving the last valid one, until the<br />collision is removed."
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
 /><ApiField
   name="usageEstimatePeriod"
   type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
@@ -2686,13 +2686,9 @@ period:
     observed in those responses;
   - cached input tokens: the mean cached input tokens per response.
 
-The CEL expression is evaluated on that estimated usage and its result is
-stored under MetadataKey. The measured ratios of that period are stored next
-to it: "<metadataKey>_input_tokens_per_byte", the input tokens of its
-successful responses divided by the size of their request bodies, and
-"<metadataKey>_cache_rate", the share of those input tokens that were cached,
-between 0 and 1. None of the three is emitted when the last completed period
-holds no successful response.
+The CEL expression is evaluated on that estimated usage and on the measured
+ratios of that period, and its result is stored under MetadataKey. Nothing is
+emitted when the last completed period holds no successful response.
 
 Each gateway replica estimates from the responses it served itself.
 
@@ -2709,7 +2705,7 @@ Each gateway replica estimates from the responses it served itself.
   name="cel"
   type="string"
   required="true"
-  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and must return a signed or unsigned integer. It is<br />evaluated on the estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />For example, `input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)`<br />estimates the input tokens that are not served from the prompt cache."
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the share of those input tokens that were cached, a double<br />	  between 0 and 1.<br />For example, `input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
 /><ApiField
   name="byHeader"
   type="string"
@@ -4362,7 +4358,7 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   name="usageEstimates"
   type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate) array"
   required="false"
-  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not be another item's metadataKey followed by<br />`_input_tokens_per_byte` or `_cache_rate`, nor share any of its three keys<br />with an LLMRequestCost metadataKey, global, per route or added by a<br />QuotaPolicy. On such a collision the controller stops updating the gateway's<br />filter configuration, which keeps serving the last valid one, until the<br />collision is removed."
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
 /><ApiField
   name="usageEstimatePeriod"
   type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
@@ -5204,13 +5200,9 @@ period:
     observed in those responses;
   - cached input tokens: the mean cached input tokens per response.
 
-The CEL expression is evaluated on that estimated usage and its result is
-stored under MetadataKey. The measured ratios of that period are stored next
-to it: "<metadataKey>_input_tokens_per_byte", the input tokens of its
-successful responses divided by the size of their request bodies, and
-"<metadataKey>_cache_rate", the share of those input tokens that were cached,
-between 0 and 1. None of the three is emitted when the last completed period
-holds no successful response.
+The CEL expression is evaluated on that estimated usage and on the measured
+ratios of that period, and its result is stored under MetadataKey. Nothing is
+emitted when the last completed period holds no successful response.
 
 Each gateway replica estimates from the responses it served itself.
 
@@ -5227,7 +5219,7 @@ Each gateway replica estimates from the responses it served itself.
   name="cel"
   type="string"
   required="true"
-  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and must return a signed or unsigned integer. It is<br />evaluated on the estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />For example, `input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)`<br />estimates the input tokens that are not served from the prompt cache."
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the share of those input tokens that were cached, a double<br />	  between 0 and 1.<br />For example, `input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
 /><ApiField
   name="byHeader"
   type="string"

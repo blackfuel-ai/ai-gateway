@@ -14,6 +14,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/usageestimate"
 )
@@ -50,7 +51,7 @@ type usageEstimateState struct {
 
 type admittedUsageEstimate struct {
 	estimate *filterapi.RuntimeUsageEstimate
-	value    uint64
+	value    float64
 }
 
 // setUsageEstimates implements [usageEstimateProcessor].
@@ -88,19 +89,20 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 		}
 		outcome := metrics.UsageEstimateOutcomeCold
 		if s.Estimated {
-			fields[e.MetadataKey+filterapi.UsageEstimateInputTokensPerByteSuffix] = structpb.NewNumberValue(s.InputTokensPerByte)
-			fields[e.MetadataKey+filterapi.UsageEstimateCacheRateSuffix] = structpb.NewNumberValue(s.CacheRate)
-			var usage metrics.TokenUsage
-			usage.SetInputTokens(s.InputTokens)
-			usage.SetCachedInputTokens(s.CachedInputTokens)
-			usage.SetTotalTokens(s.InputTokens)
-			v, err := evalCost(filterapi.LLMRequestCostTypeCEL, e.CELProg, &usage, r.requestHeaders, "", "")
+			v, err := llmcostcel.EvaluateEstimateProgram(e.CELProg, llmcostcel.EstimateInputs{
+				Model:              r.requestHeaders[internalapi.ModelNameHeaderKeyDefault],
+				InputTokens:        s.InputTokens,
+				CachedInputTokens:  s.CachedInputTokens,
+				TotalTokens:        s.InputTokens,
+				InputTokensPerByte: s.InputTokensPerByte,
+				CacheRate:          s.CacheRate,
+			})
 			if err != nil {
 				outcome = metrics.UsageEstimateOutcomeError
 				logger.Warn("cannot evaluate usage estimate", slog.String("metadata_key", e.MetadataKey), slog.String("error", err.Error()))
 			} else {
 				outcome = metrics.UsageEstimateOutcomeEstimated
-				fields[e.MetadataKey] = structpb.NewNumberValue(float64(v))
+				fields[e.MetadataKey] = structpb.NewNumberValue(v)
 				st.admitted = append(st.admitted, admittedUsageEstimate{estimate: e, value: v})
 			}
 		}
@@ -138,15 +140,40 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEst
 		st.shared.store.Record(key, st.period, o)
 	}
 
+	if len(st.admitted) == 0 {
+		return
+	}
+	// The ratios of the response, defined as those of a period in [usageestimate.Store.Stats].
+	var inputTokensPerByte, cacheRate float64
+	if st.requestBytes > 0 {
+		inputTokensPerByte = float64(input) / float64(st.requestBytes)
+	}
+	if input > 0 {
+		cacheRate = float64(cached) / float64(input)
+	}
+	cacheCreation, _ := usage.CacheCreationInputTokens()
+	output, _ := usage.OutputTokens()
+	total, _ := usage.TotalTokens()
+	reasoning, _ := usage.ReasoningTokens()
+	in := llmcostcel.EstimateInputs{
+		Model:                    r.requestHeaders[internalapi.ModelNameHeaderKeyDefault],
+		InputTokens:              input,
+		CachedInputTokens:        cached,
+		CacheCreationInputTokens: cacheCreation,
+		OutputTokens:             output,
+		TotalTokens:              total,
+		ReasoningTokens:          reasoning,
+		InputTokensPerByte:       inputTokensPerByte,
+		CacheRate:                cacheRate,
+	}
 	for _, a := range st.admitted {
 		if !a.estimate.EmitMetric {
 			continue
 		}
-		actual, err := evalCost(filterapi.LLMRequestCostTypeCEL, a.estimate.CELProg, usage, r.requestHeaders, "", "")
+		actual, err := llmcostcel.EvaluateEstimateProgram(a.estimate.CELProg, in)
 		if err != nil || actual == 0 {
 			continue
 		}
-		st.shared.metrics.RecordRatio(ctx, a.estimate.MetadataKey, r.originalModel, float64(a.value)/float64(actual))
+		st.shared.metrics.RecordRatio(ctx, a.estimate.MetadataKey, r.originalModel, a.value/actual)
 	}
 }
-

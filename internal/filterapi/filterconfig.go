@@ -68,33 +68,14 @@ type Config struct {
 // The estimate is drawn from the responses completed in the last completed period for
 // requests carrying the same ByHeader value and model, and computed by the CEL expression.
 type UsageEstimate struct {
-	// MetadataKey is the key of the dynamic metadata storing the estimate. The keys made of
-	// MetadataKey and a suffix store the measured ratios of that period:
-	//   - UsageEstimateInputTokensPerByteSuffix: the input tokens per request body byte of
-	//     its successful responses;
-	//   - UsageEstimateCacheRateSuffix: the share of their input tokens that were cached.
+	// MetadataKey is the key of the dynamic metadata storing the estimate.
 	MetadataKey string `json:"metadataKey"`
-	// CEL is the CEL expression evaluated on the estimated usage.
+	// CEL is the CEL expression evaluated on the estimated usage and the measured ratios.
 	CEL string `json:"cel"`
 	// ByHeader is the lower-cased name of the request header grouping the requests.
 	ByHeader string `json:"byHeader"`
 	// EmitMetric also records the estimate in metrics.
 	EmitMetric bool `json:"emitMetric,omitempty"`
-}
-
-// Suffixes of the dynamic metadata keys a UsageEstimate emits next to its MetadataKey.
-const (
-	UsageEstimateInputTokensPerByteSuffix = "_input_tokens_per_byte" // #nosec G101
-	UsageEstimateCacheRateSuffix          = "_cache_rate"
-)
-
-// MetadataKeys returns every dynamic metadata key the usage estimate can emit.
-func (u *UsageEstimate) MetadataKeys() []string {
-	return []string{
-		u.MetadataKey,
-		u.MetadataKey + UsageEstimateInputTokensPerByteSuffix,
-		u.MetadataKey + UsageEstimateCacheRateSuffix,
-	}
 }
 
 // Model corresponds to the OpenAI model object in the OpenAI-compatible APIs

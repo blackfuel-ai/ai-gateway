@@ -274,7 +274,7 @@ func aigwGlobalLLMRequestCostToFilterAPI(cost aigv1b1.LLMRequestCost) (filterapi
 
 // aigwUsageEstimateToFilterAPI converts an API UsageEstimate to filter API form.
 func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEstimate, error) {
-	if _, err := llmcostcel.NewProgram(e.CEL); err != nil {
+	if _, err := llmcostcel.NewEstimateProgram(e.CEL); err != nil {
 		return filterapi.UsageEstimate{}, fmt.Errorf("invalid CEL expression: %w", err)
 	}
 	return filterapi.UsageEstimate{
@@ -287,7 +287,7 @@ func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEsti
 }
 
 // checkUsageEstimateMetadataKeys rejects a usage estimate whose dynamic metadata
-// keys (the estimate and its suffixed keys) are also LLMRequestCost metadata keys:
+// key is also an LLMRequestCost metadata key:
 // the cost written at completion would overwrite the value written at admission.
 // Collisions between usage estimates are rejected by the CRD.
 func checkUsageEstimateMetadataKeys(ec *filterapi.Config) error {
@@ -303,10 +303,8 @@ func checkUsageEstimateMetadataKeys(ec *filterapi.Config) error {
 	}
 	for i := range ec.UsageEstimates {
 		e := &ec.UsageEstimates[i]
-		for _, key := range e.MetadataKeys() {
-			if _, ok := costKeys[key]; ok {
-				return fmt.Errorf("usage estimate %q: metadata key %q collides with an LLMRequestCost metadataKey", e.MetadataKey, key)
-			}
+		if _, ok := costKeys[e.MetadataKey]; ok {
+			return fmt.Errorf("usage estimate metadataKey %q collides with an LLMRequestCost metadataKey", e.MetadataKey)
 		}
 	}
 	return nil

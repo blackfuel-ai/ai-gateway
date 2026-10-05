@@ -118,18 +118,15 @@ type GatewayConfigSpec struct {
 	// stream_options.include_usage set, as with LLMRequestCosts, so its client receives
 	// the final usage chunk.
 	//
-	// A metadataKey must not be another item's metadataKey followed by
-	// "_input_tokens_per_byte" or "_cache_rate", nor share any of its three keys
-	// with an LLMRequestCost metadataKey, global, per route or added by a
-	// QuotaPolicy. On such a collision the controller stops updating the gateway's
-	// filter configuration, which keeps serving the last valid one, until the
-	// collision is removed.
+	// A metadataKey must not equal an LLMRequestCost metadataKey, global, per route
+	// or added by a QuotaPolicy. On such a collision the controller stops updating
+	// the gateway's filter configuration, which keeps serving the last valid one,
+	// until the collision is removed.
 	//
 	// +optional
 	// +listType=map
 	// +listMapKey=metadataKey
 	// +kubebuilder:validation:MaxItems=16
-	// +kubebuilder:validation:XValidation:rule="self.all(a, self.all(b, a.metadataKey != b.metadataKey + '_input_tokens_per_byte' && a.metadataKey != b.metadataKey + '_cache_rate'))",message="metadataKey must not equal another item's metadataKey with an _input_tokens_per_byte or _cache_rate suffix"
 	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
 
 	// UsageEstimatePeriod is the length of the periods UsageEstimates accumulates
@@ -157,13 +154,9 @@ type GatewayConfigSpec struct {
 //     observed in those responses;
 //   - cached input tokens: the mean cached input tokens per response.
 //
-// The CEL expression is evaluated on that estimated usage and its result is
-// stored under MetadataKey. The measured ratios of that period are stored next
-// to it: "<metadataKey>_input_tokens_per_byte", the input tokens of its
-// successful responses divided by the size of their request bodies, and
-// "<metadataKey>_cache_rate", the share of those input tokens that were cached,
-// between 0 and 1. None of the three is emitted when the last completed period
-// holds no successful response.
+// The CEL expression is evaluated on that estimated usage and on the measured
+// ratios of that period, and its result is stored under MetadataKey. Nothing is
+// emitted when the last completed period holds no successful response.
 //
 // Each gateway replica estimates from the responses it served itself.
 type UsageEstimate struct {
@@ -174,8 +167,9 @@ type UsageEstimate struct {
 	// +kubebuilder:validation:MaxLength=128
 	MetadataKey string `json:"metadataKey"`
 	// CEL is the CEL expression computing the estimate. It accepts the variables
-	// of LLMRequestCost.CEL and must return a signed or unsigned integer. It is
-	// evaluated on the estimated usage of the request:
+	// of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint
+	// or a double that is finite and not negative. It is evaluated on the
+	// estimated usage of the request:
 	//
 	//	* model: the model name extracted from the request content.
 	//	* input_tokens: the estimated number of input tokens.
@@ -183,9 +177,15 @@ type UsageEstimate struct {
 	//	* total_tokens: equal to input_tokens.
 	//	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.
 	//	* backend and route_name: empty, as no route is selected at admission.
+	//	* input_tokens_per_byte: the input tokens of the successful responses of the
+	//	  period divided by the size of their request bodies, a double.
+	//	* cache_rate: the share of those input tokens that were cached, a double
+	//	  between 0 and 1.
 	//
 	// For example, "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
-	// estimates the input tokens that are not served from the prompt cache.
+	// estimates the input tokens that are not served from the prompt cache, and
+	// "cache_rate" emits the measured cache rate. CEL does not convert between
+	// integers and doubles implicitly: write "double(input_tokens) * cache_rate".
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
