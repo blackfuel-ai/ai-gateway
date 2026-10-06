@@ -60,6 +60,7 @@ type QuotaPolicySpec struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.quota.dynamicOverride)",message="serviceQuota does not support dynamicOverride"
+// +kubebuilder:validation:XValidation:rule="!has(self.quota.admissionReserve)",message="serviceQuota does not support admissionReserve"
 type ServiceQuotaDefinition struct {
 	// CostExpression specifies a CEL expression for computing the quota burndown of the LLM-related request.
 	// If no expression is specified the "total_tokens" value is used.
@@ -135,6 +136,7 @@ const (
 )
 
 // +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.dynamicOverride))",message="dynamicOverride cannot be combined with shadowMode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.admissionReserve))",message="admissionReserve cannot be combined with shadowMode"
 type QuotaRule struct {
 	// ClientSelectors holds the list of conditions to select
 	// specific clients using attributes from the traffic flow.
@@ -166,6 +168,7 @@ type QuotaRule struct {
 // QuotaValue defines the quota limits using sliding window.
 //
 // +kubebuilder:validation:XValidation:rule="!(has(self.costExpression) && has(self.costMetric) && self.costMetric == 'Requests')",message="costExpression cannot be combined with costMetric=Requests"
+// +kubebuilder:validation:XValidation:rule="!(has(self.admissionReserve) && has(self.costMetric) && self.costMetric == 'Requests')",message="admissionReserve cannot be combined with costMetric=Requests"
 type QuotaValue struct {
 	// The limit alloted for a specified time window.
 	Limit uint `json:"limit"`
@@ -180,7 +183,7 @@ type QuotaValue struct {
 	DynamicOverride *QuotaLimitOverride `json:"dynamicOverride,omitempty"`
 	// CostMetric selects what this bucket counts. "Tokens" (the default) burns
 	// the bucket down at stream-done by CostExpression (or the model-level
-	// fallback). "Requests" burns the bucket down by exactly 1 per request at
+	// fallback), less any AdmissionReserve already charged. "Requests" burns the bucket down by exactly 1 per request at
 	// request time and adds no stream-done token charge.
 	//
 	// +optional
@@ -192,6 +195,49 @@ type QuotaValue struct {
 	//
 	// +optional
 	CostExpression *string `json:"costExpression,omitempty"`
+	// AdmissionReserve charges an estimate of the request's cost to the bucket
+	// when the request is admitted, and only the remainder when its stream
+	// completes, so requests in flight count against the limit. Without it the
+	// whole cost is charged at stream completion.
+	//
+	// +optional
+	AdmissionReserve *QuotaAdmissionReserve `json:"admissionReserve,omitempty"`
+}
+
+// QuotaAdmissionReserve configures the charge a token bucket takes when a
+// request is admitted.
+//
+// The reserve is Percent of a usage estimate the gateway computes at admission:
+// the GatewayConfig usageEstimates item whose metadataKey is UsageEstimate,
+// rounded to the nearest integer. At stream completion the bucket is charged the
+// actual cost minus the reserve, or nothing when the reserve covered it: a
+// reserve is never refunded, so a request that fails keeps the reserve it was
+// charged. A request with no estimate (no usage estimate header, or no
+// successful response in the estimate's last completed period) reserves
+// nothing.
+//
+// The usage estimate's CEL expression must compute the same quantity as the
+// bucket's cost expression, for example "input_tokens - cached_input_tokens" on
+// both, so that the reserve and the cost are in the same unit.
+type QuotaAdmissionReserve struct {
+	// UsageEstimate is the metadataKey of the GatewayConfig usageEstimates item
+	// the reserve is computed from. The GatewayConfig of every Gateway serving
+	// the targeted backends must declare it; otherwise the controller stops
+	// updating that gateway's filter configuration, which keeps serving the last
+	// valid one, until it does.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	UsageEstimate string `json:"usageEstimate"`
+	// Percent of the usage estimate charged at admission. Above the actual cost,
+	// the difference stays charged; below it, requests in flight are partly
+	// uncounted.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	Percent uint32 `json:"percent"`
 }
 
 // QuotaCostMetric selects whether a bucket counts tokens (stream-done charge)
