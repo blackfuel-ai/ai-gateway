@@ -612,6 +612,7 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [MCPToolFilter](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcptoolfilter)
 - [PerModelQuota](#github-com-envoyproxy-ai-gateway-api-v1alpha1-permodelquota)
 - [ProtectedResourceMetadata](#github-com-envoyproxy-ai-gateway-api-v1alpha1-protectedresourcemetadata)
+- [QuotaAdmissionReserve](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotaadmissionreserve)
 - [QuotaBucketMode](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotabucketmode)
 - [QuotaCostMetric](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric)
 - [QuotaDefinition](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotadefinition)
@@ -2385,6 +2386,46 @@ References:
 />
 
 
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotaadmissionreserve">QuotaAdmissionReserve</a>
+
+
+
+**Appears in:**
+- [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
+
+QuotaAdmissionReserve configures the charge a token bucket takes when a
+request is admitted.
+
+The reserve is Percent of a usage estimate the gateway computes at admission:
+the GatewayConfig usageEstimates item whose metadataKey is UsageEstimate,
+rounded to the nearest integer. At stream completion the bucket is charged the
+actual cost minus the reserve, or nothing when the reserve covered it: a
+reserve is never refunded, so a request that fails keeps the reserve it was
+charged. A request with no estimate (no usage estimate header, or no
+successful response in the estimate's last completed period) reserves
+nothing.
+
+The usage estimate's CEL expression must compute the same quantity as the
+bucket's cost expression, for example "input_tokens - cached_input_tokens" on
+both, so that the reserve and the cost are in the same unit.
+
+##### Fields
+
+
+
+<ApiField
+  name="usageEstimate"
+  type="string"
+  required="true"
+  description="UsageEstimate is the metadataKey of the GatewayConfig usageEstimates item<br />the reserve is computed from. The GatewayConfig of every Gateway serving<br />the targeted backends must declare it; otherwise the controller stops<br />updating that gateway's filter configuration, which keeps serving the last<br />valid one, until it does."
+/><ApiField
+  name="percent"
+  type="integer"
+  required="true"
+  description="Percent of the usage estimate charged at admission. Above the actual cost,<br />the difference stays charged; below it, requests in flight are partly<br />uncounted."
+/>
+
+
 #### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotabucketmode">QuotaBucketMode</a>
 
 **Underlying type:** string
@@ -2606,12 +2647,17 @@ QuotaValue defines the quota limits using sliding window.
   type="[QuotaCostMetric](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric)"
   required="false"
   defaultValue="Tokens"
-  description="CostMetric selects what this bucket counts. `Tokens` (the default) burns<br />the bucket down at stream-done by CostExpression (or the model-level<br />fallback). `Requests` burns the bucket down by exactly 1 per request at<br />request time and adds no stream-done token charge."
+  description="CostMetric selects what this bucket counts. `Tokens` (the default) burns<br />the bucket down at stream-done by CostExpression (or the model-level<br />fallback), less any AdmissionReserve already charged. `Requests` burns the bucket down by exactly 1 per request at<br />request time and adds no stream-done token charge."
 /><ApiField
   name="costExpression"
   type="string"
   required="false"
   description="CostExpression is a per-bucket CEL expression for computing this bucket's<br />quota burndown. When unset, the model-level CostExpression applies, then<br />`total_tokens`. Ignored when CostMetric is `Requests`."
+/><ApiField
+  name="admissionReserve"
+  type="[QuotaAdmissionReserve](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotaadmissionreserve)"
+  required="false"
+  description="AdmissionReserve charges an estimate of the request's cost to the bucket<br />when the request is admitted, and only the remainder when its stream<br />completes, so requests in flight count against the limit. Without it the<br />whole cost is charged at stream completion."
 />
 
 

@@ -339,6 +339,27 @@ func TestQuotaPolicies(t *testing.T) {
 			name:   "empty-from-header.yaml",
 			expErr: "spec.perModelQuotas[0].quota.defaultBucket.dynamicOverride.fromHeader",
 		},
+		{name: "admission-reserve.yaml"},
+		{
+			name:   "admission-reserve-with-requests.yaml",
+			expErr: "admissionReserve cannot be combined with costMetric=Requests",
+		},
+		{
+			name:   "admission-reserve-with-shadow.yaml",
+			expErr: "admissionReserve cannot be combined with shadowMode",
+		},
+		{
+			name:   "admission-reserve-zero-percent.yaml",
+			expErr: "spec.perModelQuotas[0].quota.defaultBucket.admissionReserve.percent",
+		},
+		{
+			name:   "admission-reserve-empty-usage-estimate.yaml",
+			expErr: "spec.perModelQuotas[0].quota.defaultBucket.admissionReserve.usageEstimate",
+		},
+		{
+			name:   "service-quota-admission-reserve.yaml",
+			expErr: "serviceQuota does not support admissionReserve",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/quotapolicies", tc.name))
