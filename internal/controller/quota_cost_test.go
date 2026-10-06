@@ -12,6 +12,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
+	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 )
 
 func TestQuotaCostBuckets(t *testing.T) {
@@ -51,5 +52,30 @@ func TestQuotaCostBuckets(t *testing.T) {
 			},
 		})
 		require.Equal(t, []quotaCostBucket{{key: "rule-1", expr: "output_tokens"}}, buckets)
+	})
+
+	t.Run("admission reserve is carried with its bucket", func(t *testing.T) {
+		buckets := quotaCostBuckets(&aigv1a1.QuotaDefinition{
+			DefaultBucket: &aigv1a1.QuotaValue{
+				Limit: 10, Duration: "1m",
+				AdmissionReserve: &aigv1a1.QuotaAdmissionReserve{UsageEstimate: "estimated_input", Percent: 100},
+			},
+			BucketRules: []aigv1a1.QuotaRule{
+				{Quota: aigv1a1.QuotaValue{Limit: 1, Duration: "1m", CostExpression: ptr.To("output_tokens")}},
+				{Quota: aigv1a1.QuotaValue{
+					Limit: 2, Duration: "1m", CostExpression: ptr.To("input_tokens - cached_input_tokens"),
+					AdmissionReserve: &aigv1a1.QuotaAdmissionReserve{UsageEstimate: "estimated_fresh", Percent: 85},
+				}},
+			},
+		})
+		require.Equal(t, []quotaCostBucket{
+			{key: "default", expr: "total_tokens", reserve: &filterapi.AdmissionReserve{
+				MetadataKey: "quota_reserve_estimated_input_100", UsageEstimate: "estimated_input", Percent: 100,
+			}},
+			{key: "rule-0", expr: "output_tokens"},
+			{key: "rule-1", expr: "input_tokens - cached_input_tokens", reserve: &filterapi.AdmissionReserve{
+				MetadataKey: "quota_reserve_estimated_fresh_85", UsageEstimate: "estimated_fresh", Percent: 85,
+			}},
+		}, buckets)
 	})
 }

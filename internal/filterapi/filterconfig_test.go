@@ -33,6 +33,10 @@ usageEstimates:
   byHeader: x-client-id
   emitMetric: true
 usageEstimatePeriod: 60000000000 # 1m, in nanoseconds
+admissionReserves:
+- metadataKey: quota_reserve_estimated_input_token_90
+  usageEstimate: estimated_input_token
+  percent: 90
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
 	cfg, err := filterapi.UnmarshalConfigYaml(configPath)
@@ -56,6 +60,13 @@ usageEstimatePeriod: 60000000000 # 1m, in nanoseconds
 			},
 		},
 		UsageEstimatePeriod: time.Minute,
+		AdmissionReserves: []filterapi.AdmissionReserve{
+			{
+				MetadataKey:   "quota_reserve_estimated_input_token_90",
+				UsageEstimate: "estimated_input_token",
+				Percent:       90,
+			},
+		},
 	}
 
 	require.Equal(t, expectedCfg, cfg)
