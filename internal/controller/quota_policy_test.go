@@ -712,3 +712,96 @@ func Test_quotaPolicyTargetRefsIndexFunc(t *testing.T) {
 func ptrTo[T any](v T) *T {
 	return &v
 }
+
+// drainRouteEvents returns the namespace/name of every AIGatewayRoute event queued on ch.
+func drainRouteEvents(ch chan event.GenericEvent) []string {
+	var routes []string
+	for {
+		select {
+		case ev := <-ch:
+			routes = append(routes, ev.Object.GetNamespace()+"/"+ev.Object.GetName())
+		default:
+			return routes
+		}
+	}
+}
+
+func requireCreateRouteForBackend(t *testing.T, c client.Client, name, namespace, backend, backendNamespace string) {
+	t.Helper()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+				{Name: backend, Namespace: ptrTo(gwapiv1.Namespace(backendNamespace))},
+			}}},
+		},
+	}))
+}
+
+func requireCreateBackend(t *testing.T, c client.Client, name, namespace string) {
+	t.Helper()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: aigv1b1.AIServiceBackendSpec{BackendRef: gwapiv1.BackendObjectReference{
+			Name: "some-service", Port: ptrTo[gwapiv1.PortNumber](8080),
+		}},
+	}))
+}
+
+// A policy moved off a backend must notify that backend's routes too: their
+// HTTPRoute still hashes the policy and their route xDS still carries its entries.
+func TestQuotaPolicyController_Reconcile_TargetRefsChangeNotifiesPreviousTargets(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
+	routeCh := make(chan event.GenericEvent, 100)
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, newTestRunner(t), routeCh, electedCh())
+
+	requireCreateBackend(t, fakeClient, "apple", "default")
+	requireCreateBackend(t, fakeClient, "orange", "default")
+	requireCreateRouteForBackend(t, fakeClient, "apple-route", "default", "apple", "default")
+	requireCreateRouteForBackend(t, fakeClient, "orange-route", "other", "orange", "default")
+
+	qp := newTestQuotaPolicy("moving", "default", 100, "apple")
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(qp)}
+	_, err := c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"default/apple-route"}, drainRouteEvents(routeCh))
+
+	require.NoError(t, fakeClient.Get(t.Context(), req.NamespacedName, qp))
+	qp.Spec.TargetRefs[0].Name = "orange"
+	require.NoError(t, fakeClient.Update(t.Context(), qp))
+	_, err = c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"default/apple-route", "other/orange-route"}, drainRouteEvents(routeCh))
+
+	// Once the previous target has been notified, it is no longer one.
+	_, err = c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"other/orange-route"}, drainRouteEvents(routeCh))
+}
+
+// Deleting a policy must notify every route referencing its backends,
+// including routes in other namespaces than the policy's.
+func TestQuotaPolicyController_Reconcile_DeletionNotifiesCrossNamespaceRoutes(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
+	routeCh := make(chan event.GenericEvent, 100)
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, newTestRunner(t), routeCh, electedCh())
+
+	requireCreateBackend(t, fakeClient, "lemon", "ns2")
+	requireCreateRouteForBackend(t, fakeClient, "lemon-route", "ns1", "lemon", "ns2")
+	requireCreateRouteForBackend(t, fakeClient, "unrelated-route", "ns1", "lime", "ns1")
+
+	qp := newTestQuotaPolicy("lemon-quota", "ns2", 100, "lemon")
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(qp)}
+	_, err := c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"ns1/lemon-route"}, drainRouteEvents(routeCh))
+
+	require.NoError(t, fakeClient.Delete(t.Context(), qp))
+	_, err = c.Reconcile(t.Context(), req) // Removes the finalizer.
+	require.NoError(t, err)
+	_, err = c.Reconcile(t.Context(), req) // The policy is gone.
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"ns1/lemon-route"}, drainRouteEvents(routeCh))
+}
