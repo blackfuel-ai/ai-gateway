@@ -94,6 +94,10 @@ type (
 		//
 		// Returns the same tuple as ParseBody.
 		ParseMultipartBody(body []byte, contentType string, costConfigured bool) (originalModel internalapi.OriginalModel, req *ReqT, stream bool, mutatedBody []byte, err error)
+		// EstimatesUsage reports whether a request to the endpoint consumes model usage,
+		// which the usage estimates estimate and record and the admission reserves charge.
+		// Token-counting endpoints consume none.
+		EstimatesUsage() bool
 	}
 	// ChatCompletionsEndpointSpec implements EndpointSpec for /v1/chat/completions.
 	ChatCompletionsEndpointSpec struct{}
@@ -205,6 +209,9 @@ func (ChatCompletionsEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Ch
 	return &redacted, nil
 }
 
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (ChatCompletionsEndpointSpec) EstimatesUsage() bool { return true }
+
 // ParseBody implements [EndpointSpec.ParseBody].
 func (CompletionsEndpointSpec) ParseBody(
 	body []byte,
@@ -241,6 +248,9 @@ func (CompletionsEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Comple
 	redacted.Prompt = openai.PromptUnion{Value: redactInterfaceValue(req.Prompt.Value)}
 	return &redacted, nil
 }
+
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (CompletionsEndpointSpec) EstimatesUsage() bool { return true }
 
 // ParseBody implements [EndpointSpec.ParseBody].
 func (EmbeddingsEndpointSpec) ParseBody(
@@ -298,6 +308,9 @@ func (EmbeddingsEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Embeddi
 	return &redacted, nil
 }
 
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (EmbeddingsEndpointSpec) EstimatesUsage() bool { return true }
+
 func (ImageGenerationEndpointSpec) ParseBody(
 	body []byte,
 	_ bool,
@@ -331,6 +344,9 @@ func (ImageGenerationEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Im
 	redacted.Prompt = redaction.RedactString(req.Prompt)
 	return &redacted, nil
 }
+
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (ImageGenerationEndpointSpec) EstimatesUsage() bool { return true }
 
 // ParseBody implements [EndpointSpec.ParseBody].
 func (ResponsesEndpointSpec) ParseBody(
@@ -373,6 +389,9 @@ func (ResponsesEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Response
 	redacted.Prompt = redactUnionField(req.Prompt)
 	return &redacted, nil
 }
+
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (ResponsesEndpointSpec) EstimatesUsage() bool { return true }
 
 // ParseBody implements [EndpointSpec.ParseBody].
 func (MessagesEndpointSpec) ParseBody(
@@ -434,6 +453,9 @@ func (MessagesEndpointSpec) RedactSensitiveInfoFromRequest(req *anthropic.Messag
 	return &redacted, nil
 }
 
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (MessagesEndpointSpec) EstimatesUsage() bool { return true }
+
 // ParseBody implements [EndpointSpec.ParseBody].
 func (MessagesCountTokensEndpointSpec) ParseBody(
 	body []byte,
@@ -483,6 +505,9 @@ func (MessagesCountTokensEndpointSpec) RedactSensitiveInfoFromRequest(req *anthr
 	return req, nil
 }
 
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (MessagesCountTokensEndpointSpec) EstimatesUsage() bool { return false }
+
 // ParseBody implements [EndpointSpec.ParseBody].
 func (RerankEndpointSpec) ParseBody(
 	body []byte,
@@ -521,6 +546,9 @@ func (RerankEndpointSpec) RedactSensitiveInfoFromRequest(req *cohereschema.Reran
 	}
 	return &redacted, nil
 }
+
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (RerankEndpointSpec) EstimatesUsage() bool { return true }
 
 // ParseBody implements [EndpointSpec.ParseBody].
 func (TokenizeEndpointSpec) ParseBody(
@@ -589,6 +617,9 @@ func (TokenizeEndpointSpec) RedactSensitiveInfoFromRequest(req *tokenize.Request
 	}
 	return &redacted, nil
 }
+
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (TokenizeEndpointSpec) EstimatesUsage() bool { return false }
 
 // ParseMultipartBody implements [Spec.ParseMultipartBody].
 func (TokenizeEndpointSpec) ParseMultipartBody([]byte, string, bool) (internalapi.OriginalModel, *tokenize.RequestUnion, bool, []byte, error) {
@@ -875,6 +906,9 @@ func (SpeechEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.SpeechReque
 	return &redacted, nil
 }
 
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (SpeechEndpointSpec) EstimatesUsage() bool { return true }
+
 // ParseBody implements [Spec.ParseBody]. Transcription uses multipart, so JSON body is not expected.
 func (TranscriptionEndpointSpec) ParseBody(
 	_ []byte, _ bool,
@@ -996,6 +1030,9 @@ func (TranscriptionEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Tran
 	return &redacted, nil
 }
 
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (TranscriptionEndpointSpec) EstimatesUsage() bool { return true }
+
 // ParseBody implements [Spec.ParseBody]. Translation uses multipart, so JSON body is not expected.
 func (TranslationEndpointSpec) ParseBody(
 	_ []byte, _ bool,
@@ -1101,6 +1138,9 @@ func (TranslationEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.Transl
 	return &redacted, nil
 }
 
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (TranslationEndpointSpec) EstimatesUsage() bool { return true }
+
 // ParseBody implements [EndpointSpec.ParseBody].
 func (ResponsesInputTokensEndpointSpec) ParseBody(
 	body []byte,
@@ -1137,6 +1177,9 @@ func (ResponsesInputTokensEndpointSpec) ParseMultipartBody([]byte, string, bool)
 func (ResponsesInputTokensEndpointSpec) RedactSensitiveInfoFromRequest(req *openai.ResponseRequest) (*openai.ResponseRequest, error) {
 	return req, nil
 }
+
+// EstimatesUsage implements [Spec.EstimatesUsage].
+func (ResponsesInputTokensEndpointSpec) EstimatesUsage() bool { return false }
 
 // readFormField reads the entire value of a multipart form field as a string.
 func readFormField(part *multipart.Part) (string, error) {

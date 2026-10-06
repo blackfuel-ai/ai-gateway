@@ -1489,6 +1489,33 @@ func TestParseMultipartBody_RejectsJSONOnlyEndpoints(t *testing.T) {
 	require.ErrorContains(t, err, "multipart body not supported")
 }
 
+// Token-counting endpoints consume no model usage; every other endpoint does.
+func TestEstimatesUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec interface{ EstimatesUsage() bool }
+		exp  bool
+	}{
+		{"chat completions", ChatCompletionsEndpointSpec{}, true},
+		{"completions", CompletionsEndpointSpec{}, true},
+		{"embeddings", EmbeddingsEndpointSpec{}, true},
+		{"image generation", ImageGenerationEndpointSpec{}, true},
+		{"responses", ResponsesEndpointSpec{}, true},
+		{"messages", MessagesEndpointSpec{}, true},
+		{"rerank", RerankEndpointSpec{}, true},
+		{"speech", SpeechEndpointSpec{}, true},
+		{"transcription", TranscriptionEndpointSpec{}, true},
+		{"translation", TranslationEndpointSpec{}, true},
+		{"tokenize", TokenizeEndpointSpec{}, false},
+		{"responses input tokens", ResponsesInputTokensEndpointSpec{}, false},
+		{"messages count tokens", MessagesCountTokensEndpointSpec{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.exp, tc.spec.EstimatesUsage())
+		})
+	}
+}
+
 func TestResponsesInputTokensEndpointSpec_ParseBody(t *testing.T) {
 	spec := ResponsesInputTokensEndpointSpec{}
 
