@@ -8,6 +8,7 @@ package extproc
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,7 +67,11 @@ func newUsageEstimateTestConfig(t *testing.T, estimates ...filterapi.UsageEstima
 	for i := range estimates {
 		prog, err := llmcostcel.NewEstimateProgram(estimates[i].CEL)
 		require.NoError(t, err)
-		cfg.UsageEstimates = append(cfg.UsageEstimates, filterapi.RuntimeUsageEstimate{UsageEstimate: &estimates[i], CELProg: prog})
+		re := filterapi.RuntimeUsageEstimate{UsageEstimate: &estimates[i], CELProg: prog}
+		if estimates[i].EmitHeader {
+			re.Header = filterapi.UsageEstimateHeader(estimates[i].MetadataKey)
+		}
+		cfg.UsageEstimates = append(cfg.UsageEstimates, re)
 	}
 	return cfg
 }
@@ -456,4 +461,118 @@ func TestServer_Process_UsageEstimates(t *testing.T) {
 	}
 	require.NoError(t, s.Process(stream))
 	require.Same(t, ue.store, p.set.store)
+}
+
+// usageEstimateHeaderMutation returns the request header mutation of the admission response.
+func usageEstimateHeaderMutation(t *testing.T, resp *extprocv3.ProcessingResponse) *extprocv3.HeaderMutation {
+	t.Helper()
+	m := resp.GetRequestBody().GetResponse().GetHeaderMutation()
+	require.NotNil(t, m)
+	return m
+}
+
+// usageEstimateSetHeaders returns the usage estimate headers set by the mutation.
+func usageEstimateSetHeaders(t *testing.T, m *extprocv3.HeaderMutation) map[string]string {
+	set := make(map[string]string)
+	for _, h := range m.SetHeaders {
+		if strings.HasPrefix(h.Header.Key, internalapi.UsageEstimateHeaderPrefix) {
+			require.Equal(t, corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD, h.AppendAction)
+			set[h.Header.Key] = string(h.Header.RawValue)
+		}
+	}
+	return set
+}
+
+func TestUsageEstimate_EmitHeader(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	input := testEstimateInput
+	input.EmitHeader = true
+	cacheRate := testEstimateCacheRate
+	cacheRate.EmitHeader = true
+	cfg := newUsageEstimateTestConfig(t, input, testEstimateFresh, cacheRate)
+	const (
+		inputHeader     = "x-ai-eg-usage-estimate-estimated-input-token"
+		cacheRateHeader = "x-ai-eg-usage-estimate-estimated-cache-rate"
+	)
+	// The client sends a value of its own for one of the estimate headers.
+	headers := map[string]string{usageEstimateTestHeader: "key-a", inputHeader: "1"}
+
+	// A cold key removes every estimate header the request carries.
+	rp := newUsageEstimateTestRouter(cfg, ue, headers)
+	resp, u := admitAndDispatch(t, rp)
+	m := usageEstimateHeaderMutation(t, resp)
+	require.Empty(t, usageEstimateSetHeaders(t, m))
+	require.ElementsMatch(t, []string{inputHeader, cacheRateHeader}, m.RemoveHeaders)
+	require.NotContains(t, rp.requestHeaders, inputHeader)
+	completeWithUsage(t, rp, u, 100, 40)
+	clock.nextPeriod()
+
+	// An estimated key overwrites the client's value, and only the items with
+	// EmitHeader get a header.
+	rp = newUsageEstimateTestRouter(cfg, ue, headers)
+	resp, _ = admitAndDispatch(t, rp)
+	m = usageEstimateHeaderMutation(t, resp)
+	require.Equal(t, map[string]string{inputHeader: "100", cacheRateHeader: "0.4"}, usageEstimateSetHeaders(t, m))
+	require.Empty(t, m.RemoveHeaders)
+	require.Equal(t, "100", rp.requestHeaders[inputHeader])
+	require.Equal(t, "0.4", rp.requestHeaders[cacheRateHeader])
+	// The dynamic metadata is emitted as without EmitHeader.
+	require.Len(t, usageEstimateFields(t, resp), 3)
+}
+
+func TestUsageEstimate_EmitHeaderRemovedWithoutEstimate(t *testing.T) {
+	const inputHeader = "x-ai-eg-usage-estimate-estimated-input-token"
+	input := testEstimateInput
+	input.EmitHeader = true
+
+	t.Run("no byHeader value", func(t *testing.T) {
+		ue, _, _ := newTestUsageEstimates()
+		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, input), ue, map[string]string{inputHeader: "1"})
+		resp, _ := admitAndDispatch(t, rp)
+		m := usageEstimateHeaderMutation(t, resp)
+		require.Empty(t, usageEstimateSetHeaders(t, m))
+		require.Equal(t, []string{inputHeader}, m.RemoveHeaders)
+		require.NotContains(t, rp.requestHeaders, inputHeader)
+	})
+
+	t.Run("usage estimates not enabled on the server", func(t *testing.T) {
+		rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, input), nil,
+			map[string]string{usageEstimateTestHeader: "key-a", inputHeader: "1"})
+		resp, _ := admitAndDispatch(t, rp)
+		m := usageEstimateHeaderMutation(t, resp)
+		require.Empty(t, usageEstimateSetHeaders(t, m))
+		require.Equal(t, []string{inputHeader}, m.RemoveHeaders)
+	})
+
+	t.Run("CEL error", func(t *testing.T) {
+		ue, _, clock := newTestUsageEstimates()
+		failing := filterapi.UsageEstimate{
+			MetadataKey: "failing", CEL: "input_tokens > uint(0) ? input_tokens - uint(1000000) : uint(0)",
+			ByHeader: usageEstimateTestHeader, EmitHeader: true,
+		}
+		cfg := newUsageEstimateTestConfig(t, input, failing)
+		headers := map[string]string{usageEstimateTestHeader: "key-a"}
+		rp := newUsageEstimateTestRouter(cfg, ue, headers)
+		_, u := admitAndDispatch(t, rp)
+		completeWithUsage(t, rp, u, 100, 0)
+		clock.nextPeriod()
+
+		rp = newUsageEstimateTestRouter(cfg, ue, headers)
+		resp, _ := admitAndDispatch(t, rp)
+		m := usageEstimateHeaderMutation(t, resp)
+		require.Equal(t, map[string]string{inputHeader: "100"}, usageEstimateSetHeaders(t, m))
+		require.Equal(t, []string{"x-ai-eg-usage-estimate-failing"}, m.RemoveHeaders)
+	})
+}
+
+func TestUsageEstimate_NoEmitHeaderLeavesHeadersAlone(t *testing.T) {
+	ue, _, _ := newTestUsageEstimates()
+	const inputHeader = "x-ai-eg-usage-estimate-estimated-input-token"
+	rp := newUsageEstimateTestRouter(newUsageEstimateTestConfig(t, testEstimateInput), ue,
+		map[string]string{usageEstimateTestHeader: "key-a"})
+	resp, _ := admitAndDispatch(t, rp)
+	m := usageEstimateHeaderMutation(t, resp)
+	require.Empty(t, usageEstimateSetHeaders(t, m))
+	require.Empty(t, m.RemoveHeaders)
+	require.NotContains(t, rp.requestHeaders, inputHeader)
 }

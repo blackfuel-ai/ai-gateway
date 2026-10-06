@@ -283,6 +283,7 @@ func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEsti
 		// Header names are lower-cased in the request headers the filter sees.
 		ByHeader:   strings.ToLower(e.ByHeader),
 		EmitMetric: e.EmitMetric,
+		EmitHeader: e.EmitHeader,
 	}, nil
 }
 

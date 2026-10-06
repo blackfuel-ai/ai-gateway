@@ -401,6 +401,10 @@ func TestGatewayConfigs(t *testing.T) {
 			expErr: "Duplicate value",
 		},
 		{
+			name:   "usage-estimate-header-invalid-key.yaml",
+			expErr: "metadataKey must contain only lower-case letters, digits and underscores when emitHeader is set",
+		},
+		{
 			name:   "usage-estimate-period-too-short.yaml",
 			expErr: "usageEstimatePeriod must be between 5s and 10m",
 		},

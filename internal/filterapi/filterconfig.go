@@ -93,6 +93,9 @@ type UsageEstimate struct {
 	ByHeader string `json:"byHeader"`
 	// EmitMetric also records the estimate in metrics.
 	EmitMetric bool `json:"emitMetric,omitempty"`
+	// EmitHeader also sends the estimate upstream in the request header named by
+	// UsageEstimateHeader, which a request without an estimate is sent without.
+	EmitHeader bool `json:"emitHeader,omitempty"`
 }
 
 // Model corresponds to the OpenAI model object in the OpenAI-compatible APIs

@@ -32,6 +32,7 @@ usageEstimates:
   cel: input_tokens
   byHeader: x-client-id
   emitMetric: true
+  emitHeader: true
 usageEstimatePeriod: 60000000000 # 1m, in nanoseconds
 admissionReserves:
 - metadataKey: quota_reserve_estimated_input_token_90
@@ -57,6 +58,7 @@ admissionReserves:
 				CEL:         "input_tokens",
 				ByHeader:    "x-client-id",
 				EmitMetric:  true,
+				EmitHeader:  true,
 			},
 		},
 		UsageEstimatePeriod: time.Minute,
