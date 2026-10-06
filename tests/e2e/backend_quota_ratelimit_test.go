@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -278,6 +279,79 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		requireBackendQuotaUsage(t, serving, model, 302)
 		requireBackendQuotaUsage(t, other, model, 2)
 	})
+
+	// A QuotaPolicy change on a route Envoy Gateway has already translated
+	// reaches the Envoy route config: "quota-late-reserve-model" is served under
+	// a policy with no admission reserve, then the policy gains one, and the
+	// route must carry that reserve's charge entry without any other change.
+	t.Run("admission reserve added to an already-translated route", func(t *testing.T) {
+		const (
+			model  = "quota-late-reserve-model"
+			policy = "envoy-ai-gateway-quota-ratelimit-late-reserve-policy"
+			// Percent 50 keeps this reserve's metadata key apart from the
+			// percent-100 reserves the other models' routes already carry.
+			reserveKey = "quota_reserve_reserve_fresh_input_token_50"
+		)
+
+		sendWithUsage(model, 1000, 800, http.StatusOK, http.Header{"x-test-client": []string{"client-late-a"}})
+		requireQuotaUsage(t, model, 201)
+
+		routeConfigs := newEnvoyRouteConfigReader(t, egSelector)
+		require.NotContains(t, routeConfigs(), reserveKey)
+
+		patch := `[{"op":"add","path":"/spec/perModelQuotas/0/quota/defaultBucket/admissionReserve",` +
+			`"value":{"usageEstimate":"reserve_fresh_input_token","percent":50}}]`
+		require.NoError(t, e2elib.Kubectl(t.Context(), "patch", "quotapolicy", policy,
+			"-n", "default", "--type=json", "-p", patch).Run())
+
+		require.Eventually(t, func() bool {
+			return strings.Contains(routeConfigs(), reserveKey)
+		}, 2*time.Minute, time.Second, "the Envoy route config never gained the %s charge entry", reserveKey)
+	})
+}
+
+// newEnvoyRouteConfigReader port-forwards to the admin port of the Envoy pod
+// matching selector, which listens on the pod's loopback only, and returns a
+// function reading its dynamic route configs from config_dump.
+func newEnvoyRouteConfigReader(t *testing.T, selector string) func() string {
+	t.Helper()
+	getPod := e2elib.Kubectl(t.Context(), "get", "pod", "-n", e2elib.EnvoyGatewayNamespace,
+		"-l", selector, "-o", "jsonpath={.items[0].metadata.name}")
+	getPod.Stdout = nil
+	pod, err := getPod.Output()
+	require.NoError(t, err)
+	require.NotEmpty(t, pod)
+
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	localPort := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+
+	// t.Context() is canceled before cleanups run, which kills the port-forward.
+	cmd := e2elib.Kubectl(t.Context(), "port-forward", "-n", e2elib.EnvoyGatewayNamespace,
+		"pod/"+string(pod), fmt.Sprintf("%d:19000", localPort))
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Wait() })
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/config_dump?resource=dynamic_route_configs", localPort)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	return func() string {
+		var body []byte
+		require.Eventually(t, func() bool {
+			resp, getErr := httpClient.Get(url)
+			if getErr != nil {
+				return false
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				return false
+			}
+			body, getErr = io.ReadAll(resp.Body)
+			return getErr == nil
+		}, 30*time.Second, 500*time.Millisecond, "Envoy admin config_dump was not reachable")
+		return string(body)
+	}
 }
 
 // newChatRequest builds one chat completion request against the test upstream

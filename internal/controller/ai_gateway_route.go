@@ -7,7 +7,10 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -25,8 +28,10 @@ import (
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 const (
@@ -40,7 +45,12 @@ const (
 	// We use this annotation to ensure that Envoy Gateway reconciles the HTTPRoute when the backend refs change.
 	// This will result in metadata being added to the underling Envoy route
 	// @see https://gateway.envoyproxy.io/contributions/design/metadata/
-	httpRouteBackendRefPriorityAnnotationKey           = egAnnotationPrefix + "backend-ref-priority"
+	httpRouteBackendRefPriorityAnnotationKey = egAnnotationPrefix + "backend-ref-priority"
+	// httpRouteQuotaPolicyHashAnnotationKey carries a hash of the QuotaPolicies targeting the route's backends,
+	// so a QuotaPolicy change changes the HTTPRoute and Envoy Gateway re-translates it, calling the extension
+	// server's PostTranslateModify with the new policy. The egAnnotationPrefix is what carries the change into
+	// Envoy Gateway's IR; an annotation without it is dropped from the IR and no xDS update follows.
+	httpRouteQuotaPolicyHashAnnotationKey              = egAnnotationPrefix + "quota-policy-hash"
 	httpRouteAnnotationForAIGatewayGeneratedIndication = egAnnotationPrefix + internalapi.AIGatewayGeneratedHTTPRouteAnnotation
 	egOwningGatewayNameLabel                           = egAnnotationPrefix + "owning-gateway-name"
 	egOwningGatewayNamespaceLabel                      = egAnnotationPrefix + "owning-gateway-namespace"
@@ -424,6 +434,15 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 	// HACK: We need to set an annotation so that Envoy Gateway reconciles the HTTPRoute when the backend refs change.
 	dst.Annotations[httpRouteBackendRefPriorityAnnotationKey] = buildPriorityAnnotation(aiGatewayRoute.Spec.Rules)
 	dst.Annotations[httpRouteAnnotationForAIGatewayGeneratedIndication] = "true"
+	quotaPolicyHash, err := c.buildQuotaPolicyHashAnnotation(ctx, aiGatewayRoute)
+	if err != nil {
+		return err
+	}
+	if quotaPolicyHash == "" {
+		delete(dst.Annotations, httpRouteQuotaPolicyHashAnnotationKey)
+	} else {
+		dst.Annotations[httpRouteQuotaPolicyHashAnnotationKey] = quotaPolicyHash
+	}
 
 	dst.Spec.ParentRefs = aiGatewayRoute.Spec.ParentRefs
 
@@ -534,4 +553,46 @@ func buildPriorityAnnotation(rules []aigv1b1.AIGatewayRouteRule) string {
 		}
 	}
 	return strings.Join(priorities, ",")
+}
+
+// buildQuotaPolicyHashAnnotation hashes the specs of the QuotaPolicies that target the route's backends.
+// It returns "" when no QuotaPolicy targets them, so a route without quotas carries no annotation.
+func (c *AIGatewayRouteController) buildQuotaPolicyHashAnnotation(ctx context.Context, aiGatewayRoute *aigv1b1.AIGatewayRoute) (string, error) {
+	policies := make(map[string]*aigv1a1.QuotaPolicy)
+	for i := range aiGatewayRoute.Spec.Rules {
+		for j := range aiGatewayRoute.Spec.Rules[i].BackendRefs {
+			br := &aiGatewayRoute.Spec.Rules[i].BackendRefs[j]
+			key := fmt.Sprintf("%s.%s", br.Name, br.GetNamespace(aiGatewayRoute.Namespace))
+			var list aigv1a1.QuotaPolicyList
+			if err := c.client.List(ctx, &list,
+				client.MatchingFields{k8sClientIndexAIServiceBackendToTargetingQuotaPolicy: key}); err != nil {
+				return "", fmt.Errorf("failed to list QuotaPolicies for backend %s: %w", key, err)
+			}
+			for k := range list.Items {
+				qp := &list.Items[k]
+				policies[qp.Namespace+"/"+qp.Name] = qp
+			}
+		}
+	}
+	if len(policies) == 0 {
+		return "", nil
+	}
+
+	names := make([]string, 0, len(policies))
+	for name := range policies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		spec, err := json.Marshal(policies[name].Spec)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal QuotaPolicy %s spec: %w", name, err)
+		}
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		h.Write(spec)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }

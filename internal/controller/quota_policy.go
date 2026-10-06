@@ -254,8 +254,9 @@ func (c *QuotaPolicyController) BackendToQuotaPolicy(ctx context.Context, obj cl
 
 // notifyAIGatewayRoutes sends events to the AIGatewayRoute controller for all
 // routes that reference the backends targeted by the given QuotaPolicy.
-// This triggers re-reconciliation of the HTTPRoute, which causes Envoy Gateway
-// to re-translate xDS and call PostTranslateModify with the updated QuotaPolicy.
+// The route reconcile rewrites the HTTPRoute's quota-policy-hash annotation
+// (httpRouteQuotaPolicyHashAnnotationKey), and that change is what makes Envoy
+// Gateway re-translate xDS and call PostTranslateModify with the updated QuotaPolicy.
 func (c *QuotaPolicyController) notifyAIGatewayRoutes(ctx context.Context, policy *aigv1a1.QuotaPolicy) {
 	for _, ref := range policy.Spec.TargetRefs {
 		key := fmt.Sprintf("%s.%s", ref.Name, policy.Namespace)
