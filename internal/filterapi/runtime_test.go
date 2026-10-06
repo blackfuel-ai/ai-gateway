@@ -170,6 +170,35 @@ func TestServer_LoadConfig(t *testing.T) {
 		require.ErrorContains(t, err, `admission reserve "quota_reserve_estimated_fresh_90" references undeclared usage estimate "estimated_fresh"`)
 	})
 
+	t.Run("usage estimate header", func(t *testing.T) {
+		config := &Config{
+			UsageEstimates: []UsageEstimate{
+				{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id", EmitHeader: true},
+				{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+			},
+			UsageEstimatePeriod: time.Minute,
+		}
+		rc, err := NewRuntimeConfig(t.Context(), config, func(_ context.Context, _ *BackendAuth) (BackendAuthHandler, error) {
+			return nil, nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, "x-ai-eg-usage-estimate-estimated-input-token", rc.UsageEstimates[0].Header)
+		require.Empty(t, rc.UsageEstimates[1].Header)
+	})
+
+	t.Run("error - usage estimate header from an invalid metadata key", func(t *testing.T) {
+		for _, key := range []string{"Estimated_Input", "estimated-input", "estimated.input"} {
+			config := &Config{
+				UsageEstimates:      []UsageEstimate{{MetadataKey: key, CEL: "input_tokens", ByHeader: "x-client-id", EmitHeader: true}},
+				UsageEstimatePeriod: time.Minute,
+			}
+			_, err := NewRuntimeConfig(t.Context(), config, func(_ context.Context, _ *BackendAuth) (BackendAuthHandler, error) {
+				return nil, nil
+			})
+			require.ErrorContains(t, err, `usage estimate "`+key+`" emits a header: its metadata key must contain only lower-case letters, digits and underscores`)
+		}
+	})
+
 	t.Run("error - invalid CEL in usage estimate", func(t *testing.T) {
 		config := &Config{
 			UsageEstimates: []UsageEstimate{

@@ -9,8 +9,10 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"strconv"
 	"time"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -63,64 +65,96 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) setUsageEstima
 	r.usageEstimate.shared = ue
 }
 
-// estimateUsage computes the usage estimates of the request at admission and
-// returns them as dynamic metadata, or nil when no estimate applies. It must be
-// called once the original model is known.
-func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(ctx context.Context, requestBytes int, logger *slog.Logger) *structpb.Struct {
+// estimateUsage computes the usage estimates of the request at admission. It returns
+// them as dynamic metadata, nil when no estimate applies, and as the request header
+// mutations of the items with EmitHeader: an estimate sets its header, and an item
+// without an estimate removes it, so no client-sent value of the header goes
+// upstream. It must be called once the original model is known.
+func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(ctx context.Context, requestBytes int, logger *slog.Logger) (metadata *structpb.Struct, setHeaders []*corev3.HeaderValueOption, removeHeaders []string) {
 	st := &r.usageEstimate
-	if st.shared == nil || len(r.config.UsageEstimates) == 0 {
-		return nil
-	}
 	st.period = r.config.UsageEstimatePeriod
 	st.requestBytes = requestBytes
 	stats := make(map[usageestimate.Key]usageestimate.Stats)
 	fields := make(map[string]*structpb.Value)
 	for i := range r.config.UsageEstimates {
 		e := &r.config.UsageEstimates[i]
-		value := r.requestHeaders[e.ByHeader]
-		if value == "" {
+		v, estimated := r.estimateOne(ctx, e, stats, logger)
+		if estimated {
+			fields[e.MetadataKey] = structpb.NewNumberValue(v)
+		}
+		if e.Header == "" {
 			continue
 		}
-		key := usageestimate.Key{Header: e.ByHeader, Value: value, Model: r.originalModel}
-		if st.keys == nil {
-			st.keys = make(map[usageestimate.Key]struct{})
+		if !estimated {
+			delete(r.requestHeaders, e.Header)
+			removeHeaders = append(removeHeaders, e.Header)
+			continue
 		}
-		st.keys[key] = struct{}{}
-		s, ok := stats[key]
-		if !ok {
-			s = st.shared.store.Stats(key, st.period, requestBytes)
-			stats[key] = s
-		}
-		outcome := metrics.UsageEstimateOutcomeCold
-		if s.Estimated {
-			v, err := llmcostcel.EvaluateEstimateProgram(e.CELProg, llmcostcel.EstimateInputs{
-				Model:              r.requestHeaders[internalapi.ModelNameHeaderKeyDefault],
-				InputTokens:        s.InputTokens,
-				CachedInputTokens:  s.CachedInputTokens,
-				TotalTokens:        s.InputTokens,
-				InputTokensPerByte: s.InputTokensPerByte,
-				CacheRate:          s.CacheRate,
-			})
-			if err != nil {
-				outcome = metrics.UsageEstimateOutcomeError
-				logger.Warn("cannot evaluate usage estimate", slog.String("metadata_key", e.MetadataKey), slog.String("error", err.Error()))
-			} else {
-				outcome = metrics.UsageEstimateOutcomeEstimated
-				fields[e.MetadataKey] = structpb.NewNumberValue(v)
-				st.admitted = append(st.admitted, admittedUsageEstimate{estimate: e, value: v})
-			}
-		}
-		if e.EmitMetric {
-			st.shared.metrics.RecordRequest(ctx, e.MetadataKey, r.originalModel, outcome)
+		value := strconv.FormatFloat(v, 'f', -1, 64)
+		r.requestHeaders[e.Header] = value
+		setHeaders = append(setHeaders, &corev3.HeaderValueOption{
+			// Overwrite so that a client-sent value is replaced, not appended to.
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+			Header:       &corev3.HeaderValue{Key: e.Header, RawValue: []byte(value)},
+		})
+	}
+	if st.shared != nil {
+		r.reserveAdmission(fields)
+	}
+	if len(fields) > 0 {
+		metadata = &structpb.Struct{Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: structpb.NewStructValue(&structpb.Struct{Fields: fields}),
+		}}
+	}
+	return metadata, setHeaders, removeHeaders
+}
+
+// estimateOne computes the estimate of e for the request and reports whether the
+// request has one. stats caches the statistics of the keys already read for the
+// request.
+func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateOne(ctx context.Context, e *filterapi.RuntimeUsageEstimate, stats map[usageestimate.Key]usageestimate.Stats, logger *slog.Logger) (float64, bool) {
+	st := &r.usageEstimate
+	if st.shared == nil {
+		return 0, false
+	}
+	value := r.requestHeaders[e.ByHeader]
+	if value == "" {
+		return 0, false
+	}
+	key := usageestimate.Key{Header: e.ByHeader, Value: value, Model: r.originalModel}
+	if st.keys == nil {
+		st.keys = make(map[usageestimate.Key]struct{})
+	}
+	st.keys[key] = struct{}{}
+	s, ok := stats[key]
+	if !ok {
+		s = st.shared.store.Stats(key, st.period, st.requestBytes)
+		stats[key] = s
+	}
+	outcome := metrics.UsageEstimateOutcomeCold
+	var v float64
+	if s.Estimated {
+		var err error
+		v, err = llmcostcel.EvaluateEstimateProgram(e.CELProg, llmcostcel.EstimateInputs{
+			Model:              r.requestHeaders[internalapi.ModelNameHeaderKeyDefault],
+			InputTokens:        s.InputTokens,
+			CachedInputTokens:  s.CachedInputTokens,
+			TotalTokens:        s.InputTokens,
+			InputTokensPerByte: s.InputTokensPerByte,
+			CacheRate:          s.CacheRate,
+		})
+		if err != nil {
+			outcome = metrics.UsageEstimateOutcomeError
+			logger.Warn("cannot evaluate usage estimate", slog.String("metadata_key", e.MetadataKey), slog.String("error", err.Error()))
+		} else {
+			outcome = metrics.UsageEstimateOutcomeEstimated
+			st.admitted = append(st.admitted, admittedUsageEstimate{estimate: e, value: v})
 		}
 	}
-	r.reserveAdmission(fields)
-	if len(fields) == 0 {
-		return nil
+	if e.EmitMetric {
+		st.shared.metrics.RecordRequest(ctx, e.MetadataKey, r.originalModel, outcome)
 	}
-	return &structpb.Struct{Fields: map[string]*structpb.Value{
-		internalapi.AIGatewayFilterMetadataNamespace: structpb.NewStructValue(&structpb.Struct{Fields: fields}),
-	}}
+	return v, outcome == metrics.UsageEstimateOutcomeEstimated
 }
 
 // reserveAdmission computes every admission reserve of the configuration into

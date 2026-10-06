@@ -226,6 +226,7 @@ spec:
       cel: "input_tokens"
       byHeader: x-api-key-id
       emitMetric: true
+      emitHeader: true
     - metadataKey: estimated_fresh_input_token
       cel: "input_tokens - cached_input_tokens"
       byHeader: x-api-key-id
@@ -266,6 +267,13 @@ With `emitMetric: true`, the estimate is also recorded in the `aigw.usage_estima
 `error` when the expression failed) and the `aigw.usage_estimate.ratio` histogram (the estimate divided by the same
 expression evaluated on the actual usage of the response, with the model, `backend` and `route_name` of the estimate, so
 the ratio measures the usage estimation alone). The header value is never a metric attribute.
+
+With `emitHeader: true`, the estimate is also sent upstream as a request header named `x-ai-eg-usage-estimate-`
+followed by `metadataKey` with each underscore replaced by a hyphen: the example above sends
+`x-ai-eg-usage-estimate-estimated-input-token`. Its value is the estimate in decimal notation, for example `1200` or
+`0.4`. The header carries only the gateway's estimate: a value sent by the client is replaced by the estimate, and
+removed when the request gets no estimate. The `metadataKey` of an estimate with `emitHeader` must contain only
+lower-case letters, digits and underscores. The header is not returned to the client.
 
 ## MCP Metadata in Access Logs
 

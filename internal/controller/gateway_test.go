@@ -4531,7 +4531,7 @@ func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing
 	t.Run("converted", func(t *testing.T) {
 		c, kube := newController(t)
 		estimates := []aigv1b1.UsageEstimate{
-			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "X-Client-Id", EmitMetric: true},
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "X-Client-Id", EmitMetric: true, EmitHeader: true},
 			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
 			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
 		}
@@ -4540,7 +4540,7 @@ func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing
 
 		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
 		require.Equal(t, []filterapi.UsageEstimate{
-			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id", EmitMetric: true},
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id", EmitMetric: true, EmitHeader: true},
 			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
 			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
 		}, cfg.UsageEstimates)

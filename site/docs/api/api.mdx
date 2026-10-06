@@ -1579,7 +1579,7 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   name="usageEstimates"
   type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate) array"
   required="false"
-  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace, and as a request header sent upstream for an<br />item with EmitHeader.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
 /><ApiField
   name="usageEstimatePeriod"
   type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
@@ -2789,8 +2789,9 @@ period:
     were cached.
 
 The CEL expression is evaluated on that estimated usage and on the measured
-ratios of that period, and its result is stored under MetadataKey. Nothing is
-emitted when the last completed period holds no successful response.
+ratios of that period, and its result is stored under MetadataKey and, with
+EmitHeader, sent upstream in a request header. Nothing is emitted when the
+last completed period holds no successful response.
 
 Each gateway replica estimates from the responses it served itself.
 
@@ -2818,6 +2819,11 @@ Each gateway replica estimates from the responses it served itself.
   type="boolean"
   required="false"
   description="EmitMetric also records the estimate in metrics: a counter of the requests<br />that got an estimate or none, and a histogram of the estimate divided by<br />the same CEL expression evaluated on the actual usage of the response. The<br />actual value keeps the model, backend and route_name of the estimate, so the<br />ratio measures the usage estimation alone. The header value is never a<br />metric attribute.<br />Defaults to false."
+/><ApiField
+  name="emitHeader"
+  type="boolean"
+  required="false"
+  description="EmitHeader also sends the estimate upstream as a request header named<br />`x-ai-eg-usage-estimate-` followed by MetadataKey with each underscore<br />replaced by a hyphen: the estimate stored under estimated_input_token is<br />sent as x-ai-eg-usage-estimate-estimated-input-token. Its value is the<br />estimate in decimal notation, for example 1200 or 0.4.<br />The header carries only the gateway's estimate: a client-sent value is<br />replaced by the estimate, and removed when the request gets no estimate.<br />MetadataKey must then contain only lower-case letters, digits and<br />underscores, so that each estimate has its own header name.<br />Defaults to false."
 />
 
 
@@ -4491,7 +4497,7 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   name="usageEstimates"
   type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate) array"
   required="false"
-  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace, and as a request header sent upstream for an<br />item with EmitHeader.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
 /><ApiField
   name="usageEstimatePeriod"
   type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
@@ -5554,8 +5560,9 @@ period:
     were cached.
 
 The CEL expression is evaluated on that estimated usage and on the measured
-ratios of that period, and its result is stored under MetadataKey. Nothing is
-emitted when the last completed period holds no successful response.
+ratios of that period, and its result is stored under MetadataKey and, with
+EmitHeader, sent upstream in a request header. Nothing is emitted when the
+last completed period holds no successful response.
 
 Each gateway replica estimates from the responses it served itself.
 
@@ -5583,6 +5590,11 @@ Each gateway replica estimates from the responses it served itself.
   type="boolean"
   required="false"
   description="EmitMetric also records the estimate in metrics: a counter of the requests<br />that got an estimate or none, and a histogram of the estimate divided by<br />the same CEL expression evaluated on the actual usage of the response. The<br />actual value keeps the model, backend and route_name of the estimate, so the<br />ratio measures the usage estimation alone. The header value is never a<br />metric attribute.<br />Defaults to false."
+/><ApiField
+  name="emitHeader"
+  type="boolean"
+  required="false"
+  description="EmitHeader also sends the estimate upstream as a request header named<br />`x-ai-eg-usage-estimate-` followed by MetadataKey with each underscore<br />replaced by a hyphen: the estimate stored under estimated_input_token is<br />sent as x-ai-eg-usage-estimate-estimated-input-token. Its value is the<br />estimate in decimal notation, for example 1200 or 0.4.<br />The header carries only the gateway's estimate: a client-sent value is<br />replaced by the estimate, and removed when the request gets no estimate.<br />MetadataKey must then contain only lower-case letters, digits and<br />underscores, so that each estimate has its own header name.<br />Defaults to false."
 />
 
 

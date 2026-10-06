@@ -323,7 +323,8 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		Header:       &corev3.HeaderValue{Key: internalapi.EnvoyOriginalPathHeader, RawValue: []byte(originalPath)},
 	})
 	r.originalModel = originalModel
-	usageEstimateMetadata := r.estimateUsage(ctx, len(rawBody.Body), logger)
+	usageEstimateMetadata, usageEstimateHeaders, removedUsageEstimateHeaders := r.estimateUsage(ctx, len(rawBody.Body), logger)
+	additionalHeaders = append(additionalHeaders, usageEstimateHeaders...)
 	r.originalRequestBody = body
 	if msgReq, ok := any(body).(*anthropic.MessagesRequest); ok {
 		r.toolsDigest = computeToolsDigest(msgReq.Tools)
@@ -332,7 +333,8 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 
 	// Tracing may need to inject headers, so create a header mutation here.
 	headerMutation := &extprocv3.HeaderMutation{
-		SetHeaders: additionalHeaders,
+		SetHeaders:    additionalHeaders,
+		RemoveHeaders: removedUsageEstimateHeaders,
 	}
 	r.span = r.tracer.StartSpanAndInjectHeaders(
 		ctx,
