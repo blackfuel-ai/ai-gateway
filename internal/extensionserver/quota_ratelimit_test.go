@@ -18,9 +18,11 @@ import (
 	luav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	ratelimitfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ratelimit/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -41,15 +43,16 @@ func TestBuildQuotaRateLimitFilter(t *testing.T) {
 		quotaRateLimitFailureModeDeny: false,
 	}
 	domain := "test-domain"
-	filter, err := srv.buildQuotaRateLimitFilter(quotaRateLimitFilterName, domain, 0)
+	filter, err := srv.buildQuotaRateLimitFilter(quotaRequestRateLimitFilterName, domain, quotaRequestRateLimitStage, true)
 	require.NoError(t, err)
 	require.NotNil(t, filter)
-	require.Equal(t, quotaRateLimitFilterName, filter.Name)
+	require.Equal(t, quotaRequestRateLimitFilterName, filter.Name)
 
 	// Unmarshal and verify the filter config.
 	cfg := &ratelimitfilterv3.RateLimit{}
 	require.NoError(t, filter.GetTypedConfig().UnmarshalTo(cfg))
 	require.Equal(t, domain, cfg.Domain)
+	require.Equal(t, uint32(quotaRequestRateLimitStage), cfg.Stage)
 	require.Equal(t, quotaRateLimitClusterName, cfg.RateLimitService.GrpcService.GetEnvoyGrpc().ClusterName)
 	require.Equal(t, corev3.ApiVersion_V3, cfg.RateLimitService.TransportApiVersion)
 	require.Equal(t, &durationpb.Duration{Seconds: 5}, cfg.Timeout)
@@ -57,6 +60,23 @@ func TestBuildQuotaRateLimitFilter(t *testing.T) {
 	require.True(t, cfg.DisableXEnvoyRatelimitedHeader)
 	require.Equal(t, ratelimitfilterv3.RateLimit_DRAFT_VERSION_03, cfg.EnableXRatelimitHeaders)
 	require.False(t, cfg.RateLimitedAsResourceExhausted)
+	require.Nil(t, cfg.FilterEnforced)
+}
+
+// The charge filter takes the admission reserve at decode time and the
+// completion cost at stream done; it never refuses a request, and leaves the
+// x-ratelimit-* response headers to the enforcing filter.
+func TestBuildQuotaRateLimitFilter_ChargeFilterNeverEnforces(t *testing.T) {
+	srv := &Server{quotaRateLimitTimeout: 5}
+	filter, err := srv.buildQuotaRateLimitFilter(quotaRateLimitFilterName, "test-domain", 0, false)
+	require.NoError(t, err)
+
+	cfg := &ratelimitfilterv3.RateLimit{}
+	require.NoError(t, filter.GetTypedConfig().UnmarshalTo(cfg))
+	require.NotNil(t, cfg.FilterEnforced)
+	require.Equal(t, uint32(0), cfg.FilterEnforced.GetDefaultValue().GetNumerator())
+	require.Equal(t, typev3.FractionalPercent_HUNDRED, cfg.FilterEnforced.GetDefaultValue().GetDenominator())
+	require.Equal(t, ratelimitfilterv3.RateLimit_OFF, cfg.EnableXRatelimitHeaders)
 }
 
 func TestBuildQuotaRateLimitCluster(t *testing.T) {
@@ -141,14 +161,16 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 		require.False(t, filters[2].Disabled)
 		require.Equal(t, wellknown.Router, filters[3].Name)
 
-		// Verify the injected filter configs: request-time filter at stage 1,
-		// stream-done filter at the default stage 0.
+		// Verify the injected filter configs: the enforcing request-time filter
+		// at stage 1, the never-enforced charge filter at the default stage 0.
 		reqCfg := &ratelimitfilterv3.RateLimit{}
 		require.NoError(t, filters[1].GetTypedConfig().UnmarshalTo(reqCfg))
 		require.Equal(t, uint32(quotaRequestRateLimitStage), reqCfg.Stage)
+		require.Nil(t, reqCfg.FilterEnforced)
 		sdCfg := &ratelimitfilterv3.RateLimit{}
 		require.NoError(t, filters[2].GetTypedConfig().UnmarshalTo(sdCfg))
 		require.Equal(t, uint32(0), sdCfg.Stage)
+		require.Equal(t, uint32(0), sdCfg.GetFilterEnforced().GetDefaultValue().GetNumerator())
 		for _, rlCfg := range []*ratelimitfilterv3.RateLimit{reqCfg, sdCfg} {
 			require.Equal(t, translator.QuotaDomain, rlCfg.Domain)
 			require.Equal(t, quotaRateLimitClusterName, rlCfg.RateLimitService.GrpcService.GetEnvoyGrpc().ClusterName)
@@ -157,7 +179,7 @@ func TestInjectQuotaRateLimitFilterIntoListeners(t *testing.T) {
 	})
 
 	t.Run("filter already exists is a no-op", func(t *testing.T) {
-		existingFilter, err := srv.buildQuotaRateLimitFilter(quotaRateLimitFilterName, translator.QuotaDomain, 0)
+		existingFilter, err := srv.buildQuotaRateLimitFilter(quotaRateLimitFilterName, translator.QuotaDomain, 0, false)
 		require.NoError(t, err)
 
 		ln := buildTestListener(t, []*httpconnectionmanagerv3.HttpFilter{
@@ -534,7 +556,8 @@ func TestInjectQuotaRateLimitFilterIntoListeners_FullHCMChain(t *testing.T) {
 	require.False(t, updatedHCM.HttpFilters[3].Disabled)
 	require.Equal(t, wellknown.Router, updatedHCM.HttpFilters[4].Name)
 
-	// Verify the stream-done ratelimit filter's internal configuration.
+	// Verify the charge filter's internal configuration: it charges but never
+	// enforces, and leaves the x-ratelimit-* headers to the request-time filter.
 	rlCfg := &ratelimitfilterv3.RateLimit{}
 	require.NoError(t, updatedHCM.HttpFilters[3].GetTypedConfig().UnmarshalTo(rlCfg))
 	require.Equal(t, translator.QuotaDomain, rlCfg.Domain)
@@ -542,7 +565,13 @@ func TestInjectQuotaRateLimitFilterIntoListeners_FullHCMChain(t *testing.T) {
 	require.Equal(t, corev3.ApiVersion_V3, rlCfg.RateLimitService.TransportApiVersion)
 	require.False(t, rlCfg.FailureModeDeny)
 	require.True(t, rlCfg.DisableXEnvoyRatelimitedHeader)
-	require.Equal(t, ratelimitfilterv3.RateLimit_DRAFT_VERSION_03, rlCfg.EnableXRatelimitHeaders)
+	require.Equal(t, ratelimitfilterv3.RateLimit_OFF, rlCfg.EnableXRatelimitHeaders)
+	require.Equal(t, uint32(0), rlCfg.GetFilterEnforced().GetDefaultValue().GetNumerator())
+
+	reqCfg := &ratelimitfilterv3.RateLimit{}
+	require.NoError(t, updatedHCM.HttpFilters[2].GetTypedConfig().UnmarshalTo(reqCfg))
+	require.Equal(t, ratelimitfilterv3.RateLimit_DRAFT_VERSION_03, reqCfg.EnableXRatelimitHeaders)
+	require.Nil(t, reqCfg.FilterEnforced)
 }
 
 func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
@@ -2885,4 +2914,139 @@ func TestEnableQuotaRateLimitOnRoute_PerBucketCost(t *testing.T) {
 	defaultFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:quota_cost_default)%%", aigv1b1.AIGatewayFilterMetadataNamespace)
 	require.Equal(t, ruleFormat, streamDone[0].HitsAddend.Format)
 	require.Equal(t, defaultFormat, streamDone[1].HitsAddend.Format)
+}
+
+// chargeFilterRateLimits returns the entries of the charge filter's per-route
+// config, in order.
+func chargeFilterRateLimits(t *testing.T, route *routev3.Route) []*routev3.RateLimit {
+	t.Helper()
+	cfg, ok := route.TypedPerFilterConfig[quotaRateLimitFilterName]
+	require.True(t, ok)
+	perRoute := &ratelimitfilterv3.RateLimitPerRoute{}
+	require.NoError(t, cfg.UnmarshalTo(perRoute))
+	return perRoute.RateLimits
+}
+
+func TestEnableQuotaRateLimitOnRoute_AdmissionReserve(t *testing.T) {
+	grantSelector := []egv1a1.RateLimitSelectCondition{
+		{Headers: []egv1a1.HeaderMatch{{Name: "x-grant-id", Type: ptr.To(egv1a1.HeaderMatchDistinct)}}},
+	}
+	reserve := &aigv1a1.QuotaAdmissionReserve{UsageEstimate: "estimated_fresh", Percent: 90}
+	// Both reserving buckets reserve the same estimate and percent, so they read
+	// the same reserve metadata key.
+	reserveKey := translator.QuotaReserveMetadataKey("estimated_fresh", 90)
+	reservePolicy := func() aigv1a1.QuotaPolicy {
+		return aigv1a1.QuotaPolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+			Spec: aigv1a1.QuotaPolicySpec{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{{Name: "test-backend"}},
+				PerModelQuotas: []aigv1a1.PerModelQuota{{
+					ModelName: ptr.To("gpt-4"),
+					Quota: aigv1a1.QuotaDefinition{
+						BucketRules: []aigv1a1.QuotaRule{
+							{ClientSelectors: grantSelector, Quota: aigv1a1.QuotaValue{
+								Limit: 100, Duration: "1m", CostMetric: aigv1a1.QuotaCostMetricRequests,
+							}},
+							{ClientSelectors: grantSelector, Quota: aigv1a1.QuotaValue{
+								Limit: 1000, Duration: "1m",
+								CostExpression:   ptr.To("input_tokens - cached_input_tokens"),
+								DynamicOverride:  &aigv1a1.QuotaLimitOverride{FromHeader: "x-bf-ratelimit-grant-intok-1m"},
+								AdmissionReserve: reserve,
+							}},
+							{ClientSelectors: grantSelector, Quota: aigv1a1.QuotaValue{
+								Limit: 1000, Duration: "1m", CostExpression: ptr.To("output_tokens"),
+							}},
+						},
+						DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1d", AdmissionReserve: reserve},
+					},
+				}},
+			},
+		}
+	}
+
+	t.Run("reserve entries mirror the enforcing entries and read the reserve metadata", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{reservePolicy()}, nil))
+
+		// The enforcing request-time entries are untouched: rule-0, rule-1, rule-2, default.
+		requestTime := route.GetRoute().GetRateLimits()
+		require.Len(t, requestTime, 4)
+
+		charge := chargeFilterRateLimits(t, route)
+		// 2 reserve entries (rule-1, default) then 3 stream-done entries (rule-1, rule-2, default).
+		require.Len(t, charge, 5)
+		reserves, streamDone := charge[:2], charge[2:]
+		for _, rl := range streamDone {
+			require.True(t, rl.ApplyOnStreamDone)
+		}
+
+		for i, tc := range []struct {
+			enforcing   *routev3.RateLimit
+			metadataKey string
+		}{
+			{enforcing: requestTime[1], metadataKey: reserveKey},
+			{enforcing: requestTime[3], metadataKey: reserveKey},
+		} {
+			rl := reserves[i]
+			require.False(t, rl.ApplyOnStreamDone)
+			require.Nil(t, rl.Limit, "a limit override would make the reserve entry judge the request")
+			require.Nil(t, rl.Stage)
+			require.Equal(t,
+				fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace, tc.metadataKey),
+				rl.HitsAddend.GetFormat())
+			// Same descriptors as the enforcing entry, so the reserve lands on the
+			// counter the enforcing entry judges.
+			require.Len(t, rl.Actions, len(tc.enforcing.Actions))
+			for j := range rl.Actions {
+				require.True(t, proto.Equal(tc.enforcing.Actions[j], rl.Actions[j]), "action %d of %s", j, tc.metadataKey)
+			}
+		}
+	})
+
+	t.Run("a model without bucket rules reserves on its default bucket", func(t *testing.T) {
+		policy := reservePolicy()
+		policy.Spec.PerModelQuotas[0].Quota.BucketRules = nil
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy}, nil))
+
+		requestTime := route.GetRoute().GetRateLimits()
+		require.Len(t, requestTime, 1)
+		charge := chargeFilterRateLimits(t, route)
+		require.Len(t, charge, 2)
+		require.False(t, charge[0].ApplyOnStreamDone)
+		require.Equal(t,
+			fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace,
+				reserveKey),
+			charge[0].HitsAddend.GetFormat())
+		require.Len(t, charge[0].Actions, len(requestTime[0].Actions))
+		for j := range charge[0].Actions {
+			require.True(t, proto.Equal(requestTime[0].Actions[j], charge[0].Actions[j]))
+		}
+		require.True(t, charge[1].ApplyOnStreamDone)
+	})
+
+	t.Run("identical reserve entries across policies are charged once", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route,
+			[]aigv1a1.QuotaPolicy{reservePolicy(), reservePolicy()}, nil))
+		var reserves int
+		for _, rl := range chargeFilterRateLimits(t, route) {
+			if !rl.ApplyOnStreamDone {
+				reserves++
+			}
+		}
+		require.Equal(t, 2, reserves)
+	})
+
+	t.Run("buckets without a reserve add no decode-time charge", func(t *testing.T) {
+		policy := reservePolicy()
+		quota := &policy.Spec.PerModelQuotas[0].Quota
+		quota.BucketRules[1].Quota.AdmissionReserve = nil
+		quota.DefaultBucket.AdmissionReserve = nil
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy}, nil))
+		for _, rl := range chargeFilterRateLimits(t, route) {
+			require.True(t, rl.ApplyOnStreamDone)
+		}
+	})
 }
