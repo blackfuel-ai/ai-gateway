@@ -14,6 +14,7 @@ spec:
       cel: "input_tokens"
       byHeader: x-client-id
       emitMetric: true
+      emitHeader: true
     - metadataKey: estimated_fresh_input_token
       cel: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
       byHeader: x-client-id

@@ -8,7 +8,9 @@ package filterapi
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -64,6 +66,18 @@ type RuntimeConfig struct {
 type RuntimeUsageEstimate struct {
 	*UsageEstimate
 	CELProg cel.Program
+	// Header is the request header carrying the estimate upstream, empty without EmitHeader.
+	Header string
+}
+
+// usageEstimateHeaderKey matches the metadata keys a usage estimate header can be named after:
+// replacing their underscores by hyphens gives each key its own header name.
+var usageEstimateHeaderKey = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// UsageEstimateHeader returns the name of the request header carrying the usage estimate
+// stored under metadataKey upstream.
+func UsageEstimateHeader(metadataKey string) string {
+	return internalapi.UsageEstimateHeaderPrefix + strings.ReplaceAll(metadataKey, "_", "-")
 }
 
 // RuntimeBackend is a filter backend with its auth handler that is derived from the filterapi.Backend configuration.
@@ -152,7 +166,14 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		if err != nil {
 			return nil, fmt.Errorf("cannot create CEL program for usage estimate %q: %w", e.MetadataKey, err)
 		}
-		usageEstimates = append(usageEstimates, RuntimeUsageEstimate{UsageEstimate: e, CELProg: prog})
+		re := RuntimeUsageEstimate{UsageEstimate: e, CELProg: prog}
+		if e.EmitHeader {
+			if !usageEstimateHeaderKey.MatchString(e.MetadataKey) {
+				return nil, fmt.Errorf("usage estimate %q emits a header: its metadata key must contain only lower-case letters, digits and underscores", e.MetadataKey)
+			}
+			re.Header = UsageEstimateHeader(e.MetadataKey)
+		}
+		usageEstimates = append(usageEstimates, re)
 	}
 
 	for i := range config.AdmissionReserves {

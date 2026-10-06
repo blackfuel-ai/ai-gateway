@@ -110,7 +110,8 @@ type GatewayConfigSpec struct {
 	// UsageEstimatePeriod) for requests carrying the same value of a request header
 	// (for example the API key identity stamped by an external authorization service)
 	// and the same model, and emits each estimate as Envoy dynamic metadata under the
-	// "io.envoy.ai_gateway" namespace.
+	// "io.envoy.ai_gateway" namespace, and as a request header sent upstream for an
+	// item with EmitHeader.
 	//
 	// Estimates change no routing, cost or quota decision. They can be referenced in
 	// access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
@@ -157,10 +158,12 @@ type GatewayConfigSpec struct {
 //     were cached.
 //
 // The CEL expression is evaluated on that estimated usage and on the measured
-// ratios of that period, and its result is stored under MetadataKey. Nothing is
-// emitted when the last completed period holds no successful response.
+// ratios of that period, and its result is stored under MetadataKey and, with
+// EmitHeader, sent upstream in a request header. Nothing is emitted when the
+// last completed period holds no successful response.
 //
 // Each gateway replica estimates from the responses it served itself.
+// +kubebuilder:validation:XValidation:rule="!has(self.emitHeader) || !self.emitHeader || self.metadataKey.matches('^[a-z0-9_]+$')",message="metadataKey must contain only lower-case letters, digits and underscores when emitHeader is set"
 type UsageEstimate struct {
 	// MetadataKey is the key of the dynamic metadata storing the estimate.
 	//
@@ -217,6 +220,21 @@ type UsageEstimate struct {
 	//
 	// +optional
 	EmitMetric bool `json:"emitMetric,omitempty"`
+	// EmitHeader also sends the estimate upstream as a request header named
+	// "x-ai-eg-usage-estimate-" followed by MetadataKey with each underscore
+	// replaced by a hyphen: the estimate stored under estimated_input_token is
+	// sent as x-ai-eg-usage-estimate-estimated-input-token. Its value is the
+	// estimate in decimal notation, for example 1200 or 0.4.
+	//
+	// The header carries only the gateway's estimate: a client-sent value is
+	// replaced by the estimate, and removed when the request gets no estimate.
+	// MetadataKey must then contain only lower-case letters, digits and
+	// underscores, so that each estimate has its own header name.
+	//
+	// Defaults to false.
+	//
+	// +optional
+	EmitHeader bool `json:"emitHeader,omitempty"`
 }
 
 // GatewayConfigExtProc holds runtime-specific configuration for the external processor.

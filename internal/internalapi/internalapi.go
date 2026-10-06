@@ -24,6 +24,8 @@ const (
 	EnvoyOriginalPathHeader = "x-envoy-original-path"
 	// OriginalPathHeader is the AI Gateway header used to preserve the original request path.
 	OriginalPathHeader = EnvoyAIGatewayHeaderPrefix + "original-path"
+	// UsageEstimateHeaderPrefix is the prefix of the request headers carrying a usage estimate upstream.
+	UsageEstimateHeaderPrefix = EnvoyAIGatewayHeaderPrefix + "usage-estimate-"
 	// InternalEndpointMetadataNamespace is the namespace used for the dynamic metadata for internal use.
 	InternalEndpointMetadataNamespace = "aigateway.envoy.io"
 	// InternalMetadataBackendNameKey is the key used to store the backend name
