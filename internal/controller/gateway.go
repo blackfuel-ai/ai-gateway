@@ -286,6 +286,20 @@ func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEsti
 	}, nil
 }
 
+// checkAdmissionReserveUsageEstimates rejects an admission reserve whose usage
+// estimate the GatewayConfig does not declare: no request would get an estimate, so
+// the bucket would silently reserve nothing.
+func checkAdmissionReserveUsageEstimates(ec *filterapi.Config) error {
+	for i := range ec.AdmissionReserves {
+		r := &ec.AdmissionReserves[i]
+		if !slices.ContainsFunc(ec.UsageEstimates, func(e filterapi.UsageEstimate) bool { return e.MetadataKey == r.UsageEstimate }) {
+			return fmt.Errorf("admission reserve %q references usage estimate %q, which the GatewayConfig does not declare",
+				r.MetadataKey, r.UsageEstimate)
+		}
+	}
+	return nil
+}
+
 // checkUsageEstimateMetadataKeys rejects a usage estimate whose dynamic metadata
 // key is also an LLMRequestCost metadata key:
 // the cost written at completion would overwrite the value written at admission.
@@ -705,6 +719,9 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 	}
 
 	if err = checkUsageEstimateMetadataKeys(ec); err != nil {
+		return false, err
+	}
+	if err = checkAdmissionReserveUsageEstimates(ec); err != nil {
 		return false, err
 	}
 
@@ -1217,6 +1234,13 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 					continue
 				}
 				metadataKey := translator.QuotaCostMetadataKey(bucket.key)
+				var reserveKey string
+				if bucket.reserve != nil {
+					reserveKey = bucket.reserve.MetadataKey
+					if !slices.ContainsFunc(ec.AdmissionReserves, func(r filterapi.AdmissionReserve) bool { return r.MetadataKey == reserveKey }) {
+						ec.AdmissionReserves = append(ec.AdmissionReserves, *bucket.reserve)
+					}
+				}
 				for _, ref := range qp.Spec.TargetRefs {
 					backendKey := route.Namespace + "/" + string(ref.Name)
 					dedupeKey := metadataKey + "\x00" + *pmq.ModelName + "\x00" + backendKey
@@ -1230,6 +1254,8 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 						Backend:     backendKey,
 						RouteName:   routeName,
 						Model:       *pmq.ModelName,
+
+						AdmissionReserveMetadataKey: reserveKey,
 					})
 					injectedQuotaCosts[dedupeKey] = struct{}{}
 				}
@@ -1240,10 +1266,11 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 
 // quotaCostBucket pairs one bucket's cost-metadata bucket key with its
 // resolved CEL cost expression (bucket-level, falling back to the model-level
-// expression, then "total_tokens").
+// expression, then "total_tokens"), and its admission reserve, if any.
 type quotaCostBucket struct {
-	key  string
-	expr string
+	key     string
+	expr    string
+	reserve *filterapi.AdmissionReserve
 }
 
 // quotaCostBuckets returns the token-cost buckets of a model quota: the default
@@ -1259,16 +1286,27 @@ func quotaCostBuckets(quota *aigv1a1.QuotaDefinition) []quotaCostBucket {
 		}
 		return "total_tokens"
 	}
+	resolveReserve := func(v *aigv1a1.QuotaValue) *filterapi.AdmissionReserve {
+		r := v.AdmissionReserve
+		if r == nil {
+			return nil
+		}
+		return &filterapi.AdmissionReserve{
+			MetadataKey:   translator.QuotaReserveMetadataKey(r.UsageEstimate, r.Percent),
+			UsageEstimate: r.UsageEstimate,
+			Percent:       r.Percent,
+		}
+	}
 	var buckets []quotaCostBucket
 	if v := quota.DefaultBucket; v != nil && v.CostMetric != aigv1a1.QuotaCostMetricRequests {
-		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostDefaultBucketKey(), expr: resolveExpr(v)})
+		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostDefaultBucketKey(), expr: resolveExpr(v), reserve: resolveReserve(v)})
 	}
 	for i := range quota.BucketRules {
 		v := &quota.BucketRules[i].Quota
 		if v.CostMetric == aigv1a1.QuotaCostMetricRequests {
 			continue
 		}
-		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostRuleBucketKey(i), expr: resolveExpr(v)})
+		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostRuleBucketKey(i), expr: resolveExpr(v), reserve: resolveReserve(v)})
 	}
 	return buckets
 }

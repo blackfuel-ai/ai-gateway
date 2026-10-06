@@ -8,6 +8,7 @@ package filterapi
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -54,6 +55,9 @@ type RuntimeConfig struct {
 	// UsageEstimatePeriod is the length of the periods the usage estimates accumulate
 	// completed requests over.
 	UsageEstimatePeriod time.Duration
+	// AdmissionReserves is the list of quota reserves computed from the usage estimates
+	// when a request is admitted.
+	AdmissionReserves []AdmissionReserve
 }
 
 // RuntimeUsageEstimate is a usage estimate with its compiled CEL program.
@@ -151,6 +155,13 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		usageEstimates = append(usageEstimates, RuntimeUsageEstimate{UsageEstimate: e, CELProg: prog})
 	}
 
+	for i := range config.AdmissionReserves {
+		r := &config.AdmissionReserves[i]
+		if !slices.ContainsFunc(config.UsageEstimates, func(e UsageEstimate) bool { return e.MetadataKey == r.UsageEstimate }) {
+			return nil, fmt.Errorf("admission reserve %q references undeclared usage estimate %q", r.MetadataKey, r.UsageEstimate)
+		}
+	}
+
 	return &RuntimeConfig{
 		UUID:                config.UUID,
 		Backends:            backends,
@@ -162,5 +173,6 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		EmitErrorMetadata:   config.EmitErrorMetadata,
 		UsageEstimates:      usageEstimates,
 		UsageEstimatePeriod: config.UsageEstimatePeriod,
+		AdmissionReserves:   config.AdmissionReserves,
 	}, nil
 }

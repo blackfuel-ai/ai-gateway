@@ -135,6 +135,41 @@ func TestServer_LoadConfig(t *testing.T) {
 		require.Equal(t, 0.7, val)
 	})
 
+	t.Run("with admission reserves", func(t *testing.T) {
+		config := &Config{
+			UsageEstimates: []UsageEstimate{
+				{MetadataKey: "estimated_input", CEL: "input_tokens", ByHeader: "x-client-id"},
+				{MetadataKey: "estimated_fresh", CEL: "input_tokens - cached_input_tokens", ByHeader: "x-client-id"},
+			},
+			UsageEstimatePeriod: time.Minute,
+			AdmissionReserves: []AdmissionReserve{
+				{MetadataKey: "quota_reserve_estimated_fresh_90", UsageEstimate: "estimated_fresh", Percent: 90},
+				{MetadataKey: "quota_reserve_estimated_input_100", UsageEstimate: "estimated_input", Percent: 100},
+			},
+		}
+		rc, err := NewRuntimeConfig(t.Context(), config, func(_ context.Context, _ *BackendAuth) (BackendAuthHandler, error) {
+			return nil, nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, config.AdmissionReserves, rc.AdmissionReserves)
+	})
+
+	t.Run("error - admission reserve on an undeclared usage estimate", func(t *testing.T) {
+		config := &Config{
+			UsageEstimates: []UsageEstimate{
+				{MetadataKey: "estimated_input", CEL: "input_tokens", ByHeader: "x-client-id"},
+			},
+			UsageEstimatePeriod: time.Minute,
+			AdmissionReserves: []AdmissionReserve{
+				{MetadataKey: "quota_reserve_estimated_fresh_90", UsageEstimate: "estimated_fresh", Percent: 90},
+			},
+		}
+		_, err := NewRuntimeConfig(t.Context(), config, func(_ context.Context, _ *BackendAuth) (BackendAuthHandler, error) {
+			return nil, nil
+		})
+		require.ErrorContains(t, err, `admission reserve "quota_reserve_estimated_fresh_90" references undeclared usage estimate "estimated_fresh"`)
+	})
+
 	t.Run("error - invalid CEL in usage estimate", func(t *testing.T) {
 		config := &Config{
 			UsageEstimates: []UsageEstimate{
