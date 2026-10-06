@@ -103,6 +103,14 @@ func (c *AIGatewayRouteController) Reconcile(ctx context.Context, req reconcile.
 		c.updateAIGatewayRouteStatus(ctx, &aiGatewayRoute, aigv1b1.ConditionTypeNotAccepted, err.Error())
 		return ctrl.Result{}, err
 	}
+	if !aiGatewayRoute.GetDeletionTimestamp().IsZero() {
+		// A terminating route is dropped from the Gateways' configuration, so it reads NotAccepted
+		// for as long as another finalizer keeps it.
+		if keptTerminating(&aiGatewayRoute) {
+			c.updateAIGatewayRouteStatus(ctx, &aiGatewayRoute, aigv1b1.ConditionTypeNotAccepted, terminatingMessage)
+		}
+		return reconcile.Result{}, nil
+	}
 	c.updateAIGatewayRouteStatus(ctx, &aiGatewayRoute, aigv1b1.ConditionTypeAccepted, "AI Gateway Route reconciled successfully")
 	return reconcile.Result{}, nil
 }
@@ -160,8 +168,9 @@ func generateHTTPRouteFilters(aiGatewayRoute *aigv1b1.AIGatewayRoute) []*egv1a1.
 // syncAIGatewayRoute is the main logic for reconciling the AIGatewayRoute resource.
 // This is decoupled from the Reconcile method to centralize the error handling and status updates.
 func (c *AIGatewayRouteController) syncAIGatewayRoute(ctx context.Context, aiGatewayRoute *aigv1b1.AIGatewayRoute) error {
-	if handleFinalizer(ctx, c.client, c.logger, aiGatewayRoute, c.syncGateways) { // Propagate the AIGatewayRoute deletion all the way up to relevant Gateways.
-		return nil
+	// Propagate the AIGatewayRoute deletion all the way up to relevant Gateways.
+	if onDelete, err := handleFinalizer(ctx, c.client, c.logger, aiGatewayRoute, c.syncGateways); err != nil || onDelete {
+		return err
 	}
 
 	// Check if the static default HTTPRouteFilters exist per AIGatewayRoute.

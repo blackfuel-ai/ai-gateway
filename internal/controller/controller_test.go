@@ -519,6 +519,7 @@ func Test_handleFinalizer(t *testing.T) {
 		clientUpdateError  bool
 		onDeletionFnError  bool
 		expectedOnDelete   bool
+		expectedErr        string
 		expectedFinalizers []string
 		expectCallback     bool
 	}{
@@ -535,6 +536,7 @@ func Test_handleFinalizer(t *testing.T) {
 			hasDeletionTS:      false,
 			clientUpdateError:  true,
 			expectedOnDelete:   false,
+			expectedErr:        "failed to add finalizer to test-namespace/test-object: mock update error",
 			expectedFinalizers: []string{aiGatewayControllerFinalizer},
 		},
 		{
@@ -567,6 +569,7 @@ func Test_handleFinalizer(t *testing.T) {
 			hasDeletionTS:      true,
 			clientUpdateError:  true,
 			expectedOnDelete:   true,
+			expectedErr:        "failed to remove finalizer from test-namespace/test-object: mock update error",
 			expectedFinalizers: []string{},
 			expectCallback:     true,
 		},
@@ -597,8 +600,13 @@ func Test_handleFinalizer(t *testing.T) {
 					return nil
 				}
 			}
-			onDelete := handleFinalizer(context.Background(),
+			onDelete, err := handleFinalizer(context.Background(),
 				&mockClient{updateErr: tc.clientUpdateError}, logr.Discard(), obj, onDeletionFn)
+			if tc.expectedErr != "" {
+				require.EqualError(t, err, tc.expectedErr)
+			} else {
+				require.NoError(t, err)
+			}
 			require.Equal(t, tc.expectedOnDelete, onDelete)
 			require.Equal(t, tc.expectedFinalizers, obj.Finalizers)
 			require.Equal(t, tc.expectCallback, callbackExecuted)
