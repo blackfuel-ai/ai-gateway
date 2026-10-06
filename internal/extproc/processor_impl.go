@@ -679,7 +679,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	// leg already emitted it and the downstream access-log / billing pipeline would
 	// otherwise double-count tokens for every mirrored request.
 	if body.EndOfStream && !u.isMirror && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
-		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel)
+		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel, u.parent.usageEstimate.reserves)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build dynamic metadata: %w", err)
 		}
@@ -1024,7 +1024,9 @@ func evalRuntimeRequestCost(rc *filterapi.RuntimeRequestCost, costs *metrics.Tok
 // The metadata includes token usage costs and model information for downstream processing.
 // Two-tier precedence: for each metadataKey, check route-scoped requestCosts first (matching RouteName == routeName).
 // If found, use it. Otherwise, fall back to globalRequestCosts. If neither exists, the key is not emitted.
-func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string) (*structpb.Struct, error) {
+// A route-scoped cost on an admission reserve stores the cost minus the reserve charged at admission,
+// taken from admissionReserves, or 0 when the reserve covers it.
+func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string, admissionReserves map[string]uint64) (*structpb.Struct, error) {
 	metadata := make(map[string]*structpb.Value, len(requestCosts)+len(globalRequestCosts)+3)
 
 	// Track which metadata keys have been populated by route-scoped costs.
@@ -1053,6 +1055,9 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 		cost, err := evalRuntimeRequestCost(rc, costs, requestHeaders, backendName, routeName)
 		if err != nil {
 			return nil, err
+		}
+		if rc.AdmissionReserveMetadataKey != "" {
+			cost -= min(cost, admissionReserves[rc.AdmissionReserveMetadataKey])
 		}
 		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
 		populatedKeys[rc.MetadataKey] = struct{}{}

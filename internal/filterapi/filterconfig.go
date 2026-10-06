@@ -62,6 +62,23 @@ type Config struct {
 	// UsageEstimatePeriod is the length of the periods the usage estimates accumulate
 	// completed requests over. It must be positive when UsageEstimates is set.
 	UsageEstimatePeriod time.Duration `json:"usageEstimatePeriod,omitempty"`
+	// AdmissionReserves configures the quota reserves computed from the usage
+	// estimates when a request is admitted. Set exclusively by the QuotaPolicy
+	// controller.
+	AdmissionReserves []AdmissionReserve `json:"admissionReserves,omitempty"`
+}
+
+// AdmissionReserve is the share of a usage estimate a quota bucket is charged when a
+// request is admitted. Its value, Percent of the estimate rounded to the nearest
+// integer and 0 when the request has no estimate, is stored as dynamic metadata
+// under MetadataKey, which the rate limit charge entries read.
+type AdmissionReserve struct {
+	// MetadataKey is the key of the dynamic metadata storing the reserve.
+	MetadataKey string `json:"metadataKey"`
+	// UsageEstimate is the MetadataKey of the UsageEstimate the reserve is computed from.
+	UsageEstimate string `json:"usageEstimate"`
+	// Percent of the usage estimate reserved, between 1 and 100.
+	Percent uint32 `json:"percent"`
 }
 
 // UsageEstimate configures one token usage estimate emitted when a request is admitted.
@@ -131,6 +148,11 @@ type LLMRequestCost struct {
 	// only evaluated when the request's model name matches. This allows a single
 	// metadata key to be shared across models without conflicting overwrites.
 	Model string `json:"model,omitempty"`
+	// AdmissionReserveMetadataKey is set exclusively by the QuotaPolicy controller,
+	// on the cost of a bucket that reserves at admission: the MetadataKey of that
+	// AdmissionReserve. The cost stored is then the computed cost minus the reserve,
+	// or 0 when the reserve covers it.
+	AdmissionReserveMetadataKey string `json:"admissionReserveMetadataKey,omitempty"`
 }
 
 // LLMRequestCostType specifies the kind of the request cost calculation.

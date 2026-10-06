@@ -38,6 +38,7 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/yaml"
 
+	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller/rotators"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -3960,6 +3961,85 @@ func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing
 		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id"}}
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, withCost, nil, "test-uuid", globalCosts, false, estimates, time.Minute)
 		require.NoError(t, err)
+	})
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_AdmissionReserves checks that a
+// QuotaPolicy bucket with an admission reserve marks its injected cost with the
+// reserve key and declares the reserve once, and that a reserve on a usage estimate
+// the gateway does not declare stops the filter configuration update.
+func TestGatewayController_reconcileFilterConfigSecret_AdmissionReserves(t *testing.T) {
+	const gwNamespace, someNamespace = "ns", "some-namespace"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+				},
+			},
+		},
+	}
+	fresh := "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+	reserve := &aigv1a1.QuotaAdmissionReserve{UsageEstimate: "estimated_fresh", Percent: 90}
+	newController := func(t *testing.T) (*GatewayController, *fake2.Clientset) {
+		fakeClient := requireNewFakeClientWithIndexes(t)
+		kube := fake2.NewClientset()
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+			"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+		require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		}))
+		require.NoError(t, fakeClient.Create(t.Context(), &aigv1a1.QuotaPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: gwNamespace},
+			Spec: aigv1a1.QuotaPolicySpec{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
+					{Group: "aigateway.envoyproxy.io", Kind: "AIServiceBackend", Name: "backend1"},
+				},
+				PerModelQuotas: []aigv1a1.PerModelQuota{{
+					ModelName: ptr.To("model-a"),
+					Quota: aigv1a1.QuotaDefinition{
+						DefaultBucket: &aigv1a1.QuotaValue{Limit: 1000, Duration: "1h"},
+						BucketRules: []aigv1a1.QuotaRule{
+							{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m", CostExpression: &fresh, AdmissionReserve: reserve}},
+							{Quota: aigv1a1.QuotaValue{Limit: 1000, Duration: "1h", CostExpression: &fresh, AdmissionReserve: reserve}},
+						},
+					},
+				}},
+			},
+		}))
+		return c, kube
+	}
+
+	t.Run("reserve key on the reserved bucket costs", func(t *testing.T) {
+		c, kube := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_fresh", CEL: "input_tokens - cached_input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, estimates, time.Minute)
+		require.NoError(t, err)
+
+		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+		require.Equal(t, []filterapi.AdmissionReserve{
+			{MetadataKey: "quota_reserve_estimated_fresh_90", UsageEstimate: "estimated_fresh", Percent: 90},
+		}, cfg.AdmissionReserves)
+		reserveKeys := make(map[string]string)
+		for _, rc := range cfg.LLMRequestCosts {
+			reserveKeys[rc.MetadataKey] = rc.AdmissionReserveMetadataKey
+		}
+		require.Equal(t, map[string]string{
+			"quota_cost_default": "",
+			"quota_cost_rule-0":  "quota_reserve_estimated_fresh_90",
+			"quota_cost_rule-1":  "quota_reserve_estimated_fresh_90",
+		}, reserveKeys)
+	})
+
+	t.Run("reserve on an undeclared usage estimate", func(t *testing.T) {
+		c, _ := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input", CEL: "input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `admission reserve "quota_reserve_estimated_fresh_90" references usage estimate "estimated_fresh", which the GatewayConfig does not declare`)
 	})
 }
 
