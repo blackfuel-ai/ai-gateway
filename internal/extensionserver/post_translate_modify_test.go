@@ -476,7 +476,7 @@ func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	// Envoy Gateway names mirror clusters with 1-based indexing — the first
@@ -553,7 +553,7 @@ func Test_maybeModifyCluster_mirrorIndexIsOneBased(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -604,7 +604,7 @@ func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
 	// Malformed mirror suffixes (non-numeric indices) should log and bail without
 	// returning an error so a bad cluster name doesn't tear down the whole xDS push.
 	c := newFakeClient()
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 	for _, name := range []string{
 		"httproute/ns/myroute/rule/abc-mirror-0",
@@ -654,7 +654,7 @@ func Test_maybeModifyCluster_inferencePoolMirror(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	mirrorCluster := &clusterv3.Cluster{
@@ -708,7 +708,7 @@ func Test_maybeModifyCluster_inferencePoolMirror(t *testing.T) {
 // EPP filter (all before the router), and per-route config enables the mirror filters only on
 // the mirror rule's route.
 func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
-	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	primaryPool := &gwaiev1.InferencePool{
@@ -845,7 +845,7 @@ func Test_buildMirrorEndpointCopyFilter_copiesWithoutRemovingSource(t *testing.T
 }
 
 func Test_patchListenerWithInferencePoolFilters_sharedPool(t *testing.T) {
-	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	sharedPool := &gwaiev1.InferencePool{

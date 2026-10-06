@@ -8,6 +8,7 @@ package extensionserver
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -256,7 +257,7 @@ func TestEnableQuotaRateLimitOnRoute(t *testing.T) {
 
 	t.Run("sets per-route rate limit config", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil, true))
 		require.NotNil(t, route.TypedPerFilterConfig)
 		require.Contains(t, route.TypedPerFilterConfig, quotaRateLimitFilterName)
 
@@ -273,13 +274,13 @@ func TestEnableQuotaRateLimitOnRoute(t *testing.T) {
 
 	t.Run("nil policies returns nil", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, nil, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, nil, nil, true))
 		require.Nil(t, route.TypedPerFilterConfig)
 	})
 
 	t.Run("stream-done entry reads backend_name from metadata", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil, true))
 
 		perRoute := &ratelimitfilterv3.RateLimitPerRoute{}
 		require.NoError(t, route.TypedPerFilterConfig[quotaRateLimitFilterName].UnmarshalTo(perRoute))
@@ -296,7 +297,7 @@ func TestEnableQuotaRateLimitOnRoute(t *testing.T) {
 
 	t.Run("request-time entry uses GenericKey for backend and model", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil, true))
 
 		reqTime := route.GetRoute().RateLimits[0]
 		require.Equal(t, "default/be", reqTime.Actions[0].GetGenericKey().DescriptorValue)
@@ -310,7 +311,7 @@ func TestEnableQuotaRateLimitOnRoute(t *testing.T) {
 				"some-other-filter": {},
 			},
 		}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, testPolicies, nil, true))
 		require.Len(t, route.TypedPerFilterConfig, 2)
 		require.Contains(t, route.TypedPerFilterConfig, "some-other-filter")
 		require.Contains(t, route.TypedPerFilterConfig, quotaRateLimitFilterName)
@@ -426,7 +427,7 @@ func TestEnableQuotaRateLimitOnRoute_DescriptorChain(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 	rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -460,7 +461,7 @@ func TestQuotaHitsAddend(t *testing.T) {
 func TestEnableQuotaRateLimitOnRoute_HitsAddend(t *testing.T) {
 	t.Run("nil policies returns nil without patching route", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, nil, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, nil, nil, true))
 		require.Nil(t, route.TypedPerFilterConfig)
 	})
 
@@ -488,7 +489,7 @@ func TestEnableQuotaRateLimitOnRoute_HitsAddend(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -610,7 +611,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -672,7 +673,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -724,7 +725,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -759,7 +760,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -805,7 +806,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -843,7 +844,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -893,7 +894,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -919,7 +920,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		// No entries since nil model name with no bucket rules is skipped; returns nil early.
 		require.Nil(t, route.TypedPerFilterConfig)
@@ -962,7 +963,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -1074,7 +1075,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -1161,7 +1162,7 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 			},
 		}
 
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -1174,13 +1175,13 @@ func TestEnableQuotaRateLimitOnRoute_WithBucketRules(t *testing.T) {
 
 	t.Run("nil policies list", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, nil, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, nil, nil, true))
 		require.Nil(t, route.TypedPerFilterConfig)
 	})
 
 	t.Run("empty policies list", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{}, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{}, nil, true))
 		require.Nil(t, route.TypedPerFilterConfig)
 	})
 }
@@ -1376,7 +1377,7 @@ func TestEnableQuotaRateLimitOnRoute_MultiplePerModelQuotas(t *testing.T) {
 		modelInfo := &routeModelInfo{
 			backendModels: map[string][]string{"bedrock-backend": {"claude-sonnet-4-6"}},
 		}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, modelInfo))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, modelInfo, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -1387,7 +1388,7 @@ func TestEnableQuotaRateLimitOnRoute_MultiplePerModelQuotas(t *testing.T) {
 
 	t.Run("nil modelInfo includes all models", func(t *testing.T) {
 		route2 := &routev3.Route{Name: "test-route-2", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route2, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route2, policies, nil, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route2)
 
@@ -1438,7 +1439,7 @@ func TestEnableQuotaRateLimitOnRoute_MultiplePerModelQuotas(t *testing.T) {
 				"bedrock-backend-haiku": {"claude-haiku-4-5"},
 			},
 		}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route3, mixedPolicies, modelInfo))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route3, mixedPolicies, modelInfo, true))
 
 		rateLimits := quotaRateLimitsOnRoute(t, route3)
 
@@ -1682,7 +1683,7 @@ func newTestServerWithRoute(t *testing.T, route *aigv1b1.AIGatewayRoute, policie
 	for i := range policies {
 		require.NoError(t, c.Create(t.Context(), &policies[i]))
 	}
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 	return s
 }
@@ -2545,7 +2546,7 @@ func TestQuotaLimitDynamicOverride(t *testing.T) {
 			},
 		}
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 		// Request-time entry (with the override) is on the route action at
 		// stage 1; the per-route config holds only the stream-done entry,
@@ -2612,7 +2613,7 @@ func TestEnableQuotaRateLimitOnRoute_PreservesExistingRouteRateLimits(t *testing
 			},
 		},
 	}
-	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 	rls := route.GetRoute().RateLimits
 	require.Len(t, rls, 2)
@@ -2659,13 +2660,13 @@ func TestEnableQuotaRateLimitOnRoute_IdempotentOnRepeatedCalls(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 	firstPass := route.GetRoute().GetRateLimits()
 	require.Same(t, existing, firstPass[0])
 	quotaEntries := len(firstPass) - 1
 	require.Positive(t, quotaEntries)
 
-	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 	secondPass := route.GetRoute().GetRateLimits()
 	require.Len(t, secondPass, 1+quotaEntries)
 	require.Same(t, existing, secondPass[0])
@@ -2707,7 +2708,7 @@ func TestEnableQuotaRateLimitOnRoute_DedupesIdenticalEntriesAcrossPolicies(t *te
 	}
 	policies := []aigv1a1.QuotaPolicy{makePolicy("uid-a"), makePolicy("uid-b")}
 
-	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 	require.Len(t, route.GetRoute().GetRateLimits(), 2)
 }
 
@@ -2824,7 +2825,7 @@ func TestEnableQuotaRateLimitOnRoute_PerBucketCost(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil))
+	require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, policies, nil, true))
 
 	rateLimits := quotaRateLimitsOnRoute(t, route)
 
@@ -2959,15 +2960,17 @@ func TestEnableQuotaRateLimitOnRoute_AdmissionReserve(t *testing.T) {
 
 	t.Run("reserve entries mirror the enforcing entries and read the reserve metadata", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{reservePolicy()}, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{reservePolicy()}, nil, true))
 
 		// The enforcing request-time entries are untouched: rule-0, rule-1, rule-2, default.
 		requestTime := route.GetRoute().GetRateLimits()
 		require.Len(t, requestTime, 4)
 
 		charge := chargeFilterRateLimits(t, route)
-		// 2 reserve entries (rule-1, default) then 3 stream-done entries (rule-1, rule-2, default).
-		require.Len(t, charge, 5)
+		// 2 reserve entries (rule-1, default), 3 stream-done entries (rule-1,
+		// rule-2, default), 2 releases (rule-1, default) and 2 settlements
+		// (rule-1, default).
+		require.Len(t, charge, 9)
 		reserves, streamDone := charge[:2], charge[2:]
 		for _, rl := range streamDone {
 			require.True(t, rl.ApplyOnStreamDone)
@@ -2990,7 +2993,7 @@ func TestEnableQuotaRateLimitOnRoute_AdmissionReserve(t *testing.T) {
 			// Same descriptors as the enforcing entry, so the reserve lands on the
 			// counter the enforcing entry judges.
 			require.Len(t, rl.Actions, len(tc.enforcing.Actions))
-			for j := range rl.Actions {
+			for j := range tc.enforcing.Actions {
 				require.True(t, proto.Equal(tc.enforcing.Actions[j], rl.Actions[j]), "action %d of %s", j, tc.metadataKey)
 			}
 		}
@@ -3000,28 +3003,36 @@ func TestEnableQuotaRateLimitOnRoute_AdmissionReserve(t *testing.T) {
 		policy := reservePolicy()
 		policy.Spec.PerModelQuotas[0].Quota.BucketRules = nil
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy}, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy}, nil, true))
 
 		requestTime := route.GetRoute().GetRateLimits()
 		require.Len(t, requestTime, 1)
 		charge := chargeFilterRateLimits(t, route)
-		require.Len(t, charge, 2)
+		// The reserve, the stream-done charge, the settlement and the release.
+		require.Len(t, charge, 4)
 		require.False(t, charge[0].ApplyOnStreamDone)
 		require.Equal(t,
 			fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace,
 				reserveKey),
 			charge[0].HitsAddend.GetFormat())
 		require.Len(t, charge[0].Actions, len(requestTime[0].Actions))
-		for j := range charge[0].Actions {
+		for j := range requestTime[0].Actions {
 			require.True(t, proto.Equal(requestTime[0].Actions[j], charge[0].Actions[j]))
 		}
-		require.True(t, charge[1].ApplyOnStreamDone)
+		for _, rl := range charge[1:] {
+			require.True(t, rl.ApplyOnStreamDone)
+		}
+		require.Equal(t,
+			fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace,
+				translator.QuotaSettleMetadataKey(translator.QuotaCostDefaultBucketKey())),
+			charge[2].HitsAddend.GetFormat())
+		require.True(t, charge[3].HitsAddend.GetIsNegativeHits())
 	})
 
 	t.Run("identical reserve entries across policies are charged once", func(t *testing.T) {
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
 		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route,
-			[]aigv1a1.QuotaPolicy{reservePolicy(), reservePolicy()}, nil))
+			[]aigv1a1.QuotaPolicy{reservePolicy(), reservePolicy()}, nil, true))
 		var reserves int
 		for _, rl := range chargeFilterRateLimits(t, route) {
 			if !rl.ApplyOnStreamDone {
@@ -3037,9 +3048,209 @@ func TestEnableQuotaRateLimitOnRoute_AdmissionReserve(t *testing.T) {
 		quota.BucketRules[1].Quota.AdmissionReserve = nil
 		quota.DefaultBucket.AdmissionReserve = nil
 		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
-		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy}, nil))
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy}, nil, true))
 		for _, rl := range chargeFilterRateLimits(t, route) {
 			require.True(t, rl.ApplyOnStreamDone)
+			require.False(t, rl.HitsAddend.GetIsNegativeHits(), "nothing reserved, nothing to release")
+			require.Contains(t, rl.HitsAddend.GetFormat(), "quota_cost_", "nothing reserved, nothing to settle")
 		}
+	})
+}
+
+func TestEnableQuotaRateLimitOnRoute_ReleaseAndSettle(t *testing.T) {
+	reserve := &aigv1a1.QuotaAdmissionReserve{UsageEstimate: "estimated_fresh", Percent: 90}
+	reserveFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace,
+		translator.QuotaReserveMetadataKey("estimated_fresh", 90))
+	releaseFormat := fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace,
+		translator.QuotaReleaseMetadataKey("estimated_fresh", 90))
+	// Each model reserves on rule-0 and its default bucket, and charges rule-1
+	// at stream done without a reserve.
+	modelQuota := func(model string) aigv1a1.PerModelQuota {
+		return aigv1a1.PerModelQuota{
+			ModelName: ptr.To(model),
+			Quota: aigv1a1.QuotaDefinition{
+				BucketRules: []aigv1a1.QuotaRule{
+					{Quota: aigv1a1.QuotaValue{Limit: 1000, Duration: "1m", AdmissionReserve: reserve}},
+					{Quota: aigv1a1.QuotaValue{Limit: 1000, Duration: "1m", CostExpression: ptr.To("output_tokens")}},
+				},
+				DefaultBucket: &aigv1a1.QuotaValue{Limit: 10000, Duration: "1d", AdmissionReserve: reserve},
+			},
+		}
+	}
+	policy := func() aigv1a1.QuotaPolicy {
+		return aigv1a1.QuotaPolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", UID: types.UID("p1")},
+			Spec: aigv1a1.QuotaPolicySpec{
+				TargetRefs:     []gwapiv1a2.LocalPolicyTargetReference{{Name: "backend-a"}, {Name: "backend-b"}},
+				PerModelQuotas: []aigv1a1.PerModelQuota{modelQuota("model-1"), modelQuota("model-2")},
+			},
+		}
+	}
+	modelInfo := &routeModelInfo{backendModels: map[string][]string{
+		"backend-a": {"model-1", "model-2"},
+		"backend-b": {"model-1", "model-2"},
+	}}
+	type split struct{ reserves, streamDone, releases, settlements []*routev3.RateLimit }
+	splitCharge := func(t *testing.T, route *routev3.Route) split {
+		var s split
+		for _, rl := range chargeFilterRateLimits(t, route) {
+			format := rl.HitsAddend.GetFormat()
+			switch {
+			case !rl.ApplyOnStreamDone:
+				s.reserves = append(s.reserves, rl)
+			case rl.HitsAddend.GetIsNegativeHits():
+				s.releases = append(s.releases, rl)
+			case strings.Contains(format, "quota_settle_"):
+				s.settlements = append(s.settlements, rl)
+			default:
+				s.streamDone = append(s.streamDone, rl)
+			}
+		}
+		return s
+	}
+
+	t.Run("every reserve is released on stream done", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy()}, modelInfo, true))
+		s := splitCharge(t, route)
+		// 2 targets x 2 models x 2 reserving buckets.
+		require.Len(t, s.reserves, 8)
+		require.Len(t, s.releases, len(s.reserves))
+		for i, res := range s.reserves {
+			require.Equal(t, reserveFormat, res.HitsAddend.GetFormat())
+			require.False(t, res.HitsAddend.GetIsNegativeHits())
+
+			rel := s.releases[i]
+			require.True(t, rel.ApplyOnStreamDone)
+			require.Nil(t, rel.Limit)
+			require.Equal(t, releaseFormat, rel.HitsAddend.GetFormat())
+			// Exactly the reserve's descriptors, so the release lands on its counter.
+			require.Len(t, rel.Actions, len(res.Actions))
+			for j := range res.Actions {
+				require.True(t, proto.Equal(res.Actions[j], rel.Actions[j]), "action %d of release %d", j, i)
+			}
+		}
+		// Each target and model is released on its own counter.
+		var targets []string
+		for _, rel := range s.releases {
+			targets = append(targets, rel.Actions[0].GetGenericKey().GetDescriptorValue()+"|"+rel.Actions[1].GetGenericKey().GetDescriptorValue())
+		}
+		require.ElementsMatch(t, []string{
+			"default/backend-a|model-1", "default/backend-a|model-1", "default/backend-a|model-2", "default/backend-a|model-2",
+			"default/backend-b|model-1", "default/backend-b|model-1", "default/backend-b|model-2", "default/backend-b|model-2",
+		}, targets)
+	})
+
+	t.Run("reserving buckets settle on the serving counter", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy()}, modelInfo, true))
+		s := splitCharge(t, route)
+		// Stream-done entries are shared across targets and models: rule-0, rule-1, default.
+		require.Len(t, s.streamDone, 3)
+		// rule-1 reserves nothing, so it has nothing to settle.
+		require.Len(t, s.settlements, 2)
+		for i, tc := range []struct {
+			streamDone *routev3.RateLimit
+			bucketKey  string
+		}{
+			{streamDone: s.streamDone[0], bucketKey: translator.QuotaCostRuleBucketKey(0)},
+			{streamDone: s.streamDone[2], bucketKey: translator.QuotaCostDefaultBucketKey()},
+		} {
+			rl := s.settlements[i]
+			require.Equal(t,
+				fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace, translator.QuotaSettleMetadataKey(tc.bucketKey)),
+				rl.HitsAddend.GetFormat())
+			require.False(t, rl.HitsAddend.GetIsNegativeHits())
+			require.Equal(t,
+				fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%", aigv1b1.AIGatewayFilterMetadataNamespace, translator.QuotaCostMetadataKey(tc.bucketKey)),
+				tc.streamDone.HitsAddend.GetFormat())
+			// Exactly the stream-done entry's descriptors: a settlement is charged
+			// whether or not the reserve was charged.
+			require.Len(t, rl.Actions, len(tc.streamDone.Actions))
+			for j := range tc.streamDone.Actions {
+				require.True(t, proto.Equal(tc.streamDone.Actions[j], rl.Actions[j]), "action %d of settlement %s", j, tc.bucketKey)
+			}
+		}
+	})
+
+	t.Run("a bucket settles when any model reserves on it", func(t *testing.T) {
+		p := policy()
+		// model-1 reserves nothing on rule-0; model-2 still does.
+		p.Spec.PerModelQuotas[0].Quota.BucketRules[0].Quota.AdmissionReserve = nil
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{p}, modelInfo, true))
+		s := splitCharge(t, route)
+		require.Len(t, s.reserves, 6)
+		require.Len(t, s.releases, 6)
+		require.Len(t, s.settlements, 2)
+	})
+
+	t.Run("a Distinct selector is released from the value copied at request time", func(t *testing.T) {
+		p := policy()
+		p.Spec.TargetRefs = p.Spec.TargetRefs[:1]
+		p.Spec.PerModelQuotas = p.Spec.PerModelQuotas[:1]
+		quota := &p.Spec.PerModelQuotas[0].Quota
+		quota.DefaultBucket.AdmissionReserve = nil
+		quota.BucketRules[0].ClientSelectors = []egv1a1.RateLimitSelectCondition{{Headers: []egv1a1.HeaderMatch{
+			{Name: "x-org-id", Type: ptr.To(egv1a1.HeaderMatchDistinct)},
+			{Name: "x-tier", Value: ptr.To("gold")},
+		}}}
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{p}, modelInfo, true))
+		s := splitCharge(t, route)
+		require.Len(t, s.reserves, 1)
+		require.Len(t, s.releases, 1)
+		res, rel := s.reserves[0], s.releases[0]
+		// backend, model, x-org-id, x-tier.
+		require.Len(t, res.Actions, 4)
+		require.Len(t, rel.Actions, 4)
+		orgKey := translator.BucketRuleDescriptorKey(0, 0, "x-org-id", "")
+		require.Equal(t, "x-org-id", res.Actions[2].GetRequestHeaders().GetHeaderName())
+		require.Equal(t, orgKey, res.Actions[2].GetRequestHeaders().GetDescriptorKey())
+		require.Equal(t, orgKey, rel.Actions[2].GetMetadata().GetDescriptorKey())
+		require.Equal(t, quotaDistinctHeaderMetadataKey("x-org-id"), rel.Actions[2].GetMetadata().GetMetadataKey().GetPath()[0].GetKey())
+		for _, j := range []int{0, 1, 3} {
+			require.True(t, proto.Equal(res.Actions[j], rel.Actions[j]), "action %d", j)
+		}
+	})
+
+	t.Run("settlements precede releases on stream done", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy()}, modelInfo, true))
+		lastSettlement, firstRelease := -1, -1
+		for i, rl := range chargeFilterRateLimits(t, route) {
+			switch {
+			case rl.HitsAddend.GetIsNegativeHits():
+				if firstRelease < 0 {
+					firstRelease = i
+				}
+			case strings.Contains(rl.HitsAddend.GetFormat(), "quota_settle_"):
+				lastSettlement = i
+			}
+		}
+		require.Positive(t, firstRelease)
+		require.Less(t, lastSettlement, firstRelease)
+	})
+
+	t.Run("without releases, reserves are charged and neither released nor settled", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy()}, modelInfo, false))
+		s := splitCharge(t, route)
+		require.Len(t, s.reserves, 8)
+		require.Len(t, s.streamDone, 3)
+		require.Empty(t, s.releases)
+		require.Empty(t, s.settlements)
+	})
+
+	t.Run("policies sharing a backend release and settle once", func(t *testing.T) {
+		route := &routev3.Route{Name: "test-route", Action: &routev3.Route_Route{Route: &routev3.RouteAction{}}}
+		second := policy()
+		second.UID = "p2"
+		require.NoError(t, enableQuotaRateLimitOnRoute(logr.Discard(), route, []aigv1a1.QuotaPolicy{policy(), second}, modelInfo, true))
+		s := splitCharge(t, route)
+		require.Len(t, s.reserves, 8)
+		require.Len(t, s.releases, 8)
+		require.Len(t, s.streamDone, 3)
+		require.Len(t, s.settlements, 2)
 	})
 }

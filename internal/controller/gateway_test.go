@@ -4014,7 +4014,7 @@ func TestGatewayController_reconcileFilterConfigSecret_AdmissionReserves(t *test
 		return c, kube
 	}
 
-	t.Run("reserve key on the reserved bucket costs", func(t *testing.T) {
+	t.Run("reserve and settle keys on the reserved bucket costs", func(t *testing.T) {
 		c, kube := newController(t)
 		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_fresh", CEL: "input_tokens - cached_input_tokens", ByHeader: "x-client-id"}}
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, false, estimates, time.Minute)
@@ -4022,17 +4022,27 @@ func TestGatewayController_reconcileFilterConfigSecret_AdmissionReserves(t *test
 
 		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
 		require.Equal(t, []filterapi.AdmissionReserve{
-			{MetadataKey: "quota_reserve_estimated_fresh_90", UsageEstimate: "estimated_fresh", Percent: 90},
+			{
+				MetadataKey: "quota_reserve_estimated_fresh_90", ReleaseMetadataKey: "quota_release_estimated_fresh_90",
+				UsageEstimate: "estimated_fresh", Percent: 90,
+			},
 		}, cfg.AdmissionReserves)
 		reserveKeys := make(map[string]string)
+		settleKeys := make(map[string]string)
 		for _, rc := range cfg.LLMRequestCosts {
 			reserveKeys[rc.MetadataKey] = rc.AdmissionReserveMetadataKey
+			settleKeys[rc.MetadataKey] = rc.AdmissionSettleMetadataKey
 		}
 		require.Equal(t, map[string]string{
 			"quota_cost_default": "",
 			"quota_cost_rule-0":  "quota_reserve_estimated_fresh_90",
 			"quota_cost_rule-1":  "quota_reserve_estimated_fresh_90",
 		}, reserveKeys)
+		require.Equal(t, map[string]string{
+			"quota_cost_default": "",
+			"quota_cost_rule-0":  "quota_settle_rule-0",
+			"quota_cost_rule-1":  "quota_settle_rule-1",
+		}, settleKeys)
 	})
 
 	t.Run("reserve on an undeclared usage estimate", func(t *testing.T) {

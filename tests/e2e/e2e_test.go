@@ -18,6 +18,9 @@ func TestMain(m *testing.M) {
 			"--set", "controller.spanRequestHeaderAttributes=x-tenant-id:" + tenantIDAttribute,
 			"--set", "controller.metricsRequestHeaderAttributes=x-tenant-id:" + tenantIDAttribute,
 			"--set", "controller.logRequestHeaderAttributes=x-tenant-id:" + tenantIDAttribute,
+			// Release the QuotaPolicy admission reserves at stream end: the quota
+			// rate limit service of the tests applies negative hits.
+			"--set", "controller.quotaReleaseAdmissionReserves=true",
 		},
 	}, false, true,
 	)

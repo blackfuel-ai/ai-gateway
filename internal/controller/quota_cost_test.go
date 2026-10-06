@@ -70,11 +70,13 @@ func TestQuotaCostBuckets(t *testing.T) {
 		})
 		require.Equal(t, []quotaCostBucket{
 			{key: "default", expr: "total_tokens", reserve: &filterapi.AdmissionReserve{
-				MetadataKey: "quota_reserve_estimated_input_100", UsageEstimate: "estimated_input", Percent: 100,
+				MetadataKey: "quota_reserve_estimated_input_100", ReleaseMetadataKey: "quota_release_estimated_input_100",
+				UsageEstimate: "estimated_input", Percent: 100,
 			}},
 			{key: "rule-0", expr: "output_tokens"},
 			{key: "rule-1", expr: "input_tokens - cached_input_tokens", reserve: &filterapi.AdmissionReserve{
-				MetadataKey: "quota_reserve_estimated_fresh_85", UsageEstimate: "estimated_fresh", Percent: 85,
+				MetadataKey: "quota_reserve_estimated_fresh_85", ReleaseMetadataKey: "quota_release_estimated_fresh_85",
+				UsageEstimate: "estimated_fresh", Percent: 85,
 			}},
 		}, buckets)
 	})

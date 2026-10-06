@@ -75,6 +75,7 @@ type flags struct {
 	quotaRateLimitServiceAddr              string
 	quotaRateLimitTimeout                  int64
 	quotaRateLimitFailureModeDeny          bool
+	quotaReleaseAdmissionReserves          bool
 }
 
 func setOptionalString(dst **string) func(string) error {
@@ -260,6 +261,9 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		"Timeout in seconds for the quota rate limit service.")
 	quotaRateLimitFailureModeDeny := fs.Bool("quotaRateLimitFailureModeDeny", false,
 		"If true, the rate limit filter will deny requests when the rate limit service is unavailable.")
+	quotaReleaseAdmissionReserves := fs.Bool("quotaReleaseAdmissionReserves", false,
+		"If true, QuotaPolicy admission reserves are released at stream end, as negative hits, and the serving counter is charged the whole cost. "+
+			"The quota rate limit service must apply negative hits (envoyproxy/ratelimit is_negative_hits support).")
 
 	if err := fs.Parse(args); err != nil {
 		err = fmt.Errorf("failed to parse flags: %w", err)
@@ -387,6 +391,7 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		quotaRateLimitServiceAddr:              *quotaRateLimitServiceAddr,
 		quotaRateLimitTimeout:                  *quotaRateLimitTimeout,
 		quotaRateLimitFailureModeDeny:          *quotaRateLimitFailureModeDeny,
+		quotaReleaseAdmissionReserves:          *quotaReleaseAdmissionReserves,
 	}, nil
 }
 
@@ -462,7 +467,7 @@ func main() {
 	// Start the extension server running alongside the controller.
 	const extProcUDSPath = "/etc/ai-gateway-extproc-uds/run.sock"
 	s := grpc.NewServer(grpc.MaxRecvMsgSize(parsedFlags.maxRecvMsgSize))
-	extSrv, err := extensionserver.New(mgr.GetClient(), ctrl.Log, extProcUDSPath, false, parsedFlags.requestHeaderAttributes, parsedFlags.logRequestHeaderAttributes, parsedFlags.quotaRateLimitServiceAddr, parsedFlags.quotaRateLimitTimeout, parsedFlags.quotaRateLimitFailureModeDeny)
+	extSrv, err := extensionserver.New(mgr.GetClient(), ctrl.Log, extProcUDSPath, false, parsedFlags.requestHeaderAttributes, parsedFlags.logRequestHeaderAttributes, parsedFlags.quotaRateLimitServiceAddr, parsedFlags.quotaRateLimitTimeout, parsedFlags.quotaRateLimitFailureModeDeny, parsedFlags.quotaReleaseAdmissionReserves)
 	if err != nil {
 		setupLog.Error(err, "failed to create extension server")
 		os.Exit(1)

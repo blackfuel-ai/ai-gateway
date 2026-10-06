@@ -862,3 +862,15 @@ func TestQuotaReserveMetadataKey(t *testing.T) {
 	require.NotEqual(t, QuotaReserveMetadataKey("fresh_input", 90), QuotaReserveMetadataKey("fresh_input", 100))
 	require.NotEqual(t, QuotaReserveMetadataKey("fresh_input", 90), QuotaReserveMetadataKey("input", 90))
 }
+
+func TestQuotaReleaseMetadataKey(t *testing.T) {
+	require.Equal(t, "quota_release_fresh_input_90", QuotaReleaseMetadataKey("fresh_input", 90))
+	require.NotEqual(t, QuotaReleaseMetadataKey("fresh_input", 90), QuotaReleaseMetadataKey("fresh_input", 100))
+	require.NotEqual(t, QuotaReleaseMetadataKey("fresh_input", 90), QuotaReserveMetadataKey("fresh_input", 90))
+}
+
+func TestQuotaSettleMetadataKey(t *testing.T) {
+	require.Equal(t, "quota_settle_rule-3", QuotaSettleMetadataKey(QuotaCostRuleBucketKey(3)))
+	require.Equal(t, "quota_settle_default", QuotaSettleMetadataKey(QuotaCostDefaultBucketKey()))
+	require.NotEqual(t, QuotaSettleMetadataKey(QuotaCostDefaultBucketKey()), QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
+}
