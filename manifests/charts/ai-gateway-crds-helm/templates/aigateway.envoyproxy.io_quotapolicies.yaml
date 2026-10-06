@@ -293,15 +293,15 @@ spec:
                                   admissionReserve:
                                     description: |-
                                       AdmissionReserve charges an estimate of the request's cost to the bucket
-                                      when the request is admitted, and only the remainder when its stream
-                                      completes, so requests in flight count against the limit. Without it the
-                                      whole cost is charged at stream completion.
+                                      when the request is admitted, so requests in flight count against the
+                                      limit. Without it the whole cost is charged at stream completion.
                                     properties:
                                       percent:
                                         description: |-
-                                          Percent of the usage estimate charged at admission. Above the actual cost,
-                                          the difference stays charged; below it, requests in flight are partly
-                                          uncounted.
+                                          Percent of the usage estimate charged at admission. Below the actual
+                                          cost, requests in flight are partly uncounted; above it, the difference
+                                          is held until the reserve is released, or stays charged when reserves
+                                          are not released.
                                         format: int32
                                         maximum: 100
                                         minimum: 1
@@ -331,7 +331,7 @@ spec:
                                     description: |-
                                       CostMetric selects what this bucket counts. "Tokens" (the default) burns
                                       the bucket down at stream-done by CostExpression (or the model-level
-                                      fallback), less any AdmissionReserve already charged. "Requests" burns the bucket down by exactly 1 per request at
+                                      fallback). "Requests" burns the bucket down by exactly 1 per request at
                                       request time and adds no stream-done token charge.
                                     enum:
                                     - Tokens
@@ -414,15 +414,15 @@ spec:
                             admissionReserve:
                               description: |-
                                 AdmissionReserve charges an estimate of the request's cost to the bucket
-                                when the request is admitted, and only the remainder when its stream
-                                completes, so requests in flight count against the limit. Without it the
-                                whole cost is charged at stream completion.
+                                when the request is admitted, so requests in flight count against the
+                                limit. Without it the whole cost is charged at stream completion.
                               properties:
                                 percent:
                                   description: |-
-                                    Percent of the usage estimate charged at admission. Above the actual cost,
-                                    the difference stays charged; below it, requests in flight are partly
-                                    uncounted.
+                                    Percent of the usage estimate charged at admission. Below the actual
+                                    cost, requests in flight are partly uncounted; above it, the difference
+                                    is held until the reserve is released, or stays charged when reserves
+                                    are not released.
                                   format: int32
                                   maximum: 100
                                   minimum: 1
@@ -452,7 +452,7 @@ spec:
                               description: |-
                                 CostMetric selects what this bucket counts. "Tokens" (the default) burns
                                 the bucket down at stream-done by CostExpression (or the model-level
-                                fallback), less any AdmissionReserve already charged. "Requests" burns the bucket down by exactly 1 per request at
+                                fallback). "Requests" burns the bucket down by exactly 1 per request at
                                 request time and adds no stream-done token charge.
                               enum:
                               - Tokens
@@ -540,15 +540,15 @@ spec:
                       admissionReserve:
                         description: |-
                           AdmissionReserve charges an estimate of the request's cost to the bucket
-                          when the request is admitted, and only the remainder when its stream
-                          completes, so requests in flight count against the limit. Without it the
-                          whole cost is charged at stream completion.
+                          when the request is admitted, so requests in flight count against the
+                          limit. Without it the whole cost is charged at stream completion.
                         properties:
                           percent:
                             description: |-
-                              Percent of the usage estimate charged at admission. Above the actual cost,
-                              the difference stays charged; below it, requests in flight are partly
-                              uncounted.
+                              Percent of the usage estimate charged at admission. Below the actual
+                              cost, requests in flight are partly uncounted; above it, the difference
+                              is held until the reserve is released, or stays charged when reserves
+                              are not released.
                             format: int32
                             maximum: 100
                             minimum: 1
@@ -578,7 +578,7 @@ spec:
                         description: |-
                           CostMetric selects what this bucket counts. "Tokens" (the default) burns
                           the bucket down at stream-done by CostExpression (or the model-level
-                          fallback), less any AdmissionReserve already charged. "Requests" burns the bucket down by exactly 1 per request at
+                          fallback). "Requests" burns the bucket down by exactly 1 per request at
                           request time and adds no stream-done token charge.
                         enum:
                         - Tokens

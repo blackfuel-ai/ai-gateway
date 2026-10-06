@@ -1027,7 +1027,8 @@ func evalRuntimeRequestCost(rc *filterapi.RuntimeRequestCost, costs *metrics.Tok
 // Two-tier precedence: for each metadataKey, check route-scoped requestCosts first (matching RouteName == routeName).
 // If found, use it. Otherwise, fall back to globalRequestCosts. If neither exists, the key is not emitted.
 // A route-scoped cost on an admission reserve stores the cost minus the reserve charged at admission,
-// taken from admissionReserves, or 0 when the reserve covers it.
+// taken from admissionReserves, or 0 when the reserve covers it, and, when the reserve was charged,
+// the part of the cost the reserve covers under its settle key.
 func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string, admissionReserves map[string]uint64) (*structpb.Struct, error) {
 	metadata := make(map[string]*structpb.Value, len(requestCosts)+len(globalRequestCosts)+3)
 
@@ -1059,7 +1060,12 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 			return nil, err
 		}
 		if rc.AdmissionReserveMetadataKey != "" {
-			cost -= min(cost, admissionReserves[rc.AdmissionReserveMetadataKey])
+			reserve, reserved := admissionReserves[rc.AdmissionReserveMetadataKey]
+			settled := min(cost, reserve)
+			cost -= settled
+			if reserved && rc.AdmissionSettleMetadataKey != "" {
+				metadata[rc.AdmissionSettleMetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(settled)}}
+			}
 		}
 		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
 		populatedKeys[rc.MetadataKey] = struct{}{}

@@ -18,7 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	anthropicschema "github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
@@ -575,4 +577,39 @@ func TestUsageEstimate_NoEmitHeaderLeavesHeadersAlone(t *testing.T) {
 	require.Empty(t, usageEstimateSetHeaders(t, m))
 	require.Empty(t, m.RemoveHeaders)
 	require.NotContains(t, rp.requestHeaders, inputHeader)
+}
+
+// A token-counting endpoint consumes no model usage: its requests are neither
+// estimated nor reserved, and their usage is not recorded.
+func TestUsageEstimate_TokenCountingEndpoint(t *testing.T) {
+	ue, m, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateInput)
+	cfg.AdmissionReserves = []filterapi.AdmissionReserve{{MetadataKey: "quota_reserve_estimated_input_token_100", ReleaseMetadataKey: "quota_release_estimated_input_token_100", UsageEstimate: testEstimateInput.MetadataKey, Percent: 100}}
+	headers := map[string]string{usageEstimateTestHeader: "key-a"}
+	key := usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}
+
+	// The same key is warm for the endpoints that estimate.
+	rp := newUsageEstimateTestRouter(cfg, ue, headers)
+	_, u := admitAndDispatch(t, rp)
+	completeWithUsage(t, rp, u, 100, 0)
+	clock.nextPeriod()
+	requests := len(m.requests)
+
+	ct := &routerProcessor[anthropicschema.CountTokensRequest, anthropicschema.CountTokensResponse, struct{}, endpointspec.MessagesCountTokensEndpointSpec]{
+		config:         cfg,
+		requestHeaders: map[string]string{":path": "/v1/messages/count_tokens", usageEstimateTestHeader: "key-a"},
+		logger:         slog.Default(),
+		tracer:         tracingapi.NoopTracer[anthropicschema.CountTokensRequest, anthropicschema.CountTokensResponse, struct{}]{},
+	}
+	ct.setUsageEstimates(ue)
+	resp, err := ct.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: []byte(`{"model":"` + usageEstimateTestModel + `","messages":[]}`)})
+	require.NoError(t, err)
+	require.Nil(t, resp.DynamicMetadata)
+	require.Len(t, m.requests, requests)
+
+	var usage metrics.TokenUsage
+	usage.SetInputTokens(5000)
+	ct.recordUsageEstimateSuccess(t.Context(), &usage)
+	clock.nextPeriod()
+	require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
 }

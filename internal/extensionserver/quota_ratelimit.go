@@ -61,12 +61,15 @@ const (
 	// quotaRateLimitFilterName is the charge filter: its per-route
 	// RateLimitPerRoute config carries the admission reserve entries (evaluated
 	// at decode time, hits_addend from the quota_reserve metadata the router
-	// ext_proc writes) and the ApplyOnStreamDone entries (hits_addend from the
-	// quota_cost metadata). It sits after the request-time filter, so a request
-	// that filter refuses is never charged a reserve, and it is never enforced:
-	// a reserve entry carries no limit override, so the rate limit service
-	// judges it against the static limit, and that verdict must not refuse the
-	// request.
+	// ext_proc writes) and the ApplyOnStreamDone entries: the charges
+	// (hits_addend from the quota_cost metadata), the releases of the reserves
+	// (negative hits_addend from the quota_release metadata) and the
+	// settlements of the reserves on the serving counter (hits_addend from the
+	// quota_settle metadata). It sits after the request-time filter, so a
+	// request that filter refuses is never charged a reserve, and it is never
+	// enforced: a reserve entry carries no limit override, so the rate limit
+	// service judges it against the static limit, and that verdict must not
+	// refuse the request.
 	quotaRateLimitFilterName = "envoy.filters.http.ratelimit/ai-gateway-quota"
 	// quotaRequestRateLimitFilterName is the request-time enforcement filter: it
 	// evaluates the stage-1 route-level rate limits (which legally carry the
@@ -374,7 +377,7 @@ func (s *Server) patchRoutesWithQuotaRateLimits(
 			policies := s.policiesForRoute(ctx, route, quotaBackendPolicies)
 			modelInfo := s.resolveRouteModelInfo(ctx, route)
 
-			if err := enableQuotaRateLimitOnRoute(s.log, route, policies, modelInfo); err != nil {
+			if err := enableQuotaRateLimitOnRoute(s.log, route, policies, modelInfo, s.quotaReleaseAdmissionReserves); err != nil {
 				s.log.Error(err, "failed to enable quota rate limit on route", "route", route.Name)
 			}
 			patched = true
@@ -586,7 +589,7 @@ func (s *Server) resolveRouteModelInfo(ctx context.Context, route *routev3.Route
 // modelInfo provides the backend→ModelNameOverride mapping used for filtering (a policy's
 // target and modelName must match a backend override) and for request-time descriptors.
 // If nil, all models are included.
-func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies []aigv1a1.QuotaPolicy, modelInfo *routeModelInfo) error {
+func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies []aigv1a1.QuotaPolicy, modelInfo *routeModelInfo, releaseReserves bool) error {
 	var rateLimitActions []*routev3.RateLimit
 
 	// streamDoneActions collects the stream-done RateLimit entries built inline during
@@ -596,8 +599,31 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 	var streamDoneActions []*routev3.RateLimit
 	seenStreamDoneKeys := make(map[string]bool)
 	// reserveActions collects the admission reserve entries, charged by the
-	// charge filter at decode time.
-	var reserveActions []*routev3.RateLimit
+	// charge filter at decode time, and releaseActions the entries releasing
+	// them at stream done.
+	var reserveActions, releaseActions []*routev3.RateLimit
+	// settleActions collects the settlement entries of the stream-done entries
+	// whose bucket reserves for at least one model. Like the stream-done
+	// entries, they are shared across targets and models, and seenSettleKeys
+	// deduplicates them by the same key.
+	var settleActions []*routev3.RateLimit
+	seenSettleKeys := make(map[string]bool)
+	// addStreamDone adds the stream-done entry of a bucket under its
+	// deduplication key, and its settlement when the bucket reserves.
+	addStreamDone := func(dupKey string, actions []*routev3.RateLimit_Action, bucketKey string, reserves bool) {
+		if !seenStreamDoneKeys[dupKey] {
+			seenStreamDoneKeys[dupKey] = true
+			streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
+				Actions:           actions,
+				HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(bucketKey)),
+				ApplyOnStreamDone: true,
+			})
+		}
+		if releaseReserves && reserves && !seenSettleKeys[dupKey] {
+			seenSettleKeys[dupKey] = true
+			settleActions = append(settleActions, buildSettleEntry(actions, bucketKey))
+		}
+	}
 
 	var backendModels map[string][]string
 	if modelInfo != nil {
@@ -636,8 +662,11 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 				}
 			}
 
-			reserveActions = append(reserveActions,
-				buildAdmissionReserveEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)...)
+			reserves, releases := buildAdmissionReserveEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)
+			reserveActions = append(reserveActions, reserves...)
+			if releaseReserves {
+				releaseActions = append(releaseActions, releases...)
+			}
 
 			if len(pmq.Quota.BucketRules) == 0 && pmq.Quota.DefaultBucket != nil && pmq.Quota.DefaultBucket.Limit > 0 {
 				entries := buildSimpleModelEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)
@@ -646,13 +675,9 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 				// All simple entries are identical (metadata-only actions, same hits_addend).
 				// Requests-metric buckets burn down by the request-time +1 only.
 				const simpleStreamDoneKey = "_simple_"
-				if pmq.Quota.DefaultBucket.CostMetric != aigv1a1.QuotaCostMetricRequests && !seenStreamDoneKeys[simpleStreamDoneKey] {
-					seenStreamDoneKeys[simpleStreamDoneKey] = true
-					streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
-						Actions:           baseDescriptorActions(),
-						HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostDefaultBucketKey())),
-						ApplyOnStreamDone: true,
-					})
+				if pmq.Quota.DefaultBucket.CostMetric != aigv1a1.QuotaCostMetricRequests {
+					addStreamDone(simpleStreamDoneKey, baseDescriptorActions(),
+						translator.QuotaCostDefaultBucketKey(), quotaValueReserves(pmq.Quota.DefaultBucket))
 				}
 			} else if len(pmq.Quota.BucketRules) > 0 {
 				bucketActions := buildBucketRuleLimitEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)
@@ -674,36 +699,17 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 					if len(headers) == 0 {
 						dupKey += "|" + translator.BucketRuleDescriptorKey(rIdx, 0, "", "")
 					}
-					if !seenStreamDoneKeys[dupKey] {
-						seenStreamDoneKeys[dupKey] = true
-						clientActions := buildClientSelectorStreamDoneActions(rIdx, rule.ClientSelectors)
-						streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
-							Actions:           append(baseDescriptorActions(), clientActions...),
-							HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostRuleBucketKey(rIdx))),
-							ApplyOnStreamDone: true,
-						})
-					}
+					addStreamDone(dupKey,
+						append(baseDescriptorActions(), buildClientSelectorStreamDoneActions(rIdx, rule.ClientSelectors)...),
+						translator.QuotaCostRuleBucketKey(rIdx), quotaValueReserves(&rule.Quota))
 				}
 				// Default bucket: 3-level stream-done with GenericKey (always fires).
 				if pmq.Quota.DefaultBucket != nil && pmq.Quota.DefaultBucket.Limit > 0 &&
 					pmq.Quota.DefaultBucket.CostMetric != aigv1a1.QuotaCostMetricRequests {
 					defaultKey := translator.DefaultBucketDescriptorKey(len(pmq.Quota.BucketRules))
-					dupDefaultKey := defaultKey
-					if !seenStreamDoneKeys[dupDefaultKey] {
-						seenStreamDoneKeys[dupDefaultKey] = true
-						streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
-							Actions: append(baseDescriptorActions(), &routev3.RateLimit_Action{
-								ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
-									GenericKey: &routev3.RateLimit_Action_GenericKey{
-										DescriptorKey:   defaultKey,
-										DescriptorValue: defaultKey,
-									},
-								},
-							}),
-							HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(translator.QuotaCostDefaultBucketKey())),
-							ApplyOnStreamDone: true,
-						})
-					}
+					addStreamDone(defaultKey,
+						append(baseDescriptorActions(), defaultBucketAction(len(pmq.Quota.BucketRules))),
+						translator.QuotaCostDefaultBucketKey(), quotaValueReserves(pmq.Quota.DefaultBucket))
 				}
 			}
 		}
@@ -720,13 +726,11 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 	// floor(N/2) requests. Dedupe by full entry identity — same descriptors
 	// AND same limit override — the request-time counterpart of the
 	// stream-done seenStreamDoneKeys guard. Admission reserve entries are
-	// charged per request too, and are deduped the same way.
+	// charged per request too, and their releases taken back per request, so
+	// the charge filter entries are deduped the same way.
 	var err error
 	if rateLimitActions, err = dedupeRateLimits(rateLimitActions); err != nil {
 		return fmt.Errorf("failed to dedupe request-time rate limit entries: %w", err)
-	}
-	if reserveActions, err = dedupeRateLimits(reserveActions); err != nil {
-		return fmt.Errorf("failed to dedupe admission reserve rate limit entries: %w", err)
 	}
 
 	// Request-time entries go on the route itself: only route-level rate limits
@@ -751,10 +755,17 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 		routeAction.RateLimits = kept
 	}
 
-	// Admission reserve and stream-done charge entries go in the per-route
-	// config of the charge filter: only typed_per_filter_config entries support
-	// a hits_addend.
-	chargeActions := slices.Concat(reserveActions, streamDoneActions)
+	// Admission reserve, stream-done charge, settlement and release entries go
+	// in the per-route config of the charge filter: only typed_per_filter_config
+	// entries support a hits_addend. Envoy sends the stream-done entries in this
+	// order, so a counter is charged the remainder and the settlement before the
+	// reserve is taken off it: the release, floored at 0 by the rate limit
+	// service, is then rarely clipped on a counter of a window that has just
+	// started.
+	chargeActions, err := dedupeRateLimits(slices.Concat(reserveActions, streamDoneActions, settleActions, releaseActions))
+	if err != nil {
+		return fmt.Errorf("failed to dedupe charge rate limit entries: %w", err)
+	}
 	if len(chargeActions) > 0 {
 		perRouteConfig := &ratelimitfilterv3.RateLimitPerRoute{
 			Domain:     translator.QuotaDomain,
@@ -1090,60 +1101,102 @@ func buildBucketRuleLimitEntries(modelName, policyNamespace string, quota *aigv1
 }
 
 // buildAdmissionReserveEntries creates the admission reserve entries of a
-// model's quota: one per target backend and token bucket carrying an
-// AdmissionReserve. Each entry repeats the descriptor actions of the bucket's
-// enforcing request-time entry, so the reserve lands on the counter that entry
-// judges, and reads its hits_addend from the reserve's quota_reserve metadata,
-// which the router ext_proc writes at admission for every request. It carries no
-// limit override and no stage: the charge filter evaluates it from its per-route
+// model's quota, and the entries releasing them: one of each per target backend
+// and token bucket carrying an AdmissionReserve.
+//
+// Each reserve entry repeats the descriptor actions of the bucket's enforcing
+// request-time entry, so the reserve lands on the counter that entry judges. It
+// reads its hits_addend from the reserve's quota_reserve metadata, which the
+// router ext_proc writes at admission for every request. It carries no limit
+// override and no stage: the charge filter evaluates it from its per-route
 // config and never enforces it.
-func buildAdmissionReserveEntries(modelName, policyNamespace string, quota *aigv1a1.QuotaDefinition, targets []gwapiv1a2.LocalPolicyTargetReference, routeModelNames map[string][]string) []*routev3.RateLimit {
-	// reserveKey returns the reserve metadata key of a bucket, or "" when the
-	// bucket has no reserve.
-	reserveKey := func(v *aigv1a1.QuotaValue) string {
-		if v == nil || v.AdmissionReserve == nil || v.CostMetric == aigv1a1.QuotaCostMetricRequests {
-			return ""
+//
+// Each release entry builds the reserve entry's descriptors and takes the
+// quota_release metadata (the reserve) off that counter at stream done, as
+// negative hits. It reads a Distinct selector's value from the dynamic metadata
+// the quota Lua filter copies it to at request time, as the stream-done charges
+// do: by stream done, an upstream header mutation may have removed the header.
+func buildAdmissionReserveEntries(modelName, policyNamespace string, quota *aigv1a1.QuotaDefinition, targets []gwapiv1a2.LocalPolicyTargetReference, routeModelNames map[string][]string) (reserves, releases []*routev3.RateLimit) {
+	// reserveKeys returns the reserve and release metadata keys of a bucket, or
+	// "" when the bucket has no reserve.
+	reserveKeys := func(v *aigv1a1.QuotaValue) (reserve, release string) {
+		if !quotaValueReserves(v) {
+			return "", ""
 		}
-		return translator.QuotaReserveMetadataKey(v.AdmissionReserve.UsageEstimate, v.AdmissionReserve.Percent)
+		return translator.QuotaReserveMetadataKey(v.AdmissionReserve.UsageEstimate, v.AdmissionReserve.Percent),
+			translator.QuotaReleaseMetadataKey(v.AdmissionReserve.UsageEstimate, v.AdmissionReserve.Percent)
 	}
-	newEntry := func(actions []*routev3.RateLimit_Action, metadataKey string) *routev3.RateLimit {
-		return &routev3.RateLimit{Actions: actions, HitsAddend: quotaHitsAddend(metadataKey)}
+	add := func(reserveActions, releaseActions []*routev3.RateLimit_Action, reserveKey, releaseKey string) {
+		reserves = append(reserves, &routev3.RateLimit{
+			Actions:    reserveActions,
+			HitsAddend: quotaHitsAddend(reserveKey),
+		})
+		release := quotaHitsAddend(releaseKey)
+		release.IsNegativeHits = true
+		releases = append(releases, &routev3.RateLimit{
+			Actions:           releaseActions,
+			HitsAddend:        release,
+			ApplyOnStreamDone: true,
+		})
 	}
 
-	var defaultKey string
+	var defaultReserve, defaultRelease string
 	if quota.DefaultBucket != nil && quota.DefaultBucket.Limit > 0 {
-		defaultKey = reserveKey(quota.DefaultBucket)
+		defaultReserve, defaultRelease = reserveKeys(quota.DefaultBucket)
 	}
-	ruleKeys := make([]string, len(quota.BucketRules))
+	ruleReserves := make([]string, len(quota.BucketRules))
+	ruleReleases := make([]string, len(quota.BucketRules))
 	for rIdx := range quota.BucketRules {
-		ruleKeys[rIdx] = reserveKey(&quota.BucketRules[rIdx].Quota)
+		ruleReserves[rIdx], ruleReleases[rIdx] = reserveKeys(&quota.BucketRules[rIdx].Quota)
 	}
 
-	var entries []*routev3.RateLimit
 	for _, target := range targets {
 		resolvedModel := resolveModelName(string(target.Name), modelName, routeModelNames)
+		base := func() []*routev3.RateLimit_Action {
+			return requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
+		}
 		if len(quota.BucketRules) == 0 {
-			if defaultKey != "" {
-				entries = append(entries, newEntry(
-					requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel), defaultKey))
+			if defaultReserve != "" {
+				add(base(), base(), defaultReserve, defaultRelease)
 			}
 			continue
 		}
-		for rIdx, key := range ruleKeys {
+		for rIdx, key := range ruleReserves {
 			if key == "" {
 				continue
 			}
-			actions := requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
-			actions = append(actions, buildClientSelectorActions(rIdx, quota.BucketRules[rIdx].ClientSelectors)...)
-			entries = append(entries, newEntry(actions, key))
+			selectors := quota.BucketRules[rIdx].ClientSelectors
+			add(append(base(), buildClientSelectorActions(rIdx, selectors)...),
+				append(base(), buildClientSelectorReleaseActions(rIdx, selectors)...),
+				key, ruleReleases[rIdx])
 		}
-		if defaultKey != "" {
-			actions := requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
-			actions = append(actions, defaultBucketAction(len(quota.BucketRules)))
-			entries = append(entries, newEntry(actions, defaultKey))
+		if defaultReserve != "" {
+			add(append(base(), defaultBucketAction(len(quota.BucketRules))),
+				append(base(), defaultBucketAction(len(quota.BucketRules))),
+				defaultReserve, defaultRelease)
 		}
 	}
-	return entries
+	return reserves, releases
+}
+
+// quotaValueReserves reports whether a bucket charges an admission reserve.
+func quotaValueReserves(v *aigv1a1.QuotaValue) bool {
+	return v != nil && v.AdmissionReserve != nil && v.CostMetric != aigv1a1.QuotaCostMetricRequests
+}
+
+// buildSettleEntry creates the settlement entry of a reserving bucket's
+// stream-done entry: the same descriptor actions, charging the quota_settle
+// metadata (the part of the cost the reserve covers) to the serving counter at
+// stream done. With the remainder charged by the stream-done entry, the serving
+// counter is charged the whole cost at completion: the reserve is either
+// released by its release entry or, when the rate limit service did not charge
+// it, never charged.
+func buildSettleEntry(actions []*routev3.RateLimit_Action, bucketKey string) *routev3.RateLimit {
+	return &routev3.RateLimit{
+		Actions:           slices.Clone(actions),
+		HitsAddend:        quotaHitsAddend(translator.QuotaSettleMetadataKey(bucketKey)),
+		ApplyOnStreamDone: true,
+	}
 }
 
 // defaultBucketAction returns the GenericKey action that selects a model's
@@ -1247,6 +1300,23 @@ func buildClientSelectorActions(
 	return actions
 }
 
+// buildClientSelectorReleaseActions is like buildClientSelectorActions, but reads
+// a Distinct header's value from the dynamic metadata the quota Lua filter
+// copies it to at request time, so that the release lands on the per-value
+// counter the reserve was charged to.
+func buildClientSelectorReleaseActions(
+	ruleIndex int, selectors []egv1a1.RateLimitSelectCondition,
+) []*routev3.RateLimit_Action {
+	actions := buildClientSelectorActions(ruleIndex, selectors)
+	for i, header := range flattenAndSortClientSelectorHeaders(selectors) {
+		if header.Type != nil && *header.Type == egv1a1.HeaderMatchDistinct {
+			actions[i] = distinctHeaderMetadataAction(
+				translator.BucketRuleDescriptorKey(ruleIndex, i, header.Name, headerMatchKeyValue(header)), header.Name)
+		}
+	}
+	return actions
+}
+
 // buildClientSelectorStreamDoneActions is like buildClientSelectorActions but
 // always uses ExpectMatch=true on HeaderValueMatch actions. Distinct headers fall
 // back to GenericKey because per-value bucketing is not applicable at stream-done time.
@@ -1306,21 +1376,7 @@ func buildStreamDoneHeaderMatchAction(
 		// per-value counter. When the metadata is absent (the request did not
 		// carry the header), the descriptor is not generated — matching the
 		// request-time entry, which skips too.
-		return &routev3.RateLimit_Action{
-			ActionSpecifier: &routev3.RateLimit_Action_Metadata{
-				Metadata: &routev3.RateLimit_Action_MetaData{
-					DescriptorKey: descriptorKey,
-					MetadataKey: &metadatav3.MetadataKey{
-						Key: aigv1b1.AIGatewayFilterMetadataNamespace,
-						Path: []*metadatav3.MetadataKey_PathSegment{{
-							Segment: &metadatav3.MetadataKey_PathSegment_Key{
-								Key: quotaDistinctHeaderMetadataKey(header.Name),
-							},
-						}},
-					},
-				},
-			},
-		}
+		return distinctHeaderMetadataAction(descriptorKey, header.Name)
 	}
 
 	stringMatcher := buildStringMatcher(header)
@@ -1337,6 +1393,27 @@ func buildStreamDoneHeaderMatchAction(
 				DescriptorValue: descriptorKey,
 				ExpectMatch:     &wrapperspb.BoolValue{Value: true},
 				Headers:         []*routev3.HeaderMatcher{headerMatcher},
+			},
+		},
+	}
+}
+
+// distinctHeaderMetadataAction returns the action reading a Distinct selector
+// header's request value from the dynamic metadata the quota Lua filter copies
+// it to, under descriptorKey.
+func distinctHeaderMetadataAction(descriptorKey, headerName string) *routev3.RateLimit_Action {
+	return &routev3.RateLimit_Action{
+		ActionSpecifier: &routev3.RateLimit_Action_Metadata{
+			Metadata: &routev3.RateLimit_Action_MetaData{
+				DescriptorKey: descriptorKey,
+				MetadataKey: &metadatav3.MetadataKey{
+					Key: aigv1b1.AIGatewayFilterMetadataNamespace,
+					Path: []*metadatav3.MetadataKey_PathSegment{{
+						Segment: &metadatav3.MetadataKey_PathSegment_Key{
+							Key: quotaDistinctHeaderMetadataKey(headerName),
+						},
+					}},
+				},
 			},
 		},
 	}
