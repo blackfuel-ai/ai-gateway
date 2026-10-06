@@ -139,8 +139,9 @@ func admitAndDispatch(t *testing.T, rp *chatCompletionProcessorRouterFilter) (*e
 	return resp, u
 }
 
-// completeWithUsage drives a successful end-of-stream response through the router.
-func completeWithUsage(t *testing.T, rp *chatCompletionProcessorRouterFilter, u *chatCompletionProcessorUpstreamFilter, input, cached uint32) {
+// completeWithUsage drives a successful end-of-stream response through the router
+// and returns the router's response.
+func completeWithUsage(t *testing.T, rp *chatCompletionProcessorRouterFilter, u *chatCompletionProcessorUpstreamFilter, input, cached uint32) *extprocv3.ProcessingResponse {
 	inBody := &extprocv3.HttpBody{Body: []byte("some-body"), EndOfStream: true}
 	mt := &mockTranslator{t: t, expResponseBody: inBody}
 	mt.retUsedToken.SetInputTokens(input)
@@ -148,8 +149,9 @@ func completeWithUsage(t *testing.T, rp *chatCompletionProcessorRouterFilter, u 
 	mt.retUsedToken.SetTotalTokens(input)
 	u.translator = mt
 	u.responseHeaders = map[string]string{":status": "200"}
-	_, err := rp.ProcessResponseBody(t.Context(), inBody)
+	resp, err := rp.ProcessResponseBody(t.Context(), inBody)
 	require.NoError(t, err)
+	return resp
 }
 
 func usageEstimateFields(t *testing.T, resp *extprocv3.ProcessingResponse) map[string]*structpb.Value {

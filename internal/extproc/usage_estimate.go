@@ -8,6 +8,7 @@ package extproc
 import (
 	"context"
 	"log/slog"
+	"math"
 	"time"
 
 	"google.golang.org/protobuf/types/known/structpb"
@@ -47,6 +48,9 @@ type usageEstimateState struct {
 	keys map[usageestimate.Key]struct{}
 	// admitted are the estimates computed at admission, for the ratio metric.
 	admitted []admittedUsageEstimate
+	// reserves are the admission reserves charged at admission, by metadata key. The
+	// quota costs on a reserve are charged the remainder at completion.
+	reserves map[string]uint64
 }
 
 type admittedUsageEstimate struct {
@@ -110,12 +114,38 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 			st.shared.metrics.RecordRequest(ctx, e.MetadataKey, r.originalModel, outcome)
 		}
 	}
+	r.reserveAdmission(fields)
 	if len(fields) == 0 {
 		return nil
 	}
 	return &structpb.Struct{Fields: map[string]*structpb.Value{
 		internalapi.AIGatewayFilterMetadataNamespace: structpb.NewStructValue(&structpb.Struct{Fields: fields}),
 	}}
+}
+
+// reserveAdmission computes every admission reserve of the configuration into
+// fields and the request state. The route is not selected yet, so all of them are
+// computed; each charge entry reads its own. A reserve is its percent of the usage
+// estimate, rounded to the nearest integer, and 0 when the request has no estimate:
+// every reserve key is written, so that its hits_addend always resolves.
+func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) reserveAdmission(fields map[string]*structpb.Value) {
+	if len(r.config.AdmissionReserves) == 0 {
+		return
+	}
+	st := &r.usageEstimate
+	st.reserves = make(map[string]uint64, len(r.config.AdmissionReserves))
+	for i := range r.config.AdmissionReserves {
+		res := &r.config.AdmissionReserves[i]
+		var reserve uint64
+		for _, a := range st.admitted {
+			if a.estimate.MetadataKey == res.UsageEstimate {
+				reserve = uint64(math.Round(a.value * float64(res.Percent) / 100))
+				break
+			}
+		}
+		st.reserves[res.MetadataKey] = reserve
+		fields[res.MetadataKey] = structpb.NewNumberValue(float64(reserve))
+	}
 }
 
 // recordUsageEstimateSuccess records the usage of a successful response, and the
