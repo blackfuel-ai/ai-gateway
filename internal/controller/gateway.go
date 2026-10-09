@@ -808,8 +808,8 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 			// computes and stores them in metadata for the HitsAddend to read.
 			c.injectQuotaPolicyCostExpressions(ctx, aiGatewayRoute, ec, injectedQuotaCosts, routeName)
 
-			for _, fc := range dedup {
-				ec.LLMRequestCosts = append(ec.LLMRequestCosts, fc)
+			for key := range dedup {
+				ec.LLMRequestCosts = append(ec.LLMRequestCosts, dedup[key])
 			}
 		}
 	}
@@ -1331,9 +1331,10 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 					continue
 				}
 				metadataKey := translator.QuotaCostMetadataKey(bucket.key)
-				var reserveKey string
+				var reserveKey, settleKey string
 				if bucket.reserve != nil {
 					reserveKey = bucket.reserve.MetadataKey
+					settleKey = translator.QuotaSettleMetadataKey(bucket.key)
 					if !slices.ContainsFunc(ec.AdmissionReserves, func(r filterapi.AdmissionReserve) bool { return r.MetadataKey == reserveKey }) {
 						ec.AdmissionReserves = append(ec.AdmissionReserves, *bucket.reserve)
 					}
@@ -1353,6 +1354,7 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 						Model:       *pmq.ModelName,
 
 						AdmissionReserveMetadataKey: reserveKey,
+						AdmissionSettleMetadataKey:  settleKey,
 					})
 					injectedQuotaCosts[dedupeKey] = struct{}{}
 				}
@@ -1389,9 +1391,10 @@ func quotaCostBuckets(quota *aigv1a1.QuotaDefinition) []quotaCostBucket {
 			return nil
 		}
 		return &filterapi.AdmissionReserve{
-			MetadataKey:   translator.QuotaReserveMetadataKey(r.UsageEstimate, r.Percent),
-			UsageEstimate: r.UsageEstimate,
-			Percent:       r.Percent,
+			MetadataKey:        translator.QuotaReserveMetadataKey(r.UsageEstimate, r.Percent),
+			ReleaseMetadataKey: translator.QuotaReleaseMetadataKey(r.UsageEstimate, r.Percent),
+			UsageEstimate:      r.UsageEstimate,
+			Percent:            r.Percent,
 		}
 	}
 	var buckets []quotaCostBucket

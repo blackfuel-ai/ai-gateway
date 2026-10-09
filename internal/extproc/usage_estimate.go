@@ -56,7 +56,8 @@ type usageEstimateState struct {
 	// admitted are the estimates computed at admission, for the ratio metric.
 	admitted []admittedUsageEstimate
 	// reserves are the admission reserves charged at admission, by metadata key. The
-	// quota costs on a reserve are charged the remainder at completion.
+	// quota costs on a reserve are charged the remainder at completion, and settle
+	// the part the reserve covers.
 	reserves map[string]uint64
 }
 
@@ -168,8 +169,10 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateOne(ct
 // computed; each charge entry reads its own. A reserve is its percent of the usage
 // estimate, rounded to the nearest integer and capped at maxHitsAddend, and 0 when
 // the request has no estimate: every reserve key is written, so that its
-// hits_addend always resolves. A request to an endpoint that consumes no model
-// usage reserves nothing and writes no reserve key.
+// hits_addend always resolves. Each reserve is also written under its release key,
+// the amount the release entries take back at stream end from every counter the
+// reserve was charged to. A request to an endpoint that consumes no model usage
+// reserves nothing and writes no reserve or release key.
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) reserveAdmission(fields map[string]*structpb.Value) {
 	if len(r.config.AdmissionReserves) == 0 || !r.eh.EstimatesUsage() {
 		return
@@ -187,6 +190,9 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) reserveAdmissi
 		}
 		st.reserves[res.MetadataKey] = reserve
 		fields[res.MetadataKey] = structpb.NewNumberValue(float64(reserve))
+		if res.ReleaseMetadataKey != "" {
+			fields[res.ReleaseMetadataKey] = structpb.NewNumberValue(float64(reserve))
+		}
 	}
 }
 

@@ -117,6 +117,23 @@ func QuotaReserveMetadataKey(usageEstimate string, percent uint32) string {
 	return fmt.Sprintf("quota_reserve_%s_%d", usageEstimate, percent)
 }
 
+// QuotaReleaseMetadataKey derives the dynamic metadata key under which ext_proc
+// stores, at admission, the amount released at stream end from every counter a
+// reserve was charged to: the reserve stored under the QuotaReserveMetadataKey of
+// the same usage estimate and percent.
+func QuotaReleaseMetadataKey(usageEstimate string, percent uint32) string {
+	return fmt.Sprintf("quota_release_%s_%d", usageEstimate, percent)
+}
+
+// QuotaSettleMetadataKey derives the dynamic metadata key under which ext_proc
+// stores, with the cost, the part of one reserving bucket's cost its reserve
+// covers: the cost charged to the serving counter on top of the remainder stored
+// under QuotaCostMetadataKey, once the reserve is released. Keyed by bucket only,
+// like QuotaCostMetadataKey.
+func QuotaSettleMetadataKey(bucketKey string) string {
+	return "quota_settle_" + bucketKey
+}
+
 // BuildRateLimitConfigs translates a QuotaPolicy and its resolved target
 // AIServiceBackends into a single rate limit service configuration.
 // All backends share the same domain, distinguished by backend_name descriptors.

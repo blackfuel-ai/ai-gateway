@@ -551,7 +551,7 @@ func newMetadataForwardingServer(t *testing.T) (*Server, client.Client) {
 	} {
 		require.NoError(t, c.Create(t.Context(), obj))
 	}
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 	return s, c
 }
@@ -595,7 +595,7 @@ func Test_metadataForwardingNamespacesForSnapshot(t *testing.T) {
 	t.Run("an unidentifiable snapshot forwards nothing and says so", func(t *testing.T) {
 		var buf bytes.Buffer
 		logged, err := New(newFakeClient(), logr.FromSlogHandler(slog.NewTextHandler(&buf, nil)), udsPath,
-			false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+			false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 		require.NoError(t, err)
 
 		got, err := logged.metadataForwardingNamespacesForSnapshot(t.Context(),
@@ -673,7 +673,7 @@ func Test_maybeModifyCluster_rebuildsOwnFiltersOnExistingChain(t *testing.T) {
 			},
 		},
 	}))
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	// A chain as an earlier pass left it: our two filters, no forwarding namespaces.
@@ -744,7 +744,7 @@ func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	// Envoy Gateway names mirror clusters with 1-based indexing — the first
@@ -825,7 +825,7 @@ func Test_maybeModifyCluster_mirrorIndexIsOneBased(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -876,7 +876,7 @@ func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
 	// Malformed mirror suffixes (non-numeric indices) should log and bail without
 	// returning an error so a bad cluster name doesn't tear down the whole xDS push.
 	c := newFakeClient()
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 	for _, name := range []string{
 		"httproute/ns/myroute/rule/abc-mirror-0",
@@ -926,7 +926,7 @@ func Test_maybeModifyCluster_inferencePoolMirror(t *testing.T) {
 		},
 	}))
 
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	mirrorCluster := &clusterv3.Cluster{
@@ -1001,7 +1001,7 @@ func Test_maybeModifyCluster_inferencePoolMirror(t *testing.T) {
 // EPP filter (all before the router), and per-route config enables the mirror filters only on
 // the mirror rule's route.
 func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
-	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	primaryPool := &gwaiev1.InferencePool{
@@ -1114,7 +1114,7 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 // Test_patchListenerWithInferencePoolFilters_mirrorPoolWithoutEPP: a mirror pool without an
 // endpoint picker gets neither an EPP filter nor the copy filter.
 func Test_patchListenerWithInferencePoolFilters_mirrorPoolWithoutEPP(t *testing.T) {
-	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	hcmAny, err := toAny(&httpconnectionmanagerv3.HttpConnectionManager{
@@ -1167,7 +1167,7 @@ func Test_buildMirrorEndpointCopyFilter_copiesWithoutRemovingSource(t *testing.T
 // EPP filter — the fail-open mirror variant. The filter name is keyed by pool identity, so
 // without cross-list dedup the chain would carry two same-named filters.
 func Test_patchListenerWithInferencePoolFilters_sharedPool(t *testing.T) {
-	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	sharedPool := &gwaiev1.InferencePool{

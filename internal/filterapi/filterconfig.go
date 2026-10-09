@@ -71,10 +71,14 @@ type Config struct {
 // AdmissionReserve is the share of a usage estimate a quota bucket is charged when a
 // request is admitted. Its value, Percent of the estimate rounded to the nearest
 // integer and 0 when the request has no estimate, is stored as dynamic metadata
-// under MetadataKey, which the rate limit charge entries read.
+// under MetadataKey, which the rate limit charge entries read, and under
+// ReleaseMetadataKey, which the rate limit release entries read.
 type AdmissionReserve struct {
 	// MetadataKey is the key of the dynamic metadata storing the reserve.
 	MetadataKey string `json:"metadataKey"`
+	// ReleaseMetadataKey is the key of the dynamic metadata storing the amount
+	// released at stream end from every counter the reserve was charged to.
+	ReleaseMetadataKey string `json:"releaseMetadataKey,omitempty"`
 	// UsageEstimate is the MetadataKey of the UsageEstimate the reserve is computed from.
 	UsageEstimate string `json:"usageEstimate"`
 	// Percent of the usage estimate reserved, between 1 and 100.
@@ -156,6 +160,10 @@ type LLMRequestCost struct {
 	// AdmissionReserve. The cost stored is then the computed cost minus the reserve,
 	// or 0 when the reserve covers it.
 	AdmissionReserveMetadataKey string `json:"admissionReserveMetadataKey,omitempty"`
+	// AdmissionSettleMetadataKey is set exclusively by the QuotaPolicy controller,
+	// on the cost of a bucket that reserves at admission: the key of the dynamic
+	// metadata storing the part of the computed cost the reserve covers.
+	AdmissionSettleMetadataKey string `json:"admissionSettleMetadataKey,omitempty"`
 }
 
 // LLMRequestCostType specifies the kind of the request cost calculation.

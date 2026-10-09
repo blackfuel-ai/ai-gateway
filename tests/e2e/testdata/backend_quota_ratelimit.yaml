@@ -103,6 +103,14 @@ spec:
       backendRefs:
         - name: envoy-ai-gateway-quota-ratelimit-testupstream
           modelNameOverride: quota-reserve-model
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: quota-release-model
+      backendRefs:
+        - name: envoy-ai-gateway-quota-ratelimit-testupstream
+          modelNameOverride: quota-release-model
   # The following metadata keys are used to store the costs from the LLM request.
   llmRequestCosts:
     - metadataKey: llm_input_token
@@ -116,6 +124,21 @@ apiVersion: aigateway.envoyproxy.io/v1beta1
 kind: AIServiceBackend
 metadata:
   name: envoy-ai-gateway-quota-ratelimit-testupstream
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    name: envoy-ai-gateway-quota-ratelimit-testupstream
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+# A second AIServiceBackend no route serves, targeted with the first by the
+# release QuotaPolicy: the admission reserve charges both, and releases both.
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata:
+  name: envoy-ai-gateway-quota-ratelimit-testupstream-b
   namespace: default
 spec:
   schema:
@@ -184,7 +207,33 @@ spec:
         defaultBucket:
           # Fresh input tokens per hour. The admission reserve charges the
           # reserve_fresh_input_token estimate of the GatewayConfig when the
-          # request is admitted, and the remainder at completion.
+          # request is admitted, and releases it when the stream ends.
+          limit: 100000
+          duration: "1h"
+          costExpression: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+          admissionReserve:
+            usageEstimate: reserve_fresh_input_token
+            percent: 100
+---
+# quota-release-model reserves on both targets, of which only the first serves.
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: QuotaPolicy
+metadata:
+  name: envoy-ai-gateway-quota-ratelimit-release-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: envoy-ai-gateway-quota-ratelimit-testupstream
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: envoy-ai-gateway-quota-ratelimit-testupstream-b
+  perModelQuotas:
+    - modelName: "quota-release-model"
+      quota:
+        mode: Shared
+        defaultBucket:
           limit: 100000
           duration: "1h"
           costExpression: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
@@ -264,7 +313,9 @@ spec:
         - name: ratelimit
           command:
             - /bin/ratelimit
-          image: docker.io/envoyproxy/ratelimit:1631871c
+          # A release of the admission reserves is sent as negative hits, which
+          # envoyproxy/ratelimit applies as a decrement floored at 0.
+          image: docker.io/envoyproxy/ratelimit:f4e76690
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8081

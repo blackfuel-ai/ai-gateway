@@ -2297,6 +2297,38 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		require.Equal(t, 100.0, inner.Fields["not_reserved"].GetNumberValue())
 	})
 
+	t.Run("cost on an admission reserve settles the part the reserve covers", func(t *testing.T) {
+		costs := &metrics.TokenUsage{}
+		costs.SetInputTokens(100)
+		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
+		newCost := func(key, reserveKey, settleKey string) filterapi.RuntimeRequestCost {
+			return filterapi.RuntimeRequestCost{LLMRequestCost: &filterapi.LLMRequestCost{
+				MetadataKey: key, RouteName: "ns/route", Type: filterapi.LLMRequestCostTypeInputToken,
+				AdmissionReserveMetadataKey: reserveKey, AdmissionSettleMetadataKey: settleKey,
+			}}
+		}
+		requestCosts := []filterapi.RuntimeRequestCost{
+			newCost("partly_reserved", "reserve_a", "settle_a"),
+			newCost("over_reserved", "reserve_b", "settle_b"),
+			newCost("not_reserved", "", ""),
+		}
+		md, err := buildDynamicMetadata(nil, requestCosts, costs, headers, "", "ns/route", "",
+			map[string]uint64{"reserve_a": 30, "reserve_b": 150})
+		require.NoError(t, err)
+		inner := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.Equal(t, 30.0, inner.Fields["settle_a"].GetNumberValue())
+		require.Equal(t, 100.0, inner.Fields["settle_b"].GetNumberValue())
+
+		// A request that reserved nothing at admission, such as one to a
+		// token-counting endpoint, has nothing to settle.
+		md, err = buildDynamicMetadata(nil, requestCosts, costs, headers, "", "ns/route", "", nil)
+		require.NoError(t, err)
+		inner = md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.Equal(t, 100.0, inner.Fields["partly_reserved"].GetNumberValue())
+		require.NotContains(t, inner.Fields, "settle_a")
+		require.NotContains(t, inner.Fields, "settle_b")
+	})
+
 	t.Run("sets model_name_override from request headers", func(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}

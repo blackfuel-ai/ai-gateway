@@ -87,7 +87,7 @@ func newServerWithForwardProxy(t *testing.T, proxyAddr string) *Server {
 		gc.Spec.ForwardProxy = &aigv1b1.GatewayConfigForwardProxy{Address: proxyAddr}
 	}
 	require.NoError(t, c.Create(t.Context(), gc))
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 	return s
 }
@@ -253,7 +253,7 @@ func serverWithObjects(t *testing.T, objs ...client.Object) *Server {
 	if len(objs) > 0 {
 		b = b.WithObjects(objs...)
 	}
-	s, err := New(b.Build(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(b.Build(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 	return s
 }
@@ -361,7 +361,7 @@ func TestResolveForwardProxyAddr_getError(t *testing.T) {
 				return errors.New("boom")
 			},
 		}).Build()
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	_, err = s.resolveForwardProxyAddr(t.Context(), routeWithParents(gwapiv1.ParentReference{Name: "eg-gateway"}))

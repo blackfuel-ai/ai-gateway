@@ -584,7 +584,7 @@ func TestUsageEstimate_NoEmitHeaderLeavesHeadersAlone(t *testing.T) {
 func TestUsageEstimate_TokenCountingEndpoint(t *testing.T) {
 	ue, m, clock := newTestUsageEstimates()
 	cfg := newUsageEstimateTestConfig(t, testEstimateInput)
-	cfg.AdmissionReserves = []filterapi.AdmissionReserve{{MetadataKey: "quota_reserve_estimated_input_token_100", UsageEstimate: testEstimateInput.MetadataKey, Percent: 100}}
+	cfg.AdmissionReserves = []filterapi.AdmissionReserve{{MetadataKey: "quota_reserve_estimated_input_token_100", ReleaseMetadataKey: "quota_release_estimated_input_token_100", UsageEstimate: testEstimateInput.MetadataKey, Percent: 100}}
 	headers := map[string]string{usageEstimateTestHeader: "key-a"}
 	key := usageestimate.Key{Header: usageEstimateTestHeader, Value: "key-a", Model: usageEstimateTestModel}
 

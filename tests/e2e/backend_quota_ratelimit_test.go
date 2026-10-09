@@ -179,60 +179,104 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		makeRequest("quota-org-model", 5, http.StatusOK, http.Header{"x-org-id": []string{"org-burndown-b"}})
 	})
 
+	// sendWithUsage sends a chat completion request for model whose fake
+	// response, with status, reports promptTokens input tokens of which
+	// cachedTokens were served from the prefix cache.
+	sendWithUsage := func(model string, promptTokens, cachedTokens, status int, headers http.Header) {
+		fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+		defer fwd.Kill()
+		httpClient := &http.Client{Timeout: 30 * time.Second}
+		var resp *http.Response
+		require.Eventually(t, func() bool {
+			req := newChatRequestWithUsage(t, fwd.Address(), model, promptTokens, cachedTokens, headers)
+			if status != http.StatusOK {
+				req.Header.Set(testupstreamlib.ResponseStatusKey, strconv.Itoa(status))
+			}
+			r, err := httpClient.Do(req) //nolint:bodyclose // closed below or on the retry path.
+			if err != nil {
+				t.Logf("request failed, retrying: %v", err)
+				return false
+			}
+			if r.StatusCode == http.StatusNotFound {
+				_ = r.Body.Close()
+				return false
+			}
+			resp = r
+			return true
+		}, 30*time.Second, 500*time.Millisecond, "request kept failing or returning 404")
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, status, resp.StatusCode, "body: %s", string(body))
+	}
+
 	// Admission reserve on "quota-reserve-model": its bucket counts fresh input
 	// tokens (input minus cached), and a request is charged, when admitted, the
 	// fresh input its x-test-client's responses of the last completed 5s usage
-	// estimate period predict (percent 100), then the remainder at completion.
-	// Every request also takes the +1 the request-time entry charges.
+	// estimate period predict (percent 100). When its stream ends, the reserve
+	// is released and a successful response charges its actual fresh input, so
+	// every request ends at its actual fresh input tokens plus the +1 the
+	// request-time entry charges, whatever the reserve.
 	t.Run("admission reserve", func(t *testing.T) {
 		client := http.Header{"x-test-client": []string{"client-reserve-a"}}
-		send := func(promptTokens, cachedTokens int, headers http.Header) {
-			fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
-			defer fwd.Kill()
-			httpClient := &http.Client{Timeout: 30 * time.Second}
-			var resp *http.Response
-			require.Eventually(t, func() bool {
-				req := newChatRequestWithUsage(t, fwd.Address(), "quota-reserve-model", promptTokens, cachedTokens, headers)
-				r, err := httpClient.Do(req) //nolint:bodyclose // closed below or on the retry path.
-				if err != nil {
-					t.Logf("request failed, retrying: %v", err)
-					return false
-				}
-				if r.StatusCode == http.StatusNotFound {
-					_ = r.Body.Close()
-					return false
-				}
-				resp = r
-				return true
-			}, 30*time.Second, 500*time.Millisecond, "request kept failing or returning 404")
-			defer func() { _ = resp.Body.Close() }()
-			body, err := io.ReadAll(resp.Body)
-			require.NoError(t, err)
-			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", string(body))
+		send := func(promptTokens, cachedTokens, status int, headers http.Header) {
+			sendWithUsage("quota-reserve-model", promptTokens, cachedTokens, status, headers)
 		}
 
-		// A client with no previous response reserves nothing: +1 at admission,
-		// 1,000 - 800 = 200 fresh at completion.
-		send(1000, 800, client)
+		// A client with no previous response reserves nothing: 1,000 - 800 =
+		// 200 fresh.
+		send(1000, 800, http.StatusOK, client)
 		requireQuotaUsage(t, "quota-reserve-model", 201)
 
 		// The estimate draws on completed periods only.
 		waitForNextUsageEstimatePeriod(t)
 
-		// The same request again: the reserve is the predicted 200, charged at
-		// admission, and the completion charges the remaining 0. The bucket ends
-		// where it would without a reserve.
-		send(1000, 800, client)
+		// The same request again: the reserve is the predicted 200, released
+		// once the actual 200 is charged.
+		send(1000, 800, http.StatusOK, client)
 		requireQuotaUsage(t, "quota-reserve-model", 402)
 
-		// A response fully served from cache costs nothing, but the 200 reserved
-		// at admission stays charged: a reserve is never refunded.
-		send(1000, 1000, client)
-		requireQuotaUsage(t, "quota-reserve-model", 603)
+		// A response fully served from cache costs nothing: the reserve is
+		// released and nothing is charged.
+		send(1000, 1000, http.StatusOK, client)
+		requireQuotaUsage(t, "quota-reserve-model", 403)
+
+		// A reserve above the actual cost: only the actual 100 stays charged.
+		send(1000, 900, http.StatusOK, client)
+		requireQuotaUsage(t, "quota-reserve-model", 504)
+
+		// An upstream error charges no tokens: the reserve is released.
+		send(1000, 800, http.StatusInternalServerError, client)
+		requireQuotaUsage(t, "quota-reserve-model", 505)
 
 		// Another client has no history of its own and reserves nothing.
-		send(1000, 800, http.Header{"x-test-client": []string{"client-reserve-b"}})
-		requireQuotaUsage(t, "quota-reserve-model", 804)
+		send(1000, 800, http.StatusOK, http.Header{"x-test-client": []string{"client-reserve-b"}})
+		requireQuotaUsage(t, "quota-reserve-model", 706)
+	})
+
+	// Admission reserve on "quota-release-model", whose QuotaPolicy targets two
+	// backends of which only the first serves the route: the reserve is charged
+	// to both and released from both, so the serving backend ends at the actual
+	// fresh input tokens plus the request-time +1, and the other at the
+	// request-time +1 alone.
+	t.Run("admission reserve released from every target", func(t *testing.T) {
+		const (
+			model   = "quota-release-model"
+			serving = "default/envoy-ai-gateway-quota-ratelimit-testupstream"
+			other   = "default/envoy-ai-gateway-quota-ratelimit-testupstream-b"
+		)
+		client := http.Header{"x-test-client": []string{"client-release-a"}}
+
+		sendWithUsage(model, 1000, 800, http.StatusOK, client)
+		requireBackendQuotaUsage(t, serving, model, 201)
+		requireBackendQuotaUsage(t, other, model, 1)
+
+		waitForNextUsageEstimatePeriod(t)
+
+		// The reserve is the predicted 200, over the actual 100.
+		sendWithUsage(model, 1000, 900, http.StatusOK, client)
+		requireBackendQuotaUsage(t, serving, model, 302)
+		requireBackendQuotaUsage(t, other, model, 2)
 	})
 }
 
@@ -308,6 +352,23 @@ func getQuotaUsage(t *testing.T, modelName string) (int, bool) {
 	n, err := strconv.Atoi(val)
 	require.NoError(t, err, "failed to parse quota counter value: %q", val)
 	return n, true
+}
+
+// requireBackendQuotaUsage polls Redis until the quota counter of the given
+// backend ("namespace/name") and model reaches the expected value.
+func requireBackendQuotaUsage(t *testing.T, backend, modelName string, expected int) {
+	t.Helper()
+	pattern := fmt.Sprintf("ai-gateway-quota_backend_name_%s_model_name_override_%s_*", backend, modelName)
+	require.Eventually(t, func() bool {
+		keys := redisExec(t, "KEYS", pattern)
+		if keys == "" {
+			return false
+		}
+		val := redisExec(t, "GET", strings.TrimSpace(strings.Split(keys, "\n")[0]))
+		n, err := strconv.Atoi(val)
+		return err == nil && n == expected
+	}, 30*time.Second, 500*time.Millisecond,
+		"quota counter of backend %q for model %q did not reach expected value %d", backend, modelName, expected)
 }
 
 // requireQuotaUsage polls Redis until the quota counter for the given model reaches
