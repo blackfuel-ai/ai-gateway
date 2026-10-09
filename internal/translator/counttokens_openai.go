@@ -94,10 +94,9 @@ func (t *countTokensToOpenAITokenizeTranslator) RequestBody(_ []byte, body *anth
 	}
 
 	// Only :path is rewritten. The original-path headers set by the router phase
-	// keep the client's original /v1/messages/count_tokens path: the upstream
-	// filter selects its processor from x-ai-eg-original-path on a retry (see
-	// internal/extproc/server.go processorForPath), and access logs use them to
-	// report what the client requested.
+	// keep the client's original /v1/messages/count_tokens path: processor
+	// selection never reads them (see internal/extproc/server.go), and access
+	// logs use them to report what the client requested.
 	newHeaders = []internalapi.Header{
 		{pathHeaderName, openAITokenizePath},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},

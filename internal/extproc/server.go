@@ -58,9 +58,21 @@ type Server struct {
 	enableRedaction               bool
 	config                        *filterapi.RuntimeConfig
 	processorFactories            map[string]ProcessorFactory
-	routerProcessorsPerReqID      map[string]Processor
+	routerProcessorsPerReqID      map[string]routerEntry
 	routerProcessorsPerReqIDMutex sync.RWMutex
 	uuidFn                        func() string
+}
+
+// routerEntry is the per-request state kept by the router filter for the upstream filter(s).
+type routerEntry struct {
+	// processor is the router-level processor for the request.
+	processor Processor
+	// factory is the factory the router-level processor was created from. Upstream-level
+	// processors for the same request are created from this factory so they are always the
+	// same (generic) type as the router processor, whatever the request path looks like
+	// by the time the upstream filter runs (e.g. after a translator rewrote it and Envoy
+	// retried the leg with the mutated headers).
+	factory ProcessorFactory
 }
 
 // NewServer creates a new external processor server.
@@ -71,7 +83,7 @@ func NewServer(logger *slog.Logger, enableRedaction bool) (*Server, error) {
 		debugLogEnabled:          debugLogEnabled,
 		enableRedaction:          enableRedaction,
 		processorFactories:       make(map[string]ProcessorFactory),
-		routerProcessorsPerReqID: make(map[string]Processor),
+		routerProcessorsPerReqID: make(map[string]routerEntry),
 		uuidFn:                   uuid.NewString,
 	}
 	return srv, nil
@@ -95,29 +107,25 @@ func (s *Server) Register(path string, newProcessor ProcessorFactory) {
 
 var errNoProcessor = errors.New("no processor registered for the given path")
 
-// processorForPath returns the processor for the given path.
-// Only exact path matching is supported currently.
-func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFilter bool, logger *slog.Logger) (Processor, error) {
-	pathHeader := ":path"
-	if isUpstreamFilter {
-		pathHeader = originalPathHeader
-	}
-	path := requestHeaders[pathHeader]
-
+// factoryForPath returns the processor factory registered for the given request path.
+// Only exact path matching is supported currently; query parameters are stripped first.
+func (s *Server) factoryForPath(path string) (ProcessorFactory, error) {
 	// Strip query parameters for processor lookup.
 	if queryIndex := strings.Index(path, "?"); queryIndex != -1 {
 		path = path[:queryIndex]
 	}
-
 	newProcessor, ok := s.processorFactories[path]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", errNoProcessor, path)
 	}
-	return newProcessor(s.config, requestHeaders, logger, isUpstreamFilter, s.enableRedaction)
+	return newProcessor, nil
 }
 
-// originalPathHeader is the header used to pass the original path to the processor.
-// This is used in the upstream filter level to determine the original path of the request on retry.
+// originalPathHeader is the header the router filter sets to the request's original :path.
+// It is forwarded to the backend (and to a downstream gateway tier) as-is; translators may
+// rewrite it together with :path. It is deliberately NOT used to select the upstream-level
+// processor: that is derived from the router processor of the same request (see routerEntry),
+// so a rewritten path on a retried leg cannot yield a processor of a different type.
 const originalPathHeader = internalapi.OriginalPathHeader
 
 // internalReqIDHeader is the header used to pass the unique internal request ID to the upstream filter.
@@ -132,7 +140,8 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	}
 
 	// The processor will be instantiated when the first message containing the request headers is received.
-	// The :path header is used to determine the processor to use, based on the registered ones.
+	// At the router level the :path header selects the processor from the registered factories; at the
+	// upstream level the processor is derived from the router processor of the same request (see routerEntry).
 	//
 	// If this extproc filter is invoked without going through a RequestHeaders phase, that means
 	// an earlier filter has already processed the request headers/bodies and decided to terminate
@@ -168,8 +177,8 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
 
-		// If we're processing the request headers, read the :path header to instantiate the
-		// right processor.
+		// If we're processing the request headers, instantiate the right processor: at the
+		// router level from the :path header, at the upstream level from the router entry.
 		// Note that `req.GetRequestHeaders()` will only return non-nil if the request is
 		// of type `ProcessingRequest_RequestHeaders`, so this will be executed only once per
 		// request, and the processor will be instantiated only once.
@@ -201,33 +210,57 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			// Add logger to context so processMsg can access it
 			ctx = context.WithValue(ctx, loggerContextKey, logger)
 
-			p, err = s.processorForPath(headersMap, isUpstreamFilter, logger)
-			if err != nil {
-				if errors.Is(err, errNoProcessor) {
-					path := headersMap[":path"]
-					_ = stream.Send(&extprocv3.ProcessingResponse{
-						Response: &extprocv3.ProcessingResponse_ImmediateResponse{
-							ImmediateResponse: &extprocv3.ImmediateResponse{
-								Status:     &typev3.HttpStatus{Code: typev3.StatusCode_NotFound},
-								Body:       fmt.Appendf(nil, "unsupported path: %s", path),
-								GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.NotFound)},
-							},
-						},
-					})
-					return status.Errorf(codes.NotFound, "unsupported path: %s", path)
-				}
-				s.logger.Error("cannot get processor", slog.String("error", err.Error()))
-				return status.Error(codes.NotFound, err.Error())
-			}
-			_, isEndpoinPicker := headersMap[internalapi.EndpointPickerHeaderKey]
 			if isUpstreamFilter {
-				if err = s.setBackend(ctx, p, internalReqID, isEndpoinPicker, req); err != nil {
-					s.logger.Error("error processing request message", slog.String("error", err.Error()))
-					return status.Errorf(codes.Unknown, "error processing request message: %v", err)
+				// The upstream-level processor is created from the same factory as the router-level
+				// processor of this request. The request path may have been rewritten by then (a
+				// translator targeting a different API schema, e.g. /v1/messages -> /v1/chat/completions),
+				// and Envoy re-runs the upstream filter with those mutated headers on retries, so the
+				// path headers cannot be trusted to identify the processor type here.
+				s.routerProcessorsPerReqIDMutex.RLock()
+				entry, ok := s.routerProcessorsPerReqID[internalReqID]
+				s.routerProcessorsPerReqIDMutex.RUnlock()
+				if !ok {
+					return status.Errorf(codes.Internal, "no router processor found, request_id=%s", internalReqID)
+				}
+				p, err = entry.factory(s.config, headersMap, logger, true, s.enableRedaction)
+				if err != nil {
+					s.logger.Error("cannot create upstream processor", slog.String("error", err.Error()))
+					return status.Errorf(codes.Internal, "cannot create upstream processor: %v", err)
+				}
+				_, isEndpoinPicker := headersMap[internalapi.EndpointPickerHeaderKey]
+				if err = s.setBackend(ctx, p, entry.processor, isEndpoinPicker, req); err != nil {
+					// Every setBackend failure is already a status error; returning it as-is
+					// keeps its code (re-wrapping downgraded codes.Internal to codes.Unknown).
+					s.logger.Error("cannot set backend", slog.String("error", err.Error()))
+					return err
 				}
 			} else {
+				path := headersMap[":path"]
+				var factory ProcessorFactory
+				factory, err = s.factoryForPath(path)
+				if err != nil {
+					if errors.Is(err, errNoProcessor) {
+						_ = stream.Send(&extprocv3.ProcessingResponse{
+							Response: &extprocv3.ProcessingResponse_ImmediateResponse{
+								ImmediateResponse: &extprocv3.ImmediateResponse{
+									Status:     &typev3.HttpStatus{Code: typev3.StatusCode_NotFound},
+									Body:       fmt.Appendf(nil, "unsupported path: %s", path),
+									GrpcStatus: &extprocv3.GrpcStatus{Status: uint32(codes.NotFound)},
+								},
+							},
+						})
+						return status.Errorf(codes.NotFound, "unsupported path: %s", path)
+					}
+					s.logger.Error("cannot get processor", slog.String("error", err.Error()))
+					return status.Error(codes.NotFound, err.Error())
+				}
+				p, err = factory(s.config, headersMap, logger, false, s.enableRedaction)
+				if err != nil {
+					s.logger.Error("cannot create router processor", slog.String("error", err.Error()))
+					return status.Errorf(codes.Internal, "cannot create router processor: %v", err)
+				}
 				s.routerProcessorsPerReqIDMutex.Lock()
-				s.routerProcessorsPerReqID[internalReqID] = p
+				s.routerProcessorsPerReqID[internalReqID] = routerEntry{processor: p, factory: factory}
 				s.routerProcessorsPerReqIDMutex.Unlock()
 			}
 		}
@@ -370,9 +403,10 @@ func (s *Server) processMsg(ctx context.Context, p Processor, req *extprocv3.Pro
 	}
 }
 
-// setBackend retrieves the backend from the request attributes and sets it in the processor. This is only called
-// if the processor is an upstream filter.
-func (s *Server) setBackend(ctx context.Context, p Processor, internalReqID string, isEndpointPicker bool, req *extprocv3.ProcessingRequest) error {
+// setBackend retrieves the backend from the request attributes and sets it in the processor p,
+// handing it routerProcessor (the router-level processor of the same request). This is only called
+// if p is an upstream filter.
+func (s *Server) setBackend(ctx context.Context, p Processor, routerProcessor Processor, isEndpointPicker bool, req *extprocv3.ProcessingRequest) error {
 	attributes := req.GetAttributes()["envoy.filters.http.ext_proc"]
 	if attributes == nil || len(attributes.Fields) == 0 { // coverage-ignore
 		return status.Error(codes.Internal, "missing attributes in request")
@@ -387,14 +421,6 @@ func (s *Server) setBackend(ctx context.Context, p Processor, internalReqID stri
 	backend, ok := s.config.Backends[backendName]
 	if !ok {
 		return status.Errorf(codes.Internal, "unknown backend: %s", backendName)
-	}
-
-	s.routerProcessorsPerReqIDMutex.RLock()
-	defer s.routerProcessorsPerReqIDMutex.RUnlock()
-	routerProcessor, ok := s.routerProcessorsPerReqID[internalReqID]
-	if !ok {
-		return status.Errorf(codes.Internal, "no router processor found, request_id=%s, backend=%s",
-			internalReqID, backendName)
 	}
 
 	if err := p.SetBackend(ctx, backend, routeName, routerProcessor); err != nil {

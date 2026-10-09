@@ -84,7 +84,7 @@ func TestCountTokensToOpenAITokenize_RequestBody(t *testing.T) {
 			require.Truef(t, ok, "missing header %s", pathHeaderName)
 			assert.Equal(t, "/tokenize", got)
 			// The original-path headers are left to the router phase: they keep the
-			// client's original path, which the upstream filter selects its processor from.
+			// client's original path and are never used for processor selection.
 			for _, key := range []string{internalapi.OriginalPathHeader, internalapi.EnvoyOriginalPathHeader} {
 				_, found := headerValue(headers, key)
 				require.Falsef(t, found, "unexpected header %s", key)
