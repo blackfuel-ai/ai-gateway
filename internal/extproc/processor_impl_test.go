@@ -2273,11 +2273,35 @@ func TestChatCompletionProcessorUpstreamFilter_ProcessRequestHeaders_WithBodyMut
 }
 
 func Test_buildDynamicMetadata(t *testing.T) {
+	t.Run("cost on an admission reserve is charged the remainder", func(t *testing.T) {
+		costs := &metrics.TokenUsage{}
+		costs.SetInputTokens(100)
+		costs.SetTotalTokens(100)
+		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
+		newCost := func(key, reserveKey string) filterapi.RuntimeRequestCost {
+			return filterapi.RuntimeRequestCost{LLMRequestCost: &filterapi.LLMRequestCost{
+				MetadataKey: key, RouteName: "ns/route", Type: filterapi.LLMRequestCostTypeInputToken, AdmissionReserveMetadataKey: reserveKey,
+			}}
+		}
+		requestCosts := []filterapi.RuntimeRequestCost{
+			newCost("partly_reserved", "reserve_a"),
+			newCost("over_reserved", "reserve_b"),
+			newCost("not_reserved", ""),
+		}
+		md, err := buildDynamicMetadata(nil, requestCosts, costs, headers, "", "ns/route", "",
+			map[string]uint64{"reserve_a": 30, "reserve_b": 150})
+		require.NoError(t, err)
+		inner := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.Equal(t, 70.0, inner.Fields["partly_reserved"].GetNumberValue())
+		require.Equal(t, 0.0, inner.Fields["over_reserved"].GetNumberValue())
+		require.Equal(t, 100.0, inner.Fields["not_reserved"].GetNumberValue())
+	})
+
 	t.Run("sets model_name_override from request headers", func(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2290,7 +2314,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		// After backend override, the header contains the backend-specific model name.
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "us.anthropic.claude-sonnet-4.5-v2"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "default/my-backend", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "default/my-backend", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2302,7 +2326,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "ns/backend-a", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "ns/backend-a", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2315,7 +2339,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2335,7 +2359,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs.SetInputTokens(50)
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "claude-sonnet"}
 
-		md, err := buildDynamicMetadata(nil, config.RequestCosts, costs, headers, "default/backend", "", "")
+		md, err := buildDynamicMetadata(nil, config.RequestCosts, costs, headers, "default/backend", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2350,7 +2374,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2688,7 +2712,7 @@ func TestBuildDynamicMetadata_routeScoped(t *testing.T) {
 			tu.SetInputTokens(tt.inputTokens)
 			tu.SetTotalTokens(tt.totalTokens)
 
-			md, err := buildDynamicMetadata(nil, tt.requestCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "")
+			md, err := buildDynamicMetadata(nil, tt.requestCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "", nil)
 			require.NoError(t, err)
 
 			ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
@@ -2857,7 +2881,7 @@ func TestBuildDynamicMetadata_GlobalAndRouteScoped(t *testing.T) {
 			tu.SetOutputTokens(tt.outputTokens)
 			tu.SetTotalTokens(tt.totalTokens)
 
-			md, err := buildDynamicMetadata(tt.globalCosts, tt.routeCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "")
+			md, err := buildDynamicMetadata(tt.globalCosts, tt.routeCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "", nil)
 			require.NoError(t, err)
 
 			ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
