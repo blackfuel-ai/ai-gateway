@@ -878,173 +878,82 @@ func TestOpenAIStreamToAnthropicState_handleChunk_ZeroLen(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestAppendAnthropicAssistantMessage_ThinkingPlusText(t *testing.T) {
-	// thinking + text → structured content array with both blocks
-	msg := anthropic.MessageParam{
-		Role: anthropic.MessageRoleAssistant,
-		Content: anthropic.MessageContent{
-			Array: []anthropic.ContentBlockParam{
-				{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "I should write a simple example.", Signature: "sig_abc123"}},
-				{Text: &anthropic.TextBlockParam{Type: "text", Text: "Sure! Here is the code."}},
-			},
-		},
-	}
-	msgs := appendAnthropicAssistantMessage(nil, msg)
+// assistantWire converts one Anthropic assistant message and returns the JSON
+// the OpenAI backend receives for it.
+func assistantWire(t *testing.T, blocks ...anthropic.ContentBlockParam) string {
+	t.Helper()
+	msgs := appendAnthropicAssistantMessage(nil, anthropic.MessageParam{
+		Role:    anthropic.MessageRoleAssistant,
+		Content: anthropic.MessageContent{Array: blocks},
+	})
 	require.Len(t, msgs, 1)
 	require.NotNil(t, msgs[0].OfAssistant)
+	raw, err := json.Marshal(msgs[0].OfAssistant)
+	require.NoError(t, err)
+	return string(raw)
+}
 
-	assistantMsg := msgs[0].OfAssistant
-	// Content should be a structured array, not a plain string.
-	contentArray, ok := assistantMsg.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent)
-	require.True(t, ok, "expected structured content array, got %T", assistantMsg.Content.Value)
-	require.Len(t, contentArray, 2)
-
-	// First block: thinking, carried under vLLM's "thinking" key; the
-	// signature does not survive translation to an OpenAI backend.
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	require.NotNil(t, contentArray[0].Thinking)
-	assert.Equal(t, "I should write a simple example.", *contentArray[0].Thinking)
-	assert.Nil(t, contentArray[0].Text)
-	assert.Nil(t, contentArray[0].Signature)
-
-	// Second block: text
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeText, contentArray[1].Type)
-	require.NotNil(t, contentArray[1].Text)
-	assert.Equal(t, "Sure! Here is the code.", *contentArray[1].Text)
+func TestAppendAnthropicAssistantMessage_ThinkingPlusText(t *testing.T) {
+	// Thinking rides the message-level reasoning field; only the text is
+	// content. A {"type":"thinking"} content part would reach the model as
+	// part of its visible answer on vLLM. The signature does not survive
+	// translation to an OpenAI backend.
+	wire := assistantWire(t,
+		anthropic.ContentBlockParam{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "I should write a simple example.", Signature: "sig_abc123"}},
+		anthropic.ContentBlockParam{Text: &anthropic.TextBlockParam{Type: "text", Text: "Sure! Here is the code."}},
+	)
+	assert.JSONEq(t, `{"role":"assistant","content":"Sure! Here is the code.","reasoning":"I should write a simple example."}`, wire)
 }
 
 func TestAppendAnthropicAssistantMessage_ThinkingOnly(t *testing.T) {
-	// thinking-only block → content array with just thinking, no text
-	msg := anthropic.MessageParam{
-		Role: anthropic.MessageRoleAssistant,
-		Content: anthropic.MessageContent{
-			Array: []anthropic.ContentBlockParam{
-				{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "Just thinking...", Signature: "sig_xyz"}},
-			},
-		},
-	}
-	msgs := appendAnthropicAssistantMessage(nil, msg)
-	require.Len(t, msgs, 1)
-	require.NotNil(t, msgs[0].OfAssistant)
-
-	assistantMsg := msgs[0].OfAssistant
-	contentArray, ok := assistantMsg.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent)
-	require.True(t, ok, "expected structured content array, got %T", assistantMsg.Content.Value)
-	require.Len(t, contentArray, 1)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	require.NotNil(t, contentArray[0].Thinking)
-	assert.Equal(t, "Just thinking...", *contentArray[0].Thinking)
-
-	// vLLM's CustomThinkCompletionContentParam contract: the part must carry
-	// exactly {"type":"thinking","thinking":...} — a "text" or "signature" key
-	// makes a thinking-only assistant message 400 on vLLM backends (BLA-3379).
-	raw, err := json.Marshal(contentArray[0])
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"type":"thinking","thinking":"Just thinking..."}`, string(raw))
+	// A thinking-only message carries no content parts at all, so it cannot
+	// trip vLLM's content-part validation (BLA-3379).
+	wire := assistantWire(t,
+		anthropic.ContentBlockParam{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "Just thinking...", Signature: "sig_xyz"}},
+	)
+	assert.JSONEq(t, `{"role":"assistant","content":null,"reasoning":"Just thinking..."}`, wire)
 }
 
 func TestAppendAnthropicAssistantMessage_ThinkingPlusToolUse(t *testing.T) {
-	// thinking + tool_use → content array with thinking + tool_calls
-	msg := anthropic.MessageParam{
-		Role: anthropic.MessageRoleAssistant,
-		Content: anthropic.MessageContent{
-			Array: []anthropic.ContentBlockParam{
-				{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "I need to call the calculator.", Signature: "sig_tool"}},
-				{ToolUse: &anthropic.ToolUseBlockParam{Type: "tool_use", ID: "call_001", Name: "calculator", Input: map[string]any{"expression": "2+2"}}},
-			},
-		},
-	}
-	msgs := appendAnthropicAssistantMessage(nil, msg)
-	require.Len(t, msgs, 1)
-	require.NotNil(t, msgs[0].OfAssistant)
-
-	assistantMsg := msgs[0].OfAssistant
-	// Should have thinking in content array
-	contentArray, ok := assistantMsg.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent)
-	require.True(t, ok, "expected structured content array, got %T", assistantMsg.Content.Value)
-	require.Len(t, contentArray, 1)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-
-	// Should have tool calls
-	require.Len(t, assistantMsg.ToolCalls, 1)
-	assert.Equal(t, "calculator", assistantMsg.ToolCalls[0].Function.Name)
+	// The Claude Code agent-loop shape: thinking, then a tool call.
+	wire := assistantWire(t,
+		anthropic.ContentBlockParam{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "I need to call the calculator.", Signature: "sig_tool"}},
+		anthropic.ContentBlockParam{ToolUse: &anthropic.ToolUseBlockParam{Type: "tool_use", ID: "call_001", Name: "calculator", Input: map[string]any{"expression": "2+2"}}},
+	)
+	assert.JSONEq(t, `{
+		"role":"assistant",
+		"content":null,
+		"reasoning":"I need to call the calculator.",
+		"tool_calls":[{"id":"call_001","type":"function","function":{"name":"calculator","arguments":"{\"expression\":\"2+2\"}"}}]
+	}`, wire)
 }
 
 func TestAppendAnthropicAssistantMessage_MultipleThinkingBlocks(t *testing.T) {
-	// multiple thinking blocks → all preserved in order
-	msg := anthropic.MessageParam{
-		Role: anthropic.MessageRoleAssistant,
-		Content: anthropic.MessageContent{
-			Array: []anthropic.ContentBlockParam{
-				{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "First thought.", Signature: "s1"}},
-				{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "Second thought.", Signature: "s2"}},
-				{Text: &anthropic.TextBlockParam{Type: "text", Text: "Done."}},
-			},
-		},
-	}
-	msgs := appendAnthropicAssistantMessage(nil, msg)
-	require.Len(t, msgs, 1)
-	require.NotNil(t, msgs[0].OfAssistant)
-
-	contentArray, ok := msgs[0].OfAssistant.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent)
-	require.True(t, ok)
-	require.Len(t, contentArray, 3)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	assert.Equal(t, "First thought.", *contentArray[0].Thinking)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[1].Type)
-	assert.Equal(t, "Second thought.", *contentArray[1].Thinking)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeText, contentArray[2].Type)
-	assert.Equal(t, "Done.", *contentArray[2].Text)
+	// Interleaved thinking blocks join, in order, into the one reasoning field.
+	wire := assistantWire(t,
+		anthropic.ContentBlockParam{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "First thought.", Signature: "s1"}},
+		anthropic.ContentBlockParam{Text: &anthropic.TextBlockParam{Type: "text", Text: "Done."}},
+		anthropic.ContentBlockParam{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "Second thought.", Signature: "s2"}},
+	)
+	assert.JSONEq(t, `{"role":"assistant","content":"Done.","reasoning":"First thought.\nSecond thought."}`, wire)
 }
 
 func TestAppendAnthropicAssistantMessage_RedactedThinking(t *testing.T) {
-	// redacted_thinking block → content with type "redacted_thinking"
-	msg := anthropic.MessageParam{
-		Role: anthropic.MessageRoleAssistant,
-		Content: anthropic.MessageContent{
-			Array: []anthropic.ContentBlockParam{
-				{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "Thinking...", Signature: "sig_think"}},
-				{RedactedThinking: &anthropic.RedactedThinkingBlockParam{Type: "redacted_thinking", Data: "BASE64_OPAQUE_DATA"}},
-				{Text: &anthropic.TextBlockParam{Type: "text", Text: "Hi!"}},
-			},
-		},
-	}
-	msgs := appendAnthropicAssistantMessage(nil, msg)
-	require.Len(t, msgs, 1)
-	require.NotNil(t, msgs[0].OfAssistant)
-
-	contentArray, ok := msgs[0].OfAssistant.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent)
-	require.True(t, ok)
-	require.Len(t, contentArray, 3)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	// Redacted thinking replays its opaque data through the vLLM-native
-	// thinking shape; the "redacted_thinking" type has no backend equivalent.
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[1].Type)
-	require.NotNil(t, contentArray[1].Thinking)
-	assert.Equal(t, "BASE64_OPAQUE_DATA", *contentArray[1].Thinking)
-	assert.Nil(t, contentArray[1].RedactedContent)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeText, contentArray[2].Type)
+	// Redacted thinking has no OpenAI equivalent; its opaque data replays on
+	// the reasoning field, after any plain thinking that precedes it.
+	wire := assistantWire(t,
+		anthropic.ContentBlockParam{Thinking: &anthropic.ThinkingBlockParam{Type: "thinking", Thinking: "Thinking...", Signature: "sig_think"}},
+		anthropic.ContentBlockParam{RedactedThinking: &anthropic.RedactedThinkingBlockParam{Type: "redacted_thinking", Data: "BASE64_OPAQUE_DATA"}},
+		anthropic.ContentBlockParam{Text: &anthropic.TextBlockParam{Type: "text", Text: "Hi!"}},
+	)
+	assert.JSONEq(t, `{"role":"assistant","content":"Hi!","reasoning":"Thinking...\nBASE64_OPAQUE_DATA"}`, wire)
 }
 
 func TestAppendAnthropicAssistantMessage_RedactedThinkingOnly(t *testing.T) {
-	// redacted_thinking as the sole block has the same 400 corner as
-	// thinking-only: it must serialize to the vLLM-native thinking shape.
-	msg := anthropic.MessageParam{
-		Role: anthropic.MessageRoleAssistant,
-		Content: anthropic.MessageContent{
-			Array: []anthropic.ContentBlockParam{
-				{RedactedThinking: &anthropic.RedactedThinkingBlockParam{Type: "redacted_thinking", Data: "OPAQUE"}},
-			},
-		},
-	}
-	msgs := appendAnthropicAssistantMessage(nil, msg)
-	require.Len(t, msgs, 1)
-	contentArray, ok := msgs[0].OfAssistant.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent)
-	require.True(t, ok)
-	require.Len(t, contentArray, 1)
-	raw, err := json.Marshal(contentArray[0])
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"type":"thinking","thinking":"OPAQUE"}`, string(raw))
+	wire := assistantWire(t,
+		anthropic.ContentBlockParam{RedactedThinking: &anthropic.RedactedThinkingBlockParam{Type: "redacted_thinking", Data: "OPAQUE"}},
+	)
+	assert.JSONEq(t, `{"role":"assistant","content":null,"reasoning":"OPAQUE"}`, wire)
 }
 
 func TestAppendAnthropicAssistantMessage_NoThinkingUnchanged(t *testing.T) {
