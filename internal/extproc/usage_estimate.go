@@ -22,6 +22,11 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/usageestimate"
 )
 
+// maxHitsAddend is the largest hits_addend Envoy accepts. Envoy ignores a
+// descriptor whose hits_addend resolves above it, so a larger reserve would be
+// subtracted from the cost at completion without ever having been charged.
+const maxHitsAddend = 1_000_000_000
+
 // usageEstimates is the per-process state of the usage estimates. It outlives the
 // runtime configuration, which is rebuilt on every configuration change.
 type usageEstimates struct {
@@ -69,7 +74,8 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) setUsageEstima
 // them as dynamic metadata, nil when no estimate applies, and as the request header
 // mutations of the items with EmitHeader: an estimate sets its header, and an item
 // without an estimate removes it, so no client-sent value of the header goes
-// upstream. It must be called once the original model is known.
+// upstream. It must be called once the original model is known. A request to an
+// endpoint that consumes no model usage has no estimate.
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(ctx context.Context, requestBytes int, logger *slog.Logger) (metadata *structpb.Struct, setHeaders []*corev3.HeaderValueOption, removeHeaders []string) {
 	st := &r.usageEstimate
 	st.period = r.config.UsageEstimatePeriod
@@ -114,7 +120,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 // request.
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateOne(ctx context.Context, e *filterapi.RuntimeUsageEstimate, stats map[usageestimate.Key]usageestimate.Stats, logger *slog.Logger) (float64, bool) {
 	st := &r.usageEstimate
-	if st.shared == nil {
+	if st.shared == nil || !r.eh.EstimatesUsage() {
 		return 0, false
 	}
 	value := r.requestHeaders[e.ByHeader]
@@ -160,10 +166,12 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateOne(ct
 // reserveAdmission computes every admission reserve of the configuration into
 // fields and the request state. The route is not selected yet, so all of them are
 // computed; each charge entry reads its own. A reserve is its percent of the usage
-// estimate, rounded to the nearest integer, and 0 when the request has no estimate:
-// every reserve key is written, so that its hits_addend always resolves.
+// estimate, rounded to the nearest integer and capped at maxHitsAddend, and 0 when
+// the request has no estimate: every reserve key is written, so that its
+// hits_addend always resolves. A request to an endpoint that consumes no model
+// usage reserves nothing and writes no reserve key.
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) reserveAdmission(fields map[string]*structpb.Value) {
-	if len(r.config.AdmissionReserves) == 0 {
+	if len(r.config.AdmissionReserves) == 0 || !r.eh.EstimatesUsage() {
 		return
 	}
 	st := &r.usageEstimate
@@ -173,7 +181,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) reserveAdmissi
 		var reserve uint64
 		for _, a := range st.admitted {
 			if a.estimate.MetadataKey == res.UsageEstimate {
-				reserve = uint64(math.Round(a.value * float64(res.Percent) / 100))
+				reserve = uint64(min(math.Round(a.value*float64(res.Percent)/100), maxHitsAddend))
 				break
 			}
 		}
@@ -184,14 +192,14 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) reserveAdmissi
 
 // recordUsageEstimateSuccess records the usage of a successful response, and the
 // ratio of each admitted estimate to its actual value. A response without input
-// usage records nothing.
+// usage, or to an endpoint that consumes no model usage, records nothing.
 //
 // The actual value is the estimate's expression evaluated on the actual usage and
 // on the inputs of the estimate (the client's model, no backend, no route), so the
 // ratio measures the usage estimation alone.
 func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEstimateSuccess(ctx context.Context, usage *metrics.TokenUsage) {
 	st := &r.usageEstimate
-	if len(st.keys) == 0 {
+	if len(st.keys) == 0 || !r.eh.EstimatesUsage() {
 		return
 	}
 	input, ok := usage.InputTokens()

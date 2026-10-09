@@ -198,3 +198,26 @@ func TestAdmissionReserve_StreamingRepeatedWrites(t *testing.T) {
 		require.Equal(t, float64(c.input), fields[testTotalCost].GetNumberValue())
 	}
 }
+
+// A reserve above Envoy's hits_addend maximum is charged the maximum, and only
+// that is subtracted from the cost at completion.
+func TestAdmissionReserve_ClampedToHitsAddendMax(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	huge := filterapi.UsageEstimate{
+		MetadataKey: "huge", CEL: "double(input_tokens) * 1e12", ByHeader: usageEstimateTestHeader,
+	}
+	cfg := newAdmissionReserveTestConfig(t, huge, 100, "quota_reserve_huge_100")
+	headers := map[string]string{usageEstimateTestHeader: "key-a"}
+	rp := newUsageEstimateTestRouter(cfg, ue, headers)
+	_, u := admitAndDispatch(t, rp)
+	completeWithUsage(t, rp, u, 2000, 0)
+	clock.nextPeriod()
+
+	rp = newUsageEstimateTestRouter(cfg, ue, headers)
+	resp, u := admitAndDispatch(t, rp)
+	fields := usageEstimateFields(t, resp)
+	require.Equal(t, 2e15, fields["huge"].GetNumberValue())
+	require.Equal(t, 1e9, fields["quota_reserve_huge_100"].GetNumberValue())
+	fields = usageEstimateFields(t, completeWithUsage(t, rp, u, 1_500_000_000, 0))
+	require.Equal(t, 5e8, fields[testFreshCost].GetNumberValue())
+}
