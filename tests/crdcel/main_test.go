@@ -142,6 +142,27 @@ func TestGatewayConfigs(t *testing.T) {
 			name:   "bad_metadata_forwarding_namespace.yaml",
 			expErr: "metadata namespaces may only contain letters, digits, '.', '_', '/' and '-'",
 		},
+		{name: "usage-estimates.yaml"},
+		{
+			name:   "usage-estimate-empty-header.yaml",
+			expErr: "spec.usageEstimates[0].byHeader",
+		},
+		{
+			name:   "usage-estimate-empty-cel.yaml",
+			expErr: "spec.usageEstimates[0].cel",
+		},
+		{
+			name:   "usage-estimate-duplicate-key.yaml",
+			expErr: "Duplicate value",
+		},
+		{
+			name:   "usage-estimate-period-too-short.yaml",
+			expErr: "usageEstimatePeriod must be between 5s and 10m",
+		},
+		{
+			name:   "usage-estimate-period-too-long.yaml",
+			expErr: "usageEstimatePeriod must be between 5s and 10m",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/gatewayconfigs", tc.name))

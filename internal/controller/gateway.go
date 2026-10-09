@@ -174,9 +174,15 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	var defaultLLMCosts []aigv1b1.LLMRequestCost
 	var emitErrorMetadata bool
+	var usageEstimates []aigv1b1.UsageEstimate
+	var usageEstimatePeriod time.Duration
 	if gwConfig != nil {
 		defaultLLMCosts = gwConfig.Spec.GlobalLLMRequestCosts
 		emitErrorMetadata = gwConfig.Spec.EmitErrorMetadata
+		usageEstimates = gwConfig.Spec.UsageEstimates
+		if usageEstimatePeriod, err = gwConfig.Spec.GetUsageEstimatePeriod(); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Envoy Gateway watches Gateways, not GatewayConfigs, so a config edit reaches the data plane
@@ -192,7 +198,7 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if gwConfig != nil && gwConfig.Spec.ExtProc != nil {
 		declaredMetadataNamespaces = gwConfig.Spec.ExtProc.MetadataForwardingNamespaces
 	}
-	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, declaredMetadataNamespaces, emitErrorMetadata)
+	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, declaredMetadataNamespaces, emitErrorMetadata, usageEstimates, usageEstimatePeriod)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -306,6 +312,44 @@ func aigwGlobalLLMRequestCostToFilterAPI(cost aigv1b1.LLMRequestCost) (filterapi
 		out.CEL = celExpr
 	}
 	return out, nil
+}
+
+// aigwUsageEstimateToFilterAPI converts an API UsageEstimate to filter API form.
+func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEstimate, error) {
+	if _, err := llmcostcel.NewEstimateProgram(e.CEL); err != nil {
+		return filterapi.UsageEstimate{}, fmt.Errorf("invalid CEL expression: %w", err)
+	}
+	return filterapi.UsageEstimate{
+		MetadataKey: e.MetadataKey,
+		CEL:         e.CEL,
+		// Header names are lower-cased in the request headers the filter sees.
+		ByHeader:   strings.ToLower(e.ByHeader),
+		EmitMetric: e.EmitMetric,
+	}, nil
+}
+
+// checkUsageEstimateMetadataKeys rejects a usage estimate whose dynamic metadata
+// key is also an LLMRequestCost metadata key:
+// the cost written at completion would overwrite the value written at admission.
+// Collisions between usage estimates are rejected by the CRD.
+func checkUsageEstimateMetadataKeys(ec *filterapi.Config) error {
+	if len(ec.UsageEstimates) == 0 {
+		return nil
+	}
+	costKeys := make(map[string]struct{}, len(ec.GlobalLLMRequestCosts)+len(ec.LLMRequestCosts))
+	for i := range ec.GlobalLLMRequestCosts {
+		costKeys[ec.GlobalLLMRequestCosts[i].MetadataKey] = struct{}{}
+	}
+	for i := range ec.LLMRequestCosts {
+		costKeys[ec.LLMRequestCosts[i].MetadataKey] = struct{}{}
+	}
+	for i := range ec.UsageEstimates {
+		e := &ec.UsageEstimates[i]
+		if _, ok := costKeys[e.MetadataKey]; ok {
+			return fmt.Errorf("usage estimate metadataKey %q collides with an LLMRequestCost metadataKey", e.MetadataKey)
+		}
+	}
+	return nil
 }
 
 func aigwLLMRequestCostToFilterAPI(cost aigv1b1.LLMRequestCost, routeName string) (filterapi.LLMRequestCost, error) {
@@ -457,6 +501,8 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 	defaultLLMCosts []aigv1b1.LLMRequestCost,
 	declaredMetadataNamespaces []string,
 	emitErrorMetadata bool,
+	usageEstimates []aigv1b1.UsageEstimate,
+	usageEstimatePeriod time.Duration,
 ) (hasEffectiveRoute bool, _ error) {
 	// Precondition: aiGatewayRoutes is not empty as we early return if it is empty.
 	ec := &filterapi.Config{UUID: uuid, Version: version.Parse(), EmitErrorMetadata: emitErrorMetadata}
@@ -472,6 +518,18 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 			return false, fmt.Errorf("failed to convert global LLMRequestCosts: %w", convErr)
 		}
 		ec.GlobalLLMRequestCosts = append(ec.GlobalLLMRequestCosts, fc)
+	}
+
+	// Usage estimates from GatewayConfig. The CRD enforces metadataKey uniqueness.
+	for i := range usageEstimates {
+		fe, convErr := aigwUsageEstimateToFilterAPI(&usageEstimates[i])
+		if convErr != nil {
+			return false, fmt.Errorf("invalid usage estimate %q: %w", usageEstimates[i].MetadataKey, convErr)
+		}
+		ec.UsageEstimates = append(ec.UsageEstimates, fe)
+	}
+	if len(ec.UsageEstimates) > 0 {
+		ec.UsageEstimatePeriod = usageEstimatePeriod
 	}
 
 	// Models contributed by routes with no Spec.Hostnames. We only promote these to
@@ -739,6 +797,10 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 				ec.LLMRequestCosts = append(ec.LLMRequestCosts, fc)
 			}
 		}
+	}
+
+	if err = checkUsageEstimateMetadataKeys(ec); err != nil {
+		return false, err
 	}
 
 	// If at least one route is hostname-scoped, promote the unscoped models to ec.UnscopedModels

@@ -29,7 +29,9 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/redaction"
+	"github.com/envoyproxy/ai-gateway/internal/usageestimate"
 )
 
 var (
@@ -62,6 +64,7 @@ type Server struct {
 	routerProcessorsPerReqID      map[string]routerEntry
 	routerProcessorsPerReqIDMutex sync.RWMutex
 	uuidFn                        func() string
+	usageEstimates                *usageEstimates
 }
 
 // routerEntry is the per-request state kept by the router filter for the upstream filter(s).
@@ -76,8 +79,19 @@ type routerEntry struct {
 	factory ProcessorFactory
 }
 
+// ServerOption configures a [Server].
+type ServerOption func(*Server)
+
+// WithUsageEstimates sets the store the usage estimates draw on and the metrics
+// they record. Without it, the server computes no usage estimate.
+func WithUsageEstimates(store *usageestimate.Store, m metrics.UsageEstimateMetrics) ServerOption {
+	return func(s *Server) {
+		s.usageEstimates = &usageEstimates{store: store, metrics: m}
+	}
+}
+
 // NewServer creates a new external processor server.
-func NewServer(logger *slog.Logger, enableRedaction bool) (*Server, error) {
+func NewServer(logger *slog.Logger, enableRedaction bool, opts ...ServerOption) (*Server, error) {
 	debugLogEnabled := logger.Enabled(context.Background(), slog.LevelDebug)
 	srv := &Server{
 		logger:                   logger,
@@ -86,6 +100,9 @@ func NewServer(logger *slog.Logger, enableRedaction bool) (*Server, error) {
 		processorFactories:       make(map[string]ProcessorFactory),
 		routerProcessorsPerReqID: make(map[string]routerEntry),
 		uuidFn:                   uuid.NewString,
+	}
+	for _, opt := range opts {
+		opt(srv)
 	}
 	return srv, nil
 }
@@ -272,6 +289,9 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) (err 
 				if err != nil {
 					s.logger.Error("cannot create router processor", slog.String("error", err.Error()))
 					return status.Errorf(codes.Internal, "cannot create router processor: %v", err)
+				}
+				if up, ok := p.(usageEstimateProcessor); ok {
+					up.setUsageEstimates(s.usageEstimates)
 				}
 				s.routerProcessorsPerReqIDMutex.Lock()
 				s.routerProcessorsPerReqID[internalReqID] = routerEntry{processor: p, factory: factory}

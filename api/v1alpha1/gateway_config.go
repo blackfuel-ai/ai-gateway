@@ -8,6 +8,7 @@ package v1alpha1
 import (
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // GatewayConfig provides configuration for the AI Gateway external processor
@@ -103,6 +104,119 @@ type GatewayConfigSpec struct {
 	//
 	// +optional
 	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
+
+	// UsageEstimates estimates the token usage of each request when it is admitted,
+	// from the responses completed during the last completed period (see
+	// UsageEstimatePeriod) for requests carrying the same value of a request header
+	// (for example the API key identity stamped by an external authorization service)
+	// and the same model, and emits each estimate as Envoy dynamic metadata under the
+	// "io.envoy.ai_gateway" namespace.
+	//
+	// Estimates change no routing, cost or quota decision. They can be referenced in
+	// access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.
+	// To learn from streamed responses, a streaming OpenAI-compatible request gets
+	// stream_options.include_usage set, as with LLMRequestCosts, so its client receives
+	// the final usage chunk.
+	//
+	// A metadataKey must not equal an LLMRequestCost metadataKey, global, per route
+	// or added by a QuotaPolicy. On such a collision the controller stops updating
+	// the gateway's filter configuration, which keeps serving the last valid one,
+	// until the collision is removed.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=metadataKey
+	// +kubebuilder:validation:MaxItems=16
+	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
+
+	// UsageEstimatePeriod is the length of the periods UsageEstimates accumulates
+	// completed requests over. Periods are aligned on the clock, and a request is
+	// estimated from the last completed one. A longer period gathers more responses
+	// per estimate and leaves fewer clients without one, but follows a change in a
+	// client's requests more slowly. Changing it starts every estimate over.
+	//
+	// Defaults to 60s.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5s') && duration(self) <= duration('10m')",message="usageEstimatePeriod must be between 5s and 10m"
+	UsageEstimatePeriod *gwapiv1.Duration `json:"usageEstimatePeriod,omitempty"`
+}
+
+// UsageEstimate estimates one value of a request's token usage when the request
+// is admitted, before any upstream has answered.
+//
+// Completed requests are accumulated per ByHeader value and model over fixed
+// periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+// request is estimated from the successful responses of the last completed
+// period:
+//
+//   - input tokens: the request body size times the input tokens per body byte
+//     observed in those responses;
+//   - cached input tokens: those input tokens times the cache rate of those
+//     responses, the mean of the share of each response's input tokens that
+//     were cached.
+//
+// The CEL expression is evaluated on that estimated usage and on the measured
+// ratios of that period, and its result is stored under MetadataKey. Nothing is
+// emitted when the last completed period holds no successful response.
+//
+// Each gateway replica estimates from the responses it served itself.
+type UsageEstimate struct {
+	// MetadataKey is the key of the dynamic metadata storing the estimate.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	MetadataKey string `json:"metadataKey"`
+	// CEL is the CEL expression computing the estimate. It accepts the variables
+	// of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint
+	// or a double that is finite and not negative. It is evaluated on the
+	// estimated usage of the request:
+	//
+	//	* model: the model name extracted from the request content.
+	//	* input_tokens: the estimated number of input tokens.
+	//	* cached_input_tokens: the estimated number of cached read input tokens,
+	//	  input_tokens times cache_rate, so never more than input_tokens.
+	//	* total_tokens: equal to input_tokens.
+	//	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.
+	//	* backend and route_name: empty, as no route is selected at admission.
+	//	* input_tokens_per_byte: the input tokens of the successful responses of the
+	//	  period divided by the size of their request bodies, a double.
+	//	* cache_rate: the mean, over the successful responses of the period, of the
+	//	  share of each response's input tokens that were cached, a double between
+	//	  0 and 1.
+	//
+	// For example, "input_tokens - cached_input_tokens"
+	// estimates the input tokens that are not served from the prompt cache, and
+	// "cache_rate" emits the measured cache rate. CEL does not convert between
+	// integers and doubles implicitly: write "double(input_tokens) * cache_rate".
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	CEL string `json:"cel"`
+	// ByHeader names the request header whose value groups the responses the
+	// estimate is drawn from. Requests without the header get no estimate.
+	//
+	// The header should be set by the gateway, for example by an external
+	// authorization service, rather than by clients. Each distinct value with a
+	// successful response is kept in memory while it has successful responses,
+	// and for one to two periods, plus up to 30 seconds, after its last one.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	ByHeader string `json:"byHeader"`
+	// EmitMetric also records the estimate in metrics: a counter of the requests
+	// that got an estimate or none, and a histogram of the estimate divided by
+	// the same CEL expression evaluated on the actual usage of the response. The
+	// actual value keeps the model, backend and route_name of the estimate, so the
+	// ratio measures the usage estimation alone. The header value is never a
+	// metric attribute.
+	//
+	// Defaults to false.
+	//
+	// +optional
+	EmitMetric bool `json:"emitMetric,omitempty"`
 }
 
 // GatewayConfigExtProc holds runtime-specific configuration for the external processor.

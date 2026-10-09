@@ -113,6 +113,8 @@ type (
 		stream            bool
 		debugLogEnabled   bool
 		enableRedaction   bool
+		// usageEstimate is the usage estimate state of the request.
+		usageEstimate usageEstimateState
 	}
 	// upstreamProcessor implements [Processor] for the upstream filter for the standard LLM endpoints.
 	//
@@ -247,7 +249,9 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		mutatedOriginalBody []byte
 		err                 error
 	)
-	costConfigured := len(r.config.RequestCosts) > 0 || len(r.config.GlobalRequestCosts) > 0
+	// Usage estimates learn from the usage of responses, which a streamed OpenAI
+	// response only reports when the request asks for it.
+	costConfigured := len(r.config.RequestCosts) > 0 || len(r.config.GlobalRequestCosts) > 0 || len(r.config.UsageEstimates) > 0
 	contentType := r.requestHeaders["content-type"]
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		originalModel, body, stream, mutatedOriginalBody, err = r.eh.ParseMultipartBody(rawBody.Body, contentType, costConfigured)
@@ -319,6 +323,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		Header:       &corev3.HeaderValue{Key: internalapi.EnvoyOriginalPathHeader, RawValue: []byte(originalPath)},
 	})
 	r.originalModel = originalModel
+	usageEstimateMetadata := r.estimateUsage(ctx, len(rawBody.Body), logger)
 	r.originalRequestBody = body
 	if msgReq, ok := any(body).(*anthropic.MessagesRequest); ok {
 		r.toolsDigest = computeToolsDigest(msgReq.Tools)
@@ -346,6 +351,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 				},
 			},
 		},
+		DynamicMetadata: usageEstimateMetadata,
 	}, nil
 }
 
@@ -672,6 +678,10 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		}
 	} else {
 		u.metrics.RecordTokenUsage(context.WithoutCancel(ctx), u.costs, u.requestHeaders)
+	}
+
+	if body.EndOfStream && !u.isMirror {
+		u.parent.recordUsageEstimateSuccess(ctx, &u.costs)
 	}
 
 	// Build dynamic metadata as soon as the accumulated usage changes (i.e. the chunk that carries

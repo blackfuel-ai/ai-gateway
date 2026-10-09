@@ -1,0 +1,26 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: GatewayConfig
+metadata:
+  name: usage-estimates
+  namespace: default
+spec:
+  usageEstimates:
+    - metadataKey: estimated_input_token
+      cel: "input_tokens"
+      byHeader: x-client-id
+      emitMetric: true
+    - metadataKey: estimated_fresh_input_token
+      cel: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+      byHeader: x-client-id
+    - metadataKey: estimated_input_token_cache_rate
+      cel: "cache_rate"
+      byHeader: x-client-id
+    - metadataKey: estimated_input_token_input_tokens_per_byte
+      cel: "input_tokens_per_byte"
+      byHeader: x-client-id
+  usageEstimatePeriod: 30s
