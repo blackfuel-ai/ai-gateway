@@ -266,6 +266,16 @@ func TestOpenAIToOpenAITranslator_ResponseError(t *testing.T) {
 			// Body is passed through unchanged; we only assert the extracted classification.
 			expErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
 		},
+		{
+			name: "test OpenAI-compatible backend naming the offending param",
+			responseHeaders: map[string]string{
+				":status":      "400",
+				"content-type": "application/json",
+			},
+			contentType: "application/json",
+			input:       bytes.NewBuffer([]byte(`{"error": {"message": "bad", "type": "invalid_request_error", "param": "body.temperature", "code": "invalid_value"}}`)),
+			expErrInfo:  LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "body.temperature"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

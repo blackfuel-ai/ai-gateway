@@ -112,6 +112,12 @@ type LLMErrorInfo struct {
 	// Code is the provider error code, e.g. "context_length_exceeded". This is
 	// often empty for providers that do not expose a distinct code.
 	Code string
+	// Param is the request parameter the provider names as the cause of the
+	// error (OpenAI's "error.param"), e.g. "messages.0.content". It is taken
+	// verbatim from the upstream body and is empty when the provider names none
+	// or names it with a non-string value. Callers that record it must validate
+	// it first: it is chosen by the client request, not by the provider.
+	Param string
 }
 
 // ResponseRedactor is an optional interface that translators can implement

@@ -2559,6 +2559,7 @@ func TestBuildErrorDynamicMetadata(t *testing.T) {
 			wantType:    "rate_limit_error",
 			wantCode:    "context_length_exceeded",
 			wantPresent: map[string]string{"backend_name": "be", "route_name": "ns/route", "model_name_override": "m"},
+			wantAbsent:  []string{"llm_error_param"},
 		},
 		{
 			name:       "fallback type and code",
@@ -2566,7 +2567,7 @@ func TestBuildErrorDynamicMetadata(t *testing.T) {
 			statusCode: 500,
 			wantType:   "upstream_error",
 			wantCode:   "500",
-			wantAbsent: []string{"backend_name", "route_name"},
+			wantAbsent: []string{"backend_name", "route_name", "llm_error_param"},
 		},
 		{
 			name:       "type present code falls back to status",
@@ -2574,6 +2575,86 @@ func TestBuildErrorDynamicMetadata(t *testing.T) {
 			statusCode: 503,
 			wantType:   "ThrottlingException",
 			wantCode:   "503",
+		},
+		{
+			name:        "param recorded beside type and code",
+			errInfo:     translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "body.messages.0.content"},
+			statusCode:  400,
+			wantType:    "invalid_request_error",
+			wantCode:    "invalid_value",
+			wantPresent: map[string]string{"llm_error_param": "body.messages.0.content"},
+		},
+		{
+			name:        "param recorded when the code falls back to status",
+			errInfo:     translator.LLMErrorInfo{Type: "BadRequestError", Param: "reasoning_effort"},
+			statusCode:  400,
+			wantType:    "BadRequestError",
+			wantCode:    "400",
+			wantPresent: map[string]string{"llm_error_param": "reasoning_effort"},
+		},
+		{
+			name:        "param with brackets and hyphen recorded",
+			errInfo:     translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "tools[0].function.x-name_2"},
+			statusCode:  400,
+			wantType:    "invalid_request_error",
+			wantCode:    "invalid_value",
+			wantPresent: map[string]string{"llm_error_param": "tools[0].function.x-name_2"},
+		},
+		{
+			name:        "param at 128 characters recorded",
+			errInfo:     translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: strings.Repeat("a", 128)},
+			statusCode:  400,
+			wantType:    "invalid_request_error",
+			wantCode:    "invalid_value",
+			wantPresent: map[string]string{"llm_error_param": strings.Repeat("a", 128)},
+		},
+		{
+			name:       "param over 128 characters omitted",
+			errInfo:    translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: strings.Repeat("a", 129)},
+			statusCode: 400,
+			wantType:   "invalid_request_error",
+			wantCode:   "invalid_value",
+			wantAbsent: []string{"llm_error_param"},
+		},
+		{
+			name:       "param with a space omitted",
+			errInfo:    translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "messages 0"},
+			statusCode: 400,
+			wantType:   "invalid_request_error",
+			wantCode:   "invalid_value",
+			wantAbsent: []string{"llm_error_param"},
+		},
+		{
+			name:       "param with a newline omitted",
+			errInfo:    translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "messages\ncontent"},
+			statusCode: 400,
+			wantType:   "invalid_request_error",
+			wantCode:   "invalid_value",
+			wantAbsent: []string{"llm_error_param"},
+		},
+		{
+			name:       "param with a quote omitted",
+			errInfo:    translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: `messages"0`},
+			statusCode: 400,
+			wantType:   "invalid_request_error",
+			wantCode:   "invalid_value",
+			wantAbsent: []string{"llm_error_param"},
+		},
+		{
+			name:       "param with non-ASCII letters omitted",
+			errInfo:    translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "méssages"},
+			statusCode: 400,
+			wantType:   "invalid_request_error",
+			wantCode:   "invalid_value",
+			wantAbsent: []string{"llm_error_param"},
+		},
+		{
+			name:       "param shaped like an access-log command omitted",
+			errInfo:    translator.LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "%REQ(authorization)%"},
+			statusCode: 400,
+			wantType:   "invalid_request_error",
+			wantCode:   "invalid_value",
+			wantAbsent: []string{"llm_error_param"},
 		},
 	}
 
@@ -2591,6 +2672,77 @@ func TestBuildErrorDynamicMetadata(t *testing.T) {
 				_, exists := ns[k]
 				require.False(t, exists, "key %q should be absent", k)
 			}
+		})
+	}
+}
+
+// TestProcessResponseBody_errorParamFromOpenAIBackend runs an OpenAI-shaped error body
+// through the real OpenAI-to-OpenAI translator and checks what the filter records.
+func TestProcessResponseBody_errorParamFromOpenAIBackend(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantType  string
+		wantCode  string
+		wantParam string // empty means llm_error_param is absent.
+	}{
+		{
+			name:      "string param recorded",
+			body:      `{"error":{"message":"Input should be a valid string","type":"invalid_request_error","param":"body.messages.0.content","code":"invalid_type"}}`,
+			wantType:  "invalid_request_error",
+			wantCode:  "invalid_type",
+			wantParam: "body.messages.0.content",
+		},
+		{
+			name:     "null param omitted",
+			body:     `{"error":{"message":"bad","type":"invalid_request_error","param":null,"code":null}}`,
+			wantType: "invalid_request_error",
+			wantCode: "400",
+		},
+		{
+			name:     "non-string param omitted with type and code kept",
+			body:     `{"error":{"message":"bad","type":"invalid_request_error","param":42,"code":"invalid_value"}}`,
+			wantType: "invalid_request_error",
+			wantCode: "invalid_value",
+		},
+		{
+			name:     "param over 128 characters omitted",
+			body:     `{"error":{"message":"bad","type":"invalid_request_error","param":"` + strings.Repeat("p", 129) + `","code":"invalid_value"}}`,
+			wantType: "invalid_request_error",
+			wantCode: "invalid_value",
+		},
+		{
+			name:     "param carrying free text omitted",
+			body:     `{"error":{"message":"bad","type":"invalid_request_error","param":"my secret prompt","code":"unsupported_parameter"}}`,
+			wantType: "invalid_request_error",
+			wantCode: "unsupported_parameter",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inBody := &extprocv3.HttpBody{Body: []byte(tt.body), EndOfStream: true}
+			mm := &mockMetrics{}
+			p := &chatCompletionProcessorUpstreamFilter{
+				translator:      translator.NewChatCompletionOpenAIToOpenAITranslator("v1", ""),
+				metrics:         mm,
+				responseHeaders: map[string]string{":status": "400", "content-type": "application/json"},
+				requestHeaders:  map[string]string{internalapi.ModelNameHeaderKeyDefault: "m"},
+				parent: &chatCompletionProcessorRouterFilter{
+					config: &filterapi.RuntimeConfig{EmitErrorMetadata: true},
+				},
+			}
+			res, err := p.ProcessResponseBody(t.Context(), inBody)
+			require.NoError(t, err)
+			require.NotNil(t, res.DynamicMetadata)
+			ns := res.DynamicMetadata.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
+			require.Equal(t, tt.wantType, ns["llm_error_type"].GetStringValue())
+			require.Equal(t, tt.wantCode, ns["llm_error_code"].GetStringValue())
+			if tt.wantParam == "" {
+				require.NotContains(t, ns, "llm_error_param")
+			} else {
+				require.Equal(t, tt.wantParam, ns["llm_error_param"].GetStringValue())
+			}
+			mm.RequireRequestFailure(t)
 		})
 	}
 }

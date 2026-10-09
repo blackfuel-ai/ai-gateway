@@ -346,10 +346,11 @@ func TestOpenAIToOpenAITranslatorV1CompletionResponseError(t *testing.T) {
 		}
 		errorBody := `{"error": {"message": "Invalid prompt", "type": "InvalidRequestError", "param": "prompt", "code": null}}`
 
-		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headerMutation, bodyMutation, errInfo, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.Nil(t, bodyMutation)
 		require.Nil(t, headerMutation)
+		require.Equal(t, LLMErrorInfo{Type: "InvalidRequestError", Param: "prompt"}, errInfo)
 	})
 
 	t.Run("non_json_error", func(t *testing.T) {

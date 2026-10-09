@@ -631,6 +631,14 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
 		},
 		{
+			name:        "JSON error from OpenAI backend naming the offending param",
+			headers:     map[string]string{contentTypeHeaderName: "application/json"},
+			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","param":"body.max_tokens","code":"invalid_type"}}`,
+			wantErrType: "invalid_request_error",
+			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_type", Param: "body.max_tokens"},
+		},
+		{
 			name:        "non-JSON 400 error",
 			headers:     map[string]string{statusHeaderName: "400", contentTypeHeaderName: "text/plain"},
 			body:        "Bad request body",
@@ -709,10 +717,11 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, mutatedBody)
 
-			// errInfo.Type tracks the OpenAI/status-derived error type; Code is only
-			// populated for JSON OpenAI errors that carry one.
+			// errInfo.Type tracks the OpenAI/status-derived error type; Code and Param
+			// are only populated for JSON OpenAI errors that carry them.
 			assert.Equal(t, tt.wantErrType, errInfo.Type)
 			assert.Equal(t, tt.wantErrInfo.Code, errInfo.Code)
+			assert.Equal(t, tt.wantErrInfo.Param, errInfo.Param)
 
 			// Verify content-type and content-length headers are set.
 			require.Len(t, headers, 2)

@@ -79,6 +79,10 @@ spec:
                   "llm_error_type" and "llm_error_code" (falling back to the HTTP status code when the
                   provider reports no code), along with "backend_name", "route_name", and
                   "model_name_override", under the "io.envoy.ai_gateway" metadata namespace.
+                  When an OpenAI-shaped error body names the offending request parameter in
+                  "error.param", the filter also sets "llm_error_param" to that name if it is at most
+                  128 characters of ASCII letters, digits, "_", ".", "-", "[" and "]"; otherwise the
+                  key is not set.
                   These can be referenced in access logs via
                   %DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.
 
@@ -947,6 +951,10 @@ spec:
                   "llm_error_type" and "llm_error_code" (falling back to the HTTP status code when the
                   provider reports no code), along with "backend_name", "route_name", and
                   "model_name_override", under the "io.envoy.ai_gateway" metadata namespace.
+                  When an OpenAI-shaped error body names the offending request parameter in
+                  "error.param", the filter also sets "llm_error_param" to that name if it is at most
+                  128 characters of ASCII letters, digits, "_", ".", "-", "[" and "]"; otherwise the
+                  key is not set.
                   These can be referenced in access logs via
                   %DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.
 

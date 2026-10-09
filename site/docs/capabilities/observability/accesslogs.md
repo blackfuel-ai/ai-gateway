@@ -78,6 +78,7 @@ spec:
               # GatewayConfig.spec.emitErrorMetadata is enabled (see below).
               error.type: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%"
               error.code: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_code)%"
+              error.param: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_param)%"
               # Common fields
               start_time: "%START_TIME%"
               method: "%REQ(:METHOD)%"
@@ -197,6 +198,10 @@ metadata namespace, which you can reference from your access log configuration:
   a generic `upstream_error` when the provider does not report a type.
 - `llm_error_code` — the provider error code (e.g. `context_length_exceeded`). Falls back to the HTTP status
   code when the provider does not report a code.
+- `llm_error_param` — the request parameter an OpenAI-shaped error body names as the cause in `error.param`
+  (e.g. `messages.0.content`). Set only when that value is a non-empty string of at most 128 characters made of
+  ASCII letters, digits, `_`, `.`, `-`, `[` and `]`; otherwise the key is not set and there is no fallback value.
+  The check keeps the field a parameter name, so a client-chosen key cannot carry arbitrary text into the log.
 - `backend_name`, `route_name`, `model_name_override` — the same routing-context fields emitted on success,
   so errors can be attributed to a backend/route.
 

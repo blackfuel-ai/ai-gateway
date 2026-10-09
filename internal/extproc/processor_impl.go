@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1144,10 +1145,29 @@ func setRoutingContextMetadata(metadata map[string]*structpb.Value, requestHeade
 	}
 }
 
+// maxErrorParamLength is the longest upstream error parameter name recorded as
+// llm_error_param.
+const maxErrorParamLength = 128
+
+// errorParamPattern matches a request field path such as "body.messages.0.content"
+// or "tools[0].function.name".
+var errorParamPattern = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`)
+
+// isRecordableErrorParam reports whether an upstream error parameter can be recorded
+// as llm_error_param. The parameter echoes a key of the client's request, so only a
+// bounded field path is recorded; anything else could carry request text into the
+// access log.
+func isRecordableErrorParam(param string) bool {
+	return len(param) <= maxErrorParamLength && errorParamPattern.MatchString(param)
+}
+
 // buildErrorDynamicMetadata creates dynamic metadata for non-2xx upstream responses.
 // It emits llm_error_type and llm_error_code (falling back to a generic type and the
 // HTTP status code respectively when the translator could not extract them), plus the
-// shared routing-context fields. This is gated behind the EmitErrorMetadata config flag.
+// shared routing-context fields. It emits llm_error_param, the request parameter the
+// provider names as the cause, only when that name is a non-empty field path of at most
+// maxErrorParamLength characters matching errorParamPattern; there is no fallback value.
+// This is gated behind the EmitErrorMetadata config flag.
 func buildErrorDynamicMetadata(errInfo translator.LLMErrorInfo, statusCode int, requestHeaders map[string]string, backendName, routeName string) *structpb.Struct {
 	errorType := errInfo.Type
 	if errorType == "" {
@@ -1160,6 +1180,9 @@ func buildErrorDynamicMetadata(errInfo translator.LLMErrorInfo, statusCode int, 
 	metadata := map[string]*structpb.Value{
 		"llm_error_type": {Kind: &structpb.Value_StringValue{StringValue: errorType}},
 		"llm_error_code": {Kind: &structpb.Value_StringValue{StringValue: errorCode}},
+	}
+	if isRecordableErrorParam(errInfo.Param) {
+		metadata["llm_error_param"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: errInfo.Param}}
 	}
 	setRoutingContextMetadata(metadata, requestHeaders, backendName, routeName, true)
 

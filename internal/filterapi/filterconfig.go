@@ -53,8 +53,9 @@ type Config struct {
 	// MCPConfig is the configuration for the MCPRoute implementations.
 	MCPConfig *MCPConfig `json:"mcpConfig,omitempty"`
 	// EmitErrorMetadata, when true, makes the filter emit dynamic metadata describing
-	// upstream error responses (llm_error_type, llm_error_code, backend_name, route_name,
-	// model_name_override) under the "io.envoy.ai_gateway" namespace for non-2xx responses.
+	// upstream error responses (llm_error_type, llm_error_code, llm_error_param when the
+	// provider names a valid parameter, backend_name, route_name, model_name_override)
+	// under the "io.envoy.ai_gateway" namespace for non-2xx responses.
 	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
 	// UsageEstimates configures the token usage estimates emitted as dynamic metadata
 	// when a request is admitted.

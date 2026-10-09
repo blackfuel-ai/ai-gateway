@@ -6,6 +6,7 @@
 package translator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,53 @@ func TestExtractOpenAIErrorInfo(t *testing.T) {
 			name: "absent code",
 			body: `{"error":{"type":"server_error"}}`,
 			want: LLMErrorInfo{Type: "server_error"},
+		},
+		{
+			name: "string param",
+			body: `{"error":{"message":"bad value","type":"invalid_request_error","param":"body.messages.0.content","code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "body.messages.0.content"},
+		},
+		{
+			name: "null param",
+			body: `{"error":{"type":"invalid_request_error","param":null,"code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value"},
+		},
+		{
+			name: "empty string param",
+			body: `{"error":{"type":"invalid_request_error","param":"","code":"400"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
+		},
+		{
+			name: "numeric param is dropped and keeps type and code",
+			body: `{"error":{"type":"invalid_request_error","param":3,"code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value"},
+		},
+		{
+			name: "object param is dropped and keeps type and code",
+			body: `{"error":{"type":"invalid_request_error","param":{"field":"messages"},"code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value"},
+		},
+		{
+			name: "array param is dropped and keeps type and code",
+			body: `{"error":{"type":"invalid_request_error","param":["messages"],"code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value"},
+		},
+		{
+			name: "boolean param is dropped and keeps type and code",
+			body: `{"error":{"type":"invalid_request_error","param":true,"code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value"},
+		},
+		// Extraction returns any string param verbatim; buildErrorDynamicMetadata in
+		// internal/extproc applies the length and character rule before recording it.
+		{
+			name: "long param is returned verbatim",
+			body: `{"error":{"type":"invalid_request_error","param":"` + strings.Repeat("a", 129) + `","code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: strings.Repeat("a", 129)},
+		},
+		{
+			name: "param outside the field-name characters is returned verbatim",
+			body: `{"error":{"type":"invalid_request_error","param":"messages 0\ncontent","code":"invalid_value"}}`,
+			want: LLMErrorInfo{Type: "invalid_request_error", Code: "invalid_value", Param: "messages 0\ncontent"},
 		},
 		{
 			name: "unparseable yields zero value",

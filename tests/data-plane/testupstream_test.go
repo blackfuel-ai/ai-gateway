@@ -760,6 +760,19 @@ data: [DONE]
 			expResponseBody: `{"error": {"message": "missing required field", "type": "BadRequestError", "code": "400"}}`,
 		},
 		{
+			name:            "openai - /v1/chat/completions - error response naming the offending param",
+			backend:         "openai",
+			path:            "/v1/chat/completions",
+			responseType:    "",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"something","messages":[{"role":"system","content":"You are a chatbot."}],"temperature":0.5}`,
+			expPath:         "/v1/chat/completions",
+			responseStatus:  "400",
+			expStatus:       http.StatusBadRequest,
+			responseBody:    `{"error": {"message": "Input should be a valid number", "type": "invalid_request_error", "param": "body.temperature", "code": "invalid_type"}}`,
+			expResponseBody: `{"error": {"message": "Input should be a valid number", "type": "invalid_request_error", "param": "body.temperature", "code": "invalid_type"}}`,
+		},
+		{
 			name:            "aws-bedrock - /v1/chat/completions - error response",
 			backend:         "aws-bedrock",
 			path:            "/v1/chat/completions",
@@ -1608,27 +1621,41 @@ data: {"type":"message_stop"}`,
 	}
 
 	// The error subtests above (e.g. the aws-bedrock 429) should have caused the filter to emit
-	// llm_error_type/llm_error_code dynamic metadata, which envoy.yaml logs in the access log.
+	// llm_error_type/llm_error_code/llm_error_param dynamic metadata, which envoy.yaml logs in
+	// the access log.
+	type errorMetadataLine struct {
+		LLMErrorType  string `json:"llm_error_type,omitempty"`
+		LLMErrorCode  string `json:"llm_error_code,omitempty"`
+		LLMErrorParam string `json:"llm_error_param,omitempty"`
+	}
+	accessLogHasErrorLine := func(match func(errorMetadataLine) bool) bool {
+		for _, line := range strings.Split(env.EnvoyStdout(), "\n") {
+			if line == "" {
+				continue
+			}
+			var l errorMetadataLine
+			if err := json.Unmarshal([]byte(line), &l); err != nil {
+				continue
+			}
+			if match(l) {
+				return true
+			}
+		}
+		return false
+	}
 	t.Run("check-error-metadata-access-log", func(t *testing.T) {
 		require.Eventually(t, func() bool {
-			accessLog := env.EnvoyStdout()
-			type lineFormat struct {
-				LLMErrorType string `json:"llm_error_type,omitempty"`
-				LLMErrorCode string `json:"llm_error_code,omitempty"`
-			}
-			for _, line := range strings.Split(accessLog, "\n") {
-				if line == "" {
-					continue
-				}
-				var l lineFormat
-				if err := json.Unmarshal([]byte(line), &l); err != nil {
-					continue
-				}
-				if l.LLMErrorType == "ThrottledException" && l.LLMErrorCode == "429" {
-					return true
-				}
-			}
-			return false
+			return accessLogHasErrorLine(func(l errorMetadataLine) bool {
+				return l.LLMErrorType == "ThrottledException" && l.LLMErrorCode == "429"
+			})
+		}, eventuallyTimeout, eventuallyInterval)
+	})
+	t.Run("check-error-param-access-log", func(t *testing.T) {
+		require.Eventually(t, func() bool {
+			return accessLogHasErrorLine(func(l errorMetadataLine) bool {
+				return l.LLMErrorType == "invalid_request_error" && l.LLMErrorCode == "invalid_type" &&
+					l.LLMErrorParam == "body.temperature"
+			})
 		}, eventuallyTimeout, eventuallyInterval)
 	})
 
