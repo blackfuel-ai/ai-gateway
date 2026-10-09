@@ -389,6 +389,51 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)
 }
 
+// The space after "data:" is optional per the SSE spec, so a backend emitting the
+// compact "data:{…}" framing must still have its usage-only chunk extracted rather
+// than silently dropped (BLA-2215).
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_CompactDataPrefix(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Same chunks as the canonical streaming test, but every event uses the compact
+	// "data:{…}" prefix (no space after the colon).
+	input := "data:{\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello!\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data:{\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data:{\"id\":\"chatcmpl-xyz\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n" +
+		"data:[DONE]\n\n"
+
+	_, body, tokenUsage, responseModel, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+	assert.Equal(t, "gpt-4o", responseModel)
+
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	assert.True(t, inputSet)
+	assert.Equal(t, uint32(10), inputTokens)
+	assert.True(t, outputSet)
+	assert.Equal(t, uint32(5), outputTokens)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	assert.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
+}
+
 func TestAnthropicToOpenAITranslator_ResponseBody_StreamingRequestModelFallback(t *testing.T) {
 	// When the OpenAI chunk has no model, responseModel should fall back to requestModel.
 	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "my-override")

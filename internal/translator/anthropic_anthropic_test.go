@@ -329,3 +329,58 @@ data:{"type":"message_stop"}`
 	require.Equal(t, tokenUsageFrom(10, 1, 0, 16, 26, -1), tokenUsage)
 	require.Equal(t, "claude-sonnet-4-5-20250929", responseModel)
 }
+
+// A final event with no trailing newline must be flushed at end-of-stream: a provider
+// may close the stream immediately after the usage chunk (BLA-2215).
+func TestAnthropicToAnthropic_ResponseBody_streaming_unterminatedFinalLine(t *testing.T) {
+	// message_start usage block shared across subtests: input=9, cache_read=1,
+	// cache_creation=0, output=0 → gross input 10, total 10.
+	const messageStart = `{"type":"message_start","message":{"model":"claude-sonnet-4-6","id":"msg_framing","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":1,"output_tokens":0}}}`
+	// message_delta carries cumulative output_tokens only; cache/input preserved.
+	const messageDelta = `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":16}}`
+
+	newTranslator := func() AnthropicMessagesTranslator {
+		translator := NewAnthropicToAnthropicTranslator("", "")
+		require.NotNil(t, translator)
+		translator.(*anthropicToAnthropicTranslator).stream = true
+		return translator
+	}
+
+	t.Run("end-of-stream flushes unterminated final line", func(t *testing.T) {
+		translator := newTranslator()
+		// Final message_delta has NO trailing newline; only the end-of-stream flush
+		// can recover its usage.
+		content := "event: message_start\ndata: " + messageStart + "\n\n" +
+			"event: message_delta\ndata: " + messageDelta
+		_, _, tokenUsage, _, err := translator.ResponseBody(nil, strings.NewReader(content), true, nil)
+		require.NoError(t, err)
+		require.Equal(t, tokenUsageFrom(10, 1, 0, 16, 26, -1), tokenUsage)
+	})
+
+	t.Run("end-of-stream flushes compact unterminated final line", func(t *testing.T) {
+		translator := newTranslator()
+		// Both gaps at once: compact prefix AND no trailing newline at end-of-stream.
+		content := "event: message_start\ndata:" + messageStart + "\n\n" +
+			"event: message_delta\ndata:" + messageDelta
+		_, _, tokenUsage, _, err := translator.ResponseBody(nil, strings.NewReader(content), true, nil)
+		require.NoError(t, err)
+		require.Equal(t, tokenUsageFrom(10, 1, 0, 16, 26, -1), tokenUsage)
+	})
+
+	t.Run("mid-stream incomplete line stays buffered", func(t *testing.T) {
+		translator := newTranslator()
+		// The trailing message_delta has no newline and endOfStream=false: it must
+		// stay buffered (not force-parsed), so output is still 0 from message_start.
+		content := "event: message_start\ndata: " + messageStart + "\n\n" +
+			"event: message_delta\ndata: " + messageDelta
+		_, _, tokenUsage, _, err := translator.ResponseBody(nil, strings.NewReader(content), false, nil)
+		require.NoError(t, err)
+		require.Equal(t, tokenUsageFrom(10, 1, 0, 0, 10, -1), tokenUsage)
+
+		// Once the terminating newline arrives at end-of-stream, the buffered
+		// message_delta is parsed and its usage recovered — nothing was lost.
+		_, _, tokenUsage, _, err = translator.ResponseBody(nil, strings.NewReader("\n\n"), true, nil)
+		require.NoError(t, err)
+		require.Equal(t, tokenUsageFrom(10, 1, 0, 16, 26, -1), tokenUsage)
+	})
+}
