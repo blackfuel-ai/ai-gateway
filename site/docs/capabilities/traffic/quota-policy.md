@@ -24,7 +24,8 @@ Key features of QuotaPolicy:
 
 - **Per-model token quotas** — assign token budgets to individual models served by an `AIServiceBackend`.
 - **CEL cost expressions** — weight input, output, cached, and reasoning tokens differently when
-  computing how much a request burns down a quota.
+  computing how much a request burns down a quota, per model or per bucket.
+- **Request-count buckets** — count requests instead of tokens in selected buckets.
 - **Client-selector bucket rules** — carve out per-tenant or per-header quotas using request attributes.
 - **Shadow mode** — evaluate quota rules without enforcing them, for safe rollout.
 
@@ -38,7 +39,7 @@ rate limit service. Choose between them based on the budget's intent and scope:
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | Configuration    | One AI Gateway policy containing the token cost and quota buckets                                                                           | `llmRequestCosts` on an `AIGatewayRoute`, plus an Envoy Gateway `BackendTrafficPolicy`                                |
 | Scope            | Backend- and model-scoped - the budget follows an `AIServiceBackend` across every route that sends traffic to it                            | Route/Gateway-scoped - budgets are keyed by client descriptors on a route                                             |
-| Token accounting | One default or custom CEL cost per model                                                                                                    | Multiple metadata keys can track and limit input, output, total, or custom token costs separately                     |
+| Token accounting | A default or custom CEL cost per model, overridable per bucket; a bucket can count requests instead of tokens                               | Multiple metadata keys can track and limit input, output, total, or custom token costs separately                     |
 | Client budgets   | Default and header-selected buckets, with optional shadow mode                                                                              | Envoy Gateway client selectors and rate limit rules                                                                   |
 | Enforcement      | In `Shared` mode, a request is denied only when all applicable quota buckets are exhausted; the quota is evaluated for the selected backend | A request is denied when any matched rate limit is exceeded; limits are evaluated from the route's client descriptors |
 | Time windows     | Exactly one second, minute, hour, or day                                                                                                    | One second, minute, hour, day, month, or year                                                                         |
@@ -56,7 +57,7 @@ metadata, separate limits for input and output tokens, or a monthly or yearly wi
 
 1. A `QuotaPolicy` is attached to one or more `AIServiceBackend` resources via `targetRefs`.
 2. For each completed request, the token cost is computed using the configured cost expression
-   (defaults to `total_tokens`).
+   (the bucket's own, else the model's, else `total_tokens`).
 3. The cost is charged against the matching quota bucket (the per-model default bucket, or a matching
    bucket rule).
 4. When all related quota buckets for that model are exceeded, subsequent matching requests receive `429 Too Many Requests`.
@@ -188,6 +189,38 @@ example `output_tokens * 6u`) and the expression must evaluate to a non-negative
 division truncates (`cached_input_tokens / 10u`); for an exact fractional weight, cast through
 floating point — for example `uint(double(cached_input_tokens) * 0.1)`.
 :::
+
+### Per-Bucket Cost
+
+A `costExpression` can also be set on an individual bucket (the `defaultBucket` or a bucket rule's
+`quota`). That bucket burns down by its own expression, while buckets without one fall back to the
+model-level `costExpression`, then to `total_tokens`. This lets one model keep, for example, a
+total-token budget and an output-token budget side by side.
+
+Set `costMetric: Requests` on a bucket to count requests instead of tokens: the bucket burns down by
+exactly 1 per request when the request is admitted and takes no token charge when the response
+completes. `costMetric` defaults to `Tokens`, and `costExpression` cannot be combined with
+`costMetric: Requests`.
+
+```yaml
+perModelQuotas:
+  - modelName: gpt-4
+    quota:
+      costExpression: "total_tokens" # Model-level fallback.
+      defaultBucket:
+        limit: 20000
+        duration: "1h"
+        costExpression: "output_tokens" # This bucket counts output tokens only.
+      bucketRules:
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          quota:
+            limit: 100 # Counts requests, not tokens.
+            duration: "1m"
+            costMetric: Requests
+```
 
 ### Bucket Mode
 

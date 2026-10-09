@@ -316,6 +316,49 @@ type AIGatewayRouteRule struct {
 	//
 	// +optional
 	ExcludeFromModelsEndpoint bool `json:"excludeFromModelsEndpoint,omitempty"`
+
+	// Mirrors specifies backends that receive a mirrored copy of every matched request.
+	// Responses from mirror backends are always discarded; only the primary backendRefs
+	// respond to the client. Mirror traffic is cloned via the Gateway API HTTPRequestMirror
+	// filter, but each mirror's BackendRef supports the same AI-specific transformations
+	// (ModelNameOverride, HeaderMutation, BodyMutation) as primary backendRefs, so the
+	// shadow backend can be addressed with a different model name or modified request body.
+	// Each entry corresponds to one shadow backend; use Percent or Fraction to sample.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	Mirrors []AIGatewayRouteRuleMirror `json:"mirrors,omitempty"`
+}
+
+// AIGatewayRouteRuleMirror specifies a shadow backend that receives a copy of every
+// matched request. Mirror requests run through the same AI Gateway processing pipeline
+// as primary requests, so per-backend AI transformations (ModelNameOverride,
+// HeaderMutation, BodyMutation) defined on the embedded BackendRef are honored.
+// Responses from mirror backends are always discarded.
+type AIGatewayRouteRuleMirror struct {
+	// BackendRef is the shadow destination. Reuses AIGatewayRouteRuleBackendRef so it
+	// carries the same AI-specific fields (ModelNameOverride, HeaderMutation,
+	// BodyMutation) as primary backendRefs. Weight and Priority are ignored for
+	// mirror backends — each mirror entry is a single fire-and-forget destination.
+	//
+	// +kubebuilder:validation:Required
+	BackendRef AIGatewayRouteRuleBackendRef `json:"backendRef"`
+
+	// Percent is the percentage of requests to mirror (0-100). Maps to the
+	// Gateway API HTTPRequestMirrorFilter Percent field. If both Percent and
+	// Fraction are unset, every matched request is mirrored.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	Percent *int32 `json:"percent,omitempty"`
+
+	// Fraction is the fractional percentage of requests to mirror. Maps to the
+	// Gateway API HTTPRequestMirrorFilter Fraction field. Takes precedence over
+	// Percent if both are set.
+	//
+	// +optional
+	Fraction *gwapiv1.Fraction `json:"fraction,omitempty"`
 }
 
 // AIGatewayRouteRuleBackendRef is a reference to a backend with a weight.
@@ -468,6 +511,38 @@ type HTTPBodyMutation struct {
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=16
 	Remove []string `json:"remove,omitempty"`
+
+	// SetDefault sets the given JSON field (name, value) only when the field is
+	// not already defined in the request body. Only top-level fields are
+	// currently supported. The presence check is path-existence: an explicit
+	// null from the client is considered "defined" and suppresses the default.
+	//
+	// When the same path is targeted by both Set and SetDefault, Set wins —
+	// SetDefault is applied after Set/Remove and only fills paths that are
+	// still absent at that point. Route-level SetDefault entries override
+	// backend-level entries for the same path.
+	//
+	// Input:
+	//   {
+	//     "model": "gpt-4"
+	//   }
+	//
+	// Config:
+	//   setDefault:
+	//   - path: "reasoning_effort"
+	//     value: "\"none\""
+	//
+	// Output:
+	//   {
+	//     "model": "gpt-4",
+	//     "reasoning_effort": "none"
+	//   }
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=path
+	// +kubebuilder:validation:MaxItems=16
+	SetDefault []HTTPBodyField `json:"setDefault,omitempty"`
 }
 
 // HTTPBodyField represents a JSON field name and value for body mutation

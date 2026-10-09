@@ -199,7 +199,7 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseError(t *testing.T) {
 		}
 		errorBody := "Service Unavailable"
 
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.NotNil(t, headerMutation)
 		require.NotNil(t, bodyMutation)
@@ -217,7 +217,7 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseError(t *testing.T) {
 		}
 		errorBody := `{"error": {"message": "Invalid request"}}`
 
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.Nil(t, headerMutation)
 		require.Nil(t, bodyMutation)
@@ -228,7 +228,7 @@ func TestCohereToCohereTranslatorV2Rerank_ResponseError(t *testing.T) {
 			statusHeaderName:      "500",
 			contentTypeHeaderName: "text/plain",
 		}
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, alwaysErrReader{})
+		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, alwaysErrReader{})
 		require.Error(t, err)
 		require.ErrorContains(t, err, "failed to read error body")
 		require.Nil(t, headerMutation)

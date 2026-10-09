@@ -13,6 +13,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/json"
+	"github.com/envoyproxy/ai-gateway/internal/metrics"
 )
 
 const (
@@ -107,6 +108,28 @@ func systemMsgToDeveloperMsg(msg openai.ChatCompletionSystemMessageParam) openai
 	}
 }
 
+// setOpenAIStreamUsage copies OpenAI streaming usage into the metrics TokenUsage using
+// OpenAI accounting, where prompt_tokens already includes cached tokens (cached and
+// reasoning are informational subsets, not added to input). Shared by the OpenAI-native
+// and the anthropic→OpenAI streaming paths so usage is read identically from any chunk
+// that carries it — including the final content chunk (non-empty choices + finish_reason),
+// the framing OpenRouter/GLM-5.2 uses. No-op when usage is nil.
+func setOpenAIStreamUsage(tu *metrics.TokenUsage, usage *openai.Usage) {
+	if usage == nil {
+		return
+	}
+	tu.SetInputTokens(uint32(usage.PromptTokens))      //nolint:gosec
+	tu.SetOutputTokens(uint32(usage.CompletionTokens)) //nolint:gosec
+	tu.SetTotalTokens(uint32(usage.TotalTokens))       //nolint:gosec
+	if usage.PromptTokensDetails != nil {
+		tu.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))                   //nolint:gosec
+		tu.SetCacheCreationInputTokens(uint32(usage.PromptTokensDetails.CacheWriteTokensValue())) //nolint:gosec
+	}
+	if usage.CompletionTokensDetails != nil {
+		tu.SetReasoningTokens(uint32(usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
+	}
+}
+
 // serialize a ChatCompletionResponseChunk, this is common for all chat completion request
 func serializeOpenAIChatCompletionChunk(chunk *openai.ChatCompletionResponseChunk, buf *[]byte) error {
 	var chunkBytes []byte
@@ -118,4 +141,34 @@ func serializeOpenAIChatCompletionChunk(chunk *openai.ChatCompletionResponseChun
 	*buf = append(*buf, chunkBytes...)
 	*buf = append(*buf, '\n', '\n')
 	return nil
+}
+
+// anthropicErrorTypeForStatus maps an HTTP status code to the Anthropic error
+// type name that goes in an error response's `error.type` field. It is the
+// fallback used when a non-Anthropic backend fails without a structured JSON
+// body to translate, so all that is left to classify the failure is the status.
+// https://platform.claude.com/docs/en/api/errors#http-errors
+func anthropicErrorTypeForStatus(statusCode string) string {
+	switch statusCode {
+	case "400":
+		return "invalid_request_error"
+	case "401":
+		return "authentication_error"
+	case "403":
+		return "permission_error"
+	case "404":
+		return "not_found_error"
+	case "413":
+		return "request_too_large"
+	case "429":
+		return "rate_limit_error"
+	case "500":
+		return "internal_server_error"
+	case "503":
+		return "service_unavailable_error"
+	case "529":
+		return "overloaded_error"
+	default:
+		return "internal_server_error"
+	}
 }

@@ -84,7 +84,7 @@ func (a *anthropicToAnthropicTranslator) ResponseHeaders(_ map[string]string) (
 }
 
 // ResponseBody implements [AnthropicMessagesTranslator.ResponseBody].
-func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracingapi.MessageSpan) (
+func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body io.Reader, endOfStream bool, span tracingapi.MessageSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if a.stream {
@@ -95,7 +95,7 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 		}
 
 		a.buffered = append(a.buffered, buf...)
-		a.extractUsageFromBufferEvent(span)
+		a.extractUsageFromBufferEvent(endOfStream, span)
 		// Use stored streaming response model, fallback to request model for non-compliant backends
 		responseModel = cmp.Or(a.streamingResponseModel, a.requestModel)
 		return nil, nil, a.streamingTokenUsage, responseModel, nil
@@ -130,17 +130,23 @@ func (a *anthropicToAnthropicTranslator) ResponseBody(_ map[string]string, body 
 }
 
 // extractUsageFromBufferEvent extracts the token usage from the buffered event.
-// It scans complete lines and accumulates usage from all events in this batch.
-func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent(s tracingapi.MessageSpan) {
+// It scans complete lines and accumulates usage from all events in this batch. At
+// endOfStream the final line is flushed even without a trailing newline, because a
+// provider may close the stream immediately after the usage chunk.
+func (a *anthropicToAnthropicTranslator) extractUsageFromBufferEvent(endOfStream bool, s tracingapi.MessageSpan) {
 	for {
-		i := bytes.IndexByte(a.buffered, '\n')
-		if i == -1 {
+		var line []byte
+		if i := bytes.IndexByte(a.buffered, '\n'); i >= 0 {
+			line = a.buffered[:i]
+			a.buffered = a.buffered[i+1:]
+		} else if endOfStream && len(a.buffered) > 0 {
+			line = a.buffered
+			a.buffered = nil
+		} else {
 			// Recalculate total tokens before returning
 			a.updateTotalTokens()
 			return
 		}
-		line := a.buffered[:i]
-		a.buffered = a.buffered[i+1:]
 		data, ok := cutSSEDataPrefix(line)
 		if !ok {
 			continue
@@ -249,13 +255,14 @@ func (a *anthropicToAnthropicTranslator) updateTotalTokens() {
 func (a *anthropicToAnthropicTranslator) ResponseError(respHeaders map[string]string, r io.Reader) (
 	newHeaders []internalapi.Header,
 	mutatedBody []byte,
+	errInfo LLMErrorInfo,
 	err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
 	if !strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
 		buf, err := io.ReadAll(r)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
 		var typ string
 		switch statusCode {
@@ -286,12 +293,23 @@ func (a *anthropicToAnthropicTranslator) ResponseError(respHeaders map[string]st
 		}
 		mutatedBody, err = json.Marshal(anthropicError)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 		}
 		newHeaders = append(newHeaders,
 			internalapi.Header{contentTypeHeaderName, jsonContentType},
 			internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(mutatedBody))},
 		)
+		return newHeaders, mutatedBody, LLMErrorInfo{Type: typ}, nil
+	}
+	// JSON error: pass the upstream Anthropic error through unchanged, best-effort
+	// extracting its type for error metadata.
+	buf, readErr := io.ReadAll(r)
+	if readErr != nil {
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", readErr)
+	}
+	var anthropicError anthropic.ErrorResponse
+	if json.Unmarshal(buf, &anthropicError) == nil {
+		errInfo = LLMErrorInfo{Type: anthropicError.Error.Type}
 	}
 	return
 }

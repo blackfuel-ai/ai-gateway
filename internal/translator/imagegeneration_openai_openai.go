@@ -63,7 +63,7 @@ func (o *openAIToOpenAIImageGenerationTranslator) RequestBody(original []byte, p
 // ResponseError implements [ImageGenerationTranslator.ResponseError]
 // For OpenAI based backend we return the OpenAI error type as is.
 // If connection fails the error body is translated to OpenAI error type for events such as HTTP 503 or 504.
-func (o *openAIToOpenAIImageGenerationTranslator) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, error) {
+func (o *openAIToOpenAIImageGenerationTranslator) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, LLMErrorInfo, error) {
 	return convertErrorOpenAIToOpenAIError(respHeaders, body)
 }
 

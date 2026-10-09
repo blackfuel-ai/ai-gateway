@@ -84,6 +84,14 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) RequestBody(_ []byte, body
 		}
 	}
 
+	// Only :path is rewritten. The x-ai-eg-original-path / x-envoy-original-path
+	// headers set by the router phase deliberately keep the client's original path:
+	// nothing selects a processor from them (the upstream filter derives its
+	// processor from the router processor of the request, see
+	// internal/extproc/server.go), and access logs read x-envoy-original-path to
+	// report what the client actually requested. A two-tier deployment's second
+	// gateway resolves its processor from :path and overwrites the original-path
+	// headers with its own values.
 	newHeaders = []internalapi.Header{
 		{pathHeaderName, a.path},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
@@ -121,12 +129,30 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyNonStreaming(b
 
 	responseModel = cmp.Or(openAIResp.Model, a.requestModel)
 
+	// The cache arguments stay nil: an OpenAI upstream already counts cached
+	// and cache-creation tokens inside prompt_tokens, and the helper adds what
+	// it is given to the input total, so passing them here would count them
+	// twice.
 	tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
 		int64(openAIResp.Usage.PromptTokens),
 		int64(openAIResp.Usage.CompletionTokens),
 		nil,
 		nil,
 	)
+	// The cache split is still reported, as the streaming path does through
+	// setOpenAIStreamUsage. Without this a non-streaming /v1/messages response
+	// carries no cached-token count at all, and every consumer of the usage
+	// record reads a fully uncached prompt.
+	if details := openAIResp.Usage.PromptTokensDetails; details != nil {
+		tokenUsage.SetCachedInputTokens(uint32(details.CachedTokens))                   //nolint:gosec
+		tokenUsage.SetCacheCreationInputTokens(uint32(details.CacheWriteTokensValue())) //nolint:gosec
+	}
+	// Reasoning tokens are part of the same split, counted inside
+	// completion_tokens by the upstream and reported alongside it by every
+	// other non-streaming translator.
+	if details := openAIResp.Usage.CompletionTokensDetails; details != nil {
+		tokenUsage.SetReasoningTokens(uint32(details.ReasoningTokens)) //nolint:gosec
+	}
 
 	anthropicResp := openAIResponseToAnthropic(openAIResp, responseModel)
 
@@ -170,8 +196,22 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 	// A non-nil empty body tells Envoy to replace the chunk with nothing, suppressing the
 	// raw upstream bytes instead of passing them through unchanged.
 	out := make([]byte, 0)
-	if err = a.streamState.processBuffer(&out, endOfStream); err != nil {
+	pingWorthy, err := a.streamState.processBuffer(&out, endOfStream)
+	if err != nil {
 		return nil, nil, tokenUsage, responseModel, err
+	}
+
+	// Never turn upstream keepalive traffic into total downstream silence. When this
+	// call consumed only keepalive comment blocks (e.g. OpenRouter's ": OPENROUTER
+	// PROCESSING") or undecodable data, emit an Anthropic ping event instead of an
+	// empty body. Streams may include any number of ping events, and every rolling
+	// idle timer on the path (Cloudflare proxy read timeout, client stream-idle
+	// timers) resets only on response bytes; suppressing keepalives into silence is
+	// what wedges long-prefill /v1/messages requests (BLA-2721).
+	if pingWorthy && len(out) == 0 {
+		if err = emitPing(&out); err != nil {
+			return nil, nil, tokenUsage, responseModel, err
+		}
 	}
 
 	// Update responseModel if updated in streamState or take requested model
@@ -187,6 +227,7 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) responseBodyStreaming(body
 func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders map[string]string, r io.Reader) (
 	newHeaders []internalapi.Header,
 	mutatedBody []byte,
+	errInfo LLMErrorInfo,
 	err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
@@ -194,9 +235,15 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders 
 
 	if strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
 		// OpenAI backend returned a structured JSON error; translate to Anthropic error format.
+		// Read the raw body so we can tolerate "code" being a string or number.
+		var buf []byte
+		buf, err = io.ReadAll(r)
+		if err != nil {
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
+		}
 		var openaiErr openai.Error
-		if err = json.NewDecoder(r).Decode(&openaiErr); err != nil {
-			return nil, nil, fmt.Errorf("failed to unmarshal OpenAI error body: %w", err)
+		if err = json.Unmarshal(buf, &openaiErr); err != nil {
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to unmarshal OpenAI error body: %w", err)
 		}
 		anthropicError = anthropic.ErrorResponse{
 			Type: "error",
@@ -205,44 +252,24 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) ResponseError(respHeaders 
 				Message: openaiErr.Error.Message,
 			},
 		}
+		errInfo = extractOpenAIErrorInfo(buf)
 	} else {
 		var buf []byte
 		buf, err = io.ReadAll(r)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
-		var typ string
-		switch statusCode {
-		case "400":
-			typ = "invalid_request_error"
-		case "401":
-			typ = "authentication_error"
-		case "403":
-			typ = "permission_error"
-		case "404":
-			typ = "not_found_error"
-		case "413":
-			typ = "request_too_large"
-		case "429":
-			typ = "rate_limit_error"
-		case "500":
-			typ = "internal_server_error"
-		case "503":
-			typ = "service_unavailable_error"
-		case "529":
-			typ = "overloaded_error"
-		default:
-			typ = "internal_server_error"
-		}
+		typ := anthropicErrorTypeForStatus(statusCode)
 		anthropicError = anthropic.ErrorResponse{
 			Type:  "error", // Always "error" at the top level.
 			Error: anthropic.ErrorResponseMessage{Type: typ, Message: string(buf)},
 		}
+		errInfo = LLMErrorInfo{Type: typ}
 	}
 
 	mutatedBody, err = json.Marshal(anthropicError)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 	}
 	newHeaders = append(newHeaders,
 		internalapi.Header{contentTypeHeaderName, jsonContentType},

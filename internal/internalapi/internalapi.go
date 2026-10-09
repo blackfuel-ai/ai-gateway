@@ -24,6 +24,8 @@ const (
 	EnvoyOriginalPathHeader = "x-envoy-original-path"
 	// OriginalPathHeader is the AI Gateway header used to preserve the original request path.
 	OriginalPathHeader = EnvoyAIGatewayHeaderPrefix + "original-path"
+	// UsageEstimateHeaderPrefix is the prefix of the request headers carrying a usage estimate upstream.
+	UsageEstimateHeaderPrefix = EnvoyAIGatewayHeaderPrefix + "usage-estimate-"
 	// InternalEndpointMetadataNamespace is the namespace used for the dynamic metadata for internal use.
 	InternalEndpointMetadataNamespace = "aigateway.envoy.io"
 	// InternalMetadataBackendNameKey is the key used to store the backend name
@@ -37,6 +39,10 @@ const (
 	// filter to backend auth handlers. The AWS handler derives its SigV4 signing region from this host,
 	// so there is no separate region header.
 	UpstreamHostHeader = EnvoyAIGatewayHeaderPrefix + "upstream-host"
+	// InternalMetadataMirrorKey marks a cluster as a shadow/mirror leg of a
+	// primary request. Set on mirror clusters so the extproc cost emitter can
+	// skip LLMRequestCost emission for shadow traffic and avoid double-billing.
+	InternalMetadataMirrorKey = "mirror"
 	// MCPBackendHeader is the special header key used to specify the target backend name.
 	MCPBackendHeader = EnvoyAIGatewayHeaderPrefix + "mcp-backend"
 	// MCPRouteHeader is the special header key used to identify the mcp route.
@@ -127,6 +133,17 @@ const (
 	// This is the default header name in the reference implementation:
 	// https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/2b5b337b45c3289e5f9367b2c19deef021722fcd/pkg/epp/server/runserver.go#L63
 	EndpointPickerHeaderKey = "x-gateway-destination-endpoint"
+	// MirrorEndpointPickerHeaderKey carries the endpoint picked for an InferencePool request
+	// MIRROR. A mirror pool's EPP runs first in the downstream chain and its selection is copied
+	// from EndpointPickerHeaderKey into this header by a header_mutation filter (the source
+	// header is kept — a primary pool's EPP overwrites it for the real upstream, and on the
+	// mirror's deployment-id-pinned rule it stays the rule cluster's ORIGINAL_DST key), so the
+	// shadow clone — which inherits the finalized downstream headers — resolves the mirror
+	// ORIGINAL_DST cluster through this header.
+	MirrorEndpointPickerHeaderKey = "x-bf-mirror-destination-endpoint"
+	// DefaultEndpointPickerPort is the endpoint-picker Service port assumed when an
+	// InferencePool's endpointPickerRef does not carry an explicit port.
+	DefaultEndpointPickerPort = 9002
 )
 
 const (
@@ -177,6 +194,15 @@ func AWSBedrockRegionFromHost(host string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// PerRouteRuleMirrorBackendName generates a unique backend name for a mirror reference
+// within a per-route rule. Envoy Gateway names mirror clusters
+// "httproute/<ns>/<name>/rule/<ruleIdx>-mirror-<mirrorIdx>", so the corresponding
+// filterapi.Backend must be keyed off the same indices to let extproc resolve the
+// shadow backend's overrides at runtime.
+func PerRouteRuleMirrorBackendName(namespace, name, routeName string, routeRuleIndex, mirrorIndex int) string {
+	return fmt.Sprintf("%s/%s/route/%s/rule/%d/mirror/%d", namespace, name, routeName, routeRuleIndex, mirrorIndex)
 }
 
 const (

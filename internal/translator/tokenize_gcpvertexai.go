@@ -139,7 +139,7 @@ func (o *ToGCPVertexAIV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Re
 // ResponseError implements [TokenizeTranslator.ResponseError] for GCP Vertex AI.
 // Translate GCP Vertex AI exceptions to OpenAI error type.
 func (o *ToGCPVertexAIV1Tokenize) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	return convertGCPVertexAIErrorToOpenAI(respHeaders, body)
 }

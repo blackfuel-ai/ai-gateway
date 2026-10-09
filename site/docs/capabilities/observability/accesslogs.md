@@ -74,6 +74,10 @@ spec:
               gen_ai.usage.total_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_total_token)%"
               gen_ai.usage.input_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_input_token)%"
               gen_ai.usage.output_tokens: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_output_token)%"
+              # Error fields, populated only for non-2xx upstream responses when
+              # GatewayConfig.spec.emitErrorMetadata is enabled (see below).
+              error.type: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%"
+              error.code: "%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_code)%"
               # Common fields
               start_time: "%START_TIME%"
               method: "%REQ(:METHOD)%"
@@ -170,6 +174,106 @@ You can deploy the example to quickly try the access log configuration against a
 </CodeBlock>
 
 Once everything is applied you can send requests to the gateway and see the access logs in the gateway pod logs.
+
+## Error Metadata in Access Logs
+
+By default the AI Gateway only emits dynamic metadata for successful (2xx) responses. To also capture
+information about upstream LLM provider errors, enable `emitErrorMetadata` on the `GatewayConfig`:
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: GatewayConfig
+metadata:
+  name: envoy-ai-gateway
+  namespace: default
+spec:
+  emitErrorMetadata: true
+```
+
+When enabled, non-2xx upstream responses populate the following keys under the `io.envoy.ai_gateway`
+metadata namespace, which you can reference from your access log configuration:
+
+- `llm_error_type` — the provider error type (e.g. `rate_limit_error`, `ThrottledException`). Falls back to
+  a generic `upstream_error` when the provider does not report a type.
+- `llm_error_code` — the provider error code (e.g. `context_length_exceeded`). Falls back to the HTTP status
+  code when the provider does not report a code.
+- `backend_name`, `route_name`, `model_name_override` — the same routing-context fields emitted on success,
+  so errors can be attributed to a backend/route.
+
+This applies only to errors returned by the upstream LLM provider. Errors generated before backend selection
+(for example, an unknown model) do not carry this metadata; use the standard `%RESPONSE_CODE%` field for those.
+
+## Usage Estimates in Access Logs
+
+The AI Gateway can estimate the token usage of a request when it is admitted, before any upstream has
+answered, from the responses recently completed for requests carrying the same value of a request header
+(for example the API key identity stamped by an external authorization service) and the same model.
+Completed requests are accumulated over fixed periods aligned on the clock, and a request is estimated from the
+last completed period. `usageEstimatePeriod` sets their length, from `5s` to `10m`, and defaults to `60s`. A longer
+period gathers more responses per estimate and leaves fewer clients without one, but follows a change in a client's
+requests more slowly. Changing it starts every estimate over.
+Configure the estimates on the `GatewayConfig`:
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: GatewayConfig
+metadata:
+  name: envoy-ai-gateway
+  namespace: default
+spec:
+  usageEstimates:
+    - metadataKey: estimated_input_token
+      cel: "input_tokens"
+      byHeader: x-api-key-id
+      emitMetric: true
+      emitHeader: true
+    - metadataKey: estimated_fresh_input_token
+      cel: "input_tokens - cached_input_tokens"
+      byHeader: x-api-key-id
+    - metadataKey: estimated_cache_rate
+      cel: "cache_rate"
+      byHeader: x-api-key-id
+  usageEstimatePeriod: 60s
+```
+
+The estimated input tokens are the request body size times the input tokens per body byte observed in the
+last completed period, and the estimated cached input tokens are those input tokens times the period's cache rate, so never
+more than the input tokens. The `cel` expression is evaluated
+on those estimates, with zero output tokens, and its result is stored under `metadataKey` in the
+`io.envoy.ai_gateway` metadata namespace. It can also read the measured ratios of the last completed period:
+
+- `input_tokens_per_byte` — the input tokens of its successful responses divided by the size of their request bodies.
+- `cache_rate` — the mean, over its successful responses, of the share of each response's input tokens that were
+  cached, between 0 and 1. Each response counts the same whatever its size.
+
+Both are doubles, so `cel: "cache_rate"` emits the measured cache rate. The expression must return an int, a uint or a
+double that is finite and not negative. CEL does not convert between integers and doubles implicitly: write
+`double(input_tokens) * cache_rate`.
+
+Only successful responses that report input usage are counted. No estimate is emitted when the last completed period
+holds no such response. Estimates change no routing, cost or rate limit decision. Each gateway replica estimates
+from the responses it served. To learn from streamed responses, a
+streaming OpenAI-compatible request gets `stream_options.include_usage` set, as with `llmRequestCosts`, so its client
+receives the final usage chunk.
+
+A `metadataKey` must not equal an `LLMRequestCost` `metadataKey`, global, per route or added by a `QuotaPolicy`. On
+such a collision the controller stops updating the gateway's filter configuration, which keeps serving the last valid one, until the
+collision is removed. The `byHeader` header should be set by the gateway, for example by an external authorization
+service, rather than by clients. Each distinct value with a successful response is kept in memory while it has
+successful responses, and for one to two periods, plus up to 30 seconds, after its last one.
+
+With `emitMetric: true`, the estimate is also recorded in the `aigw.usage_estimate.requests` counter (with an
+`aigw.usage_estimate.outcome` of `estimated`, `cold` when the last completed period holds no successful response, or
+`error` when the expression failed) and the `aigw.usage_estimate.ratio` histogram (the estimate divided by the same
+expression evaluated on the actual usage of the response, with the model, `backend` and `route_name` of the estimate, so
+the ratio measures the usage estimation alone). The header value is never a metric attribute.
+
+With `emitHeader: true`, the estimate is also sent upstream as a request header named `x-ai-eg-usage-estimate-`
+followed by `metadataKey` with each underscore replaced by a hyphen: the example above sends
+`x-ai-eg-usage-estimate-estimated-input-token`. Its value is the estimate in decimal notation, for example `1200` or
+`0.4`. The header carries only the gateway's estimate: a value sent by the client is replaced by the estimate, and
+removed when the request gets no estimate. The `metadataKey` of an estimate with `emitHeader` must contain only
+lower-case letters, digits and underscores. The header is not returned to the client.
 
 ## MCP Metadata in Access Logs
 

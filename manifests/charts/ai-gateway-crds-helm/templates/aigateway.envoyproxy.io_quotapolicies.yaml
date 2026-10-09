@@ -290,6 +290,53 @@ spec:
                                   A response with 429 HTTP status code is sent back to the client when
                                   the selected requests have exceeded the quota.
                                 properties:
+                                  admissionReserve:
+                                    description: |-
+                                      AdmissionReserve charges an estimate of the request's cost to the bucket
+                                      when the request is admitted, so requests in flight count against the
+                                      limit. Without it the whole cost is charged at stream completion.
+                                    properties:
+                                      percent:
+                                        description: |-
+                                          Percent of the usage estimate charged at admission. Below the actual
+                                          cost, requests in flight are partly uncounted; above it, the difference
+                                          is held until the reserve is released, or stays charged when reserves
+                                          are not released.
+                                        format: int32
+                                        maximum: 100
+                                        minimum: 1
+                                        type: integer
+                                      usageEstimate:
+                                        description: |-
+                                          UsageEstimate is the metadataKey of the GatewayConfig usageEstimates item
+                                          the reserve is computed from. The GatewayConfig of every Gateway serving
+                                          the targeted backends must declare it; otherwise the controller stops
+                                          updating that gateway's filter configuration, which keeps serving the last
+                                          valid one, until it does.
+                                        maxLength: 128
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                    - percent
+                                    - usageEstimate
+                                    type: object
+                                  costExpression:
+                                    description: |-
+                                      CostExpression is a per-bucket CEL expression for computing this bucket's
+                                      quota burndown. When unset, the model-level CostExpression applies, then
+                                      "total_tokens". Ignored when CostMetric is "Requests".
+                                    type: string
+                                  costMetric:
+                                    default: Tokens
+                                    description: |-
+                                      CostMetric selects what this bucket counts. "Tokens" (the default) burns
+                                      the bucket down at stream-done by CostExpression (or the model-level
+                                      fallback). "Requests" burns the bucket down by exactly 1 per request at
+                                      request time and adds no stream-done token charge.
+                                    enum:
+                                    - Tokens
+                                    - Requests
+                                    type: string
                                   duration:
                                     description: 'Time window. Must be exactly one
                                       of: "1s" (1 second), "1m" (1 minute), "1h" (1
@@ -300,6 +347,22 @@ spec:
                                     - 1h
                                     - 1d
                                     type: string
+                                  dynamicOverride:
+                                    description: |-
+                                      DynamicOverride supplies the limit at request time, falling back to Limit
+                                      when the source is absent or malformed. The time window is always Duration.
+                                    properties:
+                                      fromHeader:
+                                        description: |-
+                                          FromHeader names a request header whose value is a non-negative integer limit
+                                          for the current time window. A value of 0 blocks all matching requests.
+                                          The header must be set or overwritten by a trusted component
+                                          (e.g. an external authorization service) and never accepted from clients.
+                                        minLength: 1
+                                        type: string
+                                    required:
+                                    - fromHeader
+                                    type: object
                                   limit:
                                     description: The limit alloted for a specified
                                       time window.
@@ -308,6 +371,15 @@ spec:
                                 - duration
                                 - limit
                                 type: object
+                                x-kubernetes-validations:
+                                - message: costExpression cannot be combined with
+                                    costMetric=Requests
+                                  rule: '!(has(self.costExpression) && has(self.costMetric)
+                                    && self.costMetric == ''Requests'')'
+                                - message: admissionReserve cannot be combined with
+                                    costMetric=Requests
+                                  rule: '!(has(self.admissionReserve) && has(self.costMetric)
+                                    && self.costMetric == ''Requests'')'
                               shadowMode:
                                 description: |-
                                   ShadowMode indicates whether this quota rule runs in shadow mode.
@@ -318,6 +390,13 @@ spec:
                             required:
                             - quota
                             type: object
+                            x-kubernetes-validations:
+                            - message: dynamicOverride cannot be combined with shadowMode
+                              rule: '!(has(self.shadowMode) && self.shadowMode &&
+                                has(self.quota.dynamicOverride))'
+                            - message: admissionReserve cannot be combined with shadowMode
+                              rule: '!(has(self.shadowMode) && self.shadowMode &&
+                                has(self.quota.admissionReserve))'
                           type: array
                         costExpression:
                           description: |-
@@ -332,6 +411,53 @@ spec:
                             Quota applicable to all traffic. This value can be overridden for specific classes of requests
                             using the "BucketRules" configuration.
                           properties:
+                            admissionReserve:
+                              description: |-
+                                AdmissionReserve charges an estimate of the request's cost to the bucket
+                                when the request is admitted, so requests in flight count against the
+                                limit. Without it the whole cost is charged at stream completion.
+                              properties:
+                                percent:
+                                  description: |-
+                                    Percent of the usage estimate charged at admission. Below the actual
+                                    cost, requests in flight are partly uncounted; above it, the difference
+                                    is held until the reserve is released, or stays charged when reserves
+                                    are not released.
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
+                                usageEstimate:
+                                  description: |-
+                                    UsageEstimate is the metadataKey of the GatewayConfig usageEstimates item
+                                    the reserve is computed from. The GatewayConfig of every Gateway serving
+                                    the targeted backends must declare it; otherwise the controller stops
+                                    updating that gateway's filter configuration, which keeps serving the last
+                                    valid one, until it does.
+                                  maxLength: 128
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - percent
+                              - usageEstimate
+                              type: object
+                            costExpression:
+                              description: |-
+                                CostExpression is a per-bucket CEL expression for computing this bucket's
+                                quota burndown. When unset, the model-level CostExpression applies, then
+                                "total_tokens". Ignored when CostMetric is "Requests".
+                              type: string
+                            costMetric:
+                              default: Tokens
+                              description: |-
+                                CostMetric selects what this bucket counts. "Tokens" (the default) burns
+                                the bucket down at stream-done by CostExpression (or the model-level
+                                fallback). "Requests" burns the bucket down by exactly 1 per request at
+                                request time and adds no stream-done token charge.
+                              enum:
+                              - Tokens
+                              - Requests
+                              type: string
                             duration:
                               description: 'Time window. Must be exactly one of: "1s"
                                 (1 second), "1m" (1 minute), "1h" (1 hour), or "1d"
@@ -342,6 +468,22 @@ spec:
                               - 1h
                               - 1d
                               type: string
+                            dynamicOverride:
+                              description: |-
+                                DynamicOverride supplies the limit at request time, falling back to Limit
+                                when the source is absent or malformed. The time window is always Duration.
+                              properties:
+                                fromHeader:
+                                  description: |-
+                                    FromHeader names a request header whose value is a non-negative integer limit
+                                    for the current time window. A value of 0 blocks all matching requests.
+                                    The header must be set or overwritten by a trusted component
+                                    (e.g. an external authorization service) and never accepted from clients.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - fromHeader
+                              type: object
                             limit:
                               description: The limit alloted for a specified time
                                 window.
@@ -350,6 +492,13 @@ spec:
                           - duration
                           - limit
                           type: object
+                          x-kubernetes-validations:
+                          - message: costExpression cannot be combined with costMetric=Requests
+                            rule: '!(has(self.costExpression) && has(self.costMetric)
+                              && self.costMetric == ''Requests'')'
+                          - message: admissionReserve cannot be combined with costMetric=Requests
+                            rule: '!(has(self.admissionReserve) && has(self.costMetric)
+                              && self.costMetric == ''Requests'')'
                         mode:
                           default: Shared
                           description: |-
@@ -388,6 +537,53 @@ spec:
                       A response with 429 HTTP status code is sent back to the client when
                       the selected requests have exceeded the quota.
                     properties:
+                      admissionReserve:
+                        description: |-
+                          AdmissionReserve charges an estimate of the request's cost to the bucket
+                          when the request is admitted, so requests in flight count against the
+                          limit. Without it the whole cost is charged at stream completion.
+                        properties:
+                          percent:
+                            description: |-
+                              Percent of the usage estimate charged at admission. Below the actual
+                              cost, requests in flight are partly uncounted; above it, the difference
+                              is held until the reserve is released, or stays charged when reserves
+                              are not released.
+                            format: int32
+                            maximum: 100
+                            minimum: 1
+                            type: integer
+                          usageEstimate:
+                            description: |-
+                              UsageEstimate is the metadataKey of the GatewayConfig usageEstimates item
+                              the reserve is computed from. The GatewayConfig of every Gateway serving
+                              the targeted backends must declare it; otherwise the controller stops
+                              updating that gateway's filter configuration, which keeps serving the last
+                              valid one, until it does.
+                            maxLength: 128
+                            minLength: 1
+                            type: string
+                        required:
+                        - percent
+                        - usageEstimate
+                        type: object
+                      costExpression:
+                        description: |-
+                          CostExpression is a per-bucket CEL expression for computing this bucket's
+                          quota burndown. When unset, the model-level CostExpression applies, then
+                          "total_tokens". Ignored when CostMetric is "Requests".
+                        type: string
+                      costMetric:
+                        default: Tokens
+                        description: |-
+                          CostMetric selects what this bucket counts. "Tokens" (the default) burns
+                          the bucket down at stream-done by CostExpression (or the model-level
+                          fallback). "Requests" burns the bucket down by exactly 1 per request at
+                          request time and adds no stream-done token charge.
+                        enum:
+                        - Tokens
+                        - Requests
+                        type: string
                       duration:
                         description: 'Time window. Must be exactly one of: "1s" (1
                           second), "1m" (1 minute), "1h" (1 hour), or "1d" (1 day).'
@@ -397,6 +593,22 @@ spec:
                         - 1h
                         - 1d
                         type: string
+                      dynamicOverride:
+                        description: |-
+                          DynamicOverride supplies the limit at request time, falling back to Limit
+                          when the source is absent or malformed. The time window is always Duration.
+                        properties:
+                          fromHeader:
+                            description: |-
+                              FromHeader names a request header whose value is a non-negative integer limit
+                              for the current time window. A value of 0 blocks all matching requests.
+                              The header must be set or overwritten by a trusted component
+                              (e.g. an external authorization service) and never accepted from clients.
+                            minLength: 1
+                            type: string
+                        required:
+                        - fromHeader
+                        type: object
                       limit:
                         description: The limit alloted for a specified time window.
                         type: integer
@@ -404,9 +616,21 @@ spec:
                     - duration
                     - limit
                     type: object
+                    x-kubernetes-validations:
+                    - message: costExpression cannot be combined with costMetric=Requests
+                      rule: '!(has(self.costExpression) && has(self.costMetric) &&
+                        self.costMetric == ''Requests'')'
+                    - message: admissionReserve cannot be combined with costMetric=Requests
+                      rule: '!(has(self.admissionReserve) && has(self.costMetric)
+                        && self.costMetric == ''Requests'')'
                 required:
                 - quota
                 type: object
+                x-kubernetes-validations:
+                - message: serviceQuota does not support dynamicOverride
+                  rule: '!has(self.quota.dynamicOverride)'
+                - message: serviceQuota does not support admissionReserve
+                  rule: '!has(self.quota.admissionReserve)'
               targetRefs:
                 description: TargetRefs are the names of the AIServiceBackend resources
                   this QuotaPolicy is being attached to.

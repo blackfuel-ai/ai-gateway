@@ -8,6 +8,7 @@ package extensionserver
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,12 +20,15 @@ import (
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	ratelimitv3 "github.com/envoyproxy/go-control-plane/envoy/config/ratelimit/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	luav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	ratelimitfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ratelimit/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	metadatav3 "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/go-logr/logr"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -40,17 +44,49 @@ import (
 const (
 	// quotaRateLimitClusterName is the Envoy cluster name for the AI Gateway rate limit service.
 	quotaRateLimitClusterName = "ai_gateway_ratelimit_cluster"
-	// quotaRateLimitFilterName is the name of the rate limit HTTP filter inserted into the
-	// HCM filter chain for QuotaPolicy enforcement. The name uses a suffix to avoid
-	// conflicting with Envoy Gateway's own rate limit filter (e.g., from BackendTrafficPolicy).
-	// The per-route TypedPerFilterConfig keys on this name to target the quota filter specifically.
+	// QuotaPolicy enforcement uses two rate limit HTTP filters because Envoy's
+	// rate limit config placement rules are mutually exclusive for the two kinds
+	// of quota entries:
+	//   - RateLimit.limit (the per-request dynamic override) is only supported on
+	//     route-level rate limits (RouteAction.rate_limits), never in
+	//     typed_per_filter_config — Envoy NACKs the config otherwise.
+	//   - RateLimit.hits_addend (the stream-done token burndown) is only supported
+	//     in typed_per_filter_config.
+	// A single filter cannot read both: when RateLimitPerRoute.rate_limits is set,
+	// it replaces the route-level entries for that filter. Stage isolation (stage 1)
+	// keeps Envoy Gateway's own rate limit filter (stage 0, e.g. from
+	// BackendTrafficPolicy) from evaluating the quota entries and vice versa.
+	// The name suffixes avoid colliding with Envoy Gateway's filter name.
+
+	// quotaRateLimitFilterName is the charge filter: its per-route
+	// RateLimitPerRoute config carries the admission reserve entries (evaluated
+	// at decode time, hits_addend from the quota_reserve metadata the router
+	// ext_proc writes) and the ApplyOnStreamDone entries: the charges
+	// (hits_addend from the quota_cost metadata), the releases of the reserves
+	// (negative hits_addend from the quota_release metadata) and the
+	// settlements of the reserves on the serving counter (hits_addend from the
+	// quota_settle metadata). It sits after the request-time filter, so a
+	// request that filter refuses is never charged a reserve, and it is never
+	// enforced: a reserve entry carries no limit override, so the rate limit
+	// service judges it against the static limit, and that verdict must not
+	// refuse the request.
 	quotaRateLimitFilterName = "envoy.filters.http.ratelimit/ai-gateway-quota"
+	// quotaRequestRateLimitFilterName is the request-time enforcement filter: it
+	// evaluates the stage-1 route-level rate limits (which legally carry the
+	// dynamic limit override) and returns 429 when a bucket is exhausted.
+	quotaRequestRateLimitFilterName = "envoy.filters.http.ratelimit/ai-gateway-quota-request"
+	// quotaRequestRateLimitStage is the stage shared by the request-time filter
+	// and the route-level quota entries it evaluates.
+	quotaRequestRateLimitStage = 1
+	// quotaOverrideLuaFilterName is the Lua filter that parses the plain-number
+	// dynamicOverride.fromHeader request headers into the {requests_per_unit,
+	// unit} dynamic-metadata structs the request-time filter's limit override
+	// reads. It must run before the request-time filter: the AI Gateway ext_proc
+	// is an upstream filter, so its metadata lands after downstream rate
+	// limiting has already been evaluated.
+	quotaOverrideLuaFilterName = "envoy.filters.http.lua/ai-gateway-quota-override"
 	// defaultQuotaRateLimitServicePort is the default gRPC port for the rate limit service.
 	defaultQuotaRateLimitServicePort = 8081
-
-	// quotaCostMetadataKey is the dynamic metadata key where ext_proc stores
-	// the computed quota cost for the current request.
-	quotaCostMetadataKey = "quota_cost"
 )
 
 // maybeInjectQuotaRateLimiting injects the rate limit HTTP filter into the HCM
@@ -102,7 +138,8 @@ func (s *Server) maybeInjectQuotaRateLimiting(
 		}
 	}
 
-	// Only inject the rate limit filter into listeners whose routes have quota backends.
+	// Only inject the rate limit filters into listeners whose routes have quota backends.
+	overrideSpecs := collectQuotaOverrideSpecs(quotaPolicies)
 	for _, ln := range listeners {
 		hasQuotaRoute := false
 		for _, rcName := range findListenerRouteConfigs(ln) {
@@ -112,7 +149,7 @@ func (s *Server) maybeInjectQuotaRateLimiting(
 			}
 		}
 		if hasQuotaRoute {
-			if err := s.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain); err != nil {
+			if err := s.injectQuotaRateLimitFilterIntoListener(ln, translator.QuotaDomain, overrideSpecs); err != nil {
 				s.log.Error(err, "failed to inject quota rate limit filter into listener", "listener", ln.Name)
 			}
 		}
@@ -184,54 +221,77 @@ func (s *Server) buildQuotaRateLimitCluster() *clusterv3.Cluster {
 // injectQuotaRateLimitFilterIntoListener adds the quota rate limit HTTP filter
 // into the HCM filter chain of the given listener. The filter is inserted before the
 // router filter. It is a no-op on routes without per-route RateLimitPerRoute config.
-func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener, domain string) error {
+func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener, domain string, overrideSpecs []quotaOverrideSpec) error {
 	filterChains := ln.GetFilterChains()
 	if ln.DefaultFilterChain != nil {
 		filterChains = append(filterChains, ln.DefaultFilterChain)
 	}
+
+	// Filters in insertion order: the override Lua filter must precede the
+	// request-time filter so the parsed limit metadata exists when the rate
+	// limit entries are evaluated.
+	var filters []*httpconnectionmanagerv3.HttpFilter
+	if len(overrideSpecs) > 0 {
+		luaFilter, err := buildQuotaOverrideLuaFilter(overrideSpecs)
+		if err != nil {
+			return fmt.Errorf("failed to build quota override lua filter: %w", err)
+		}
+		filters = append(filters, luaFilter)
+	}
+	requestFilter, err := s.buildQuotaRateLimitFilter(quotaRequestRateLimitFilterName, domain, quotaRequestRateLimitStage, true)
+	if err != nil {
+		return fmt.Errorf("failed to build quota rate limit filter: %w", err)
+	}
+	chargeFilter, err := s.buildQuotaRateLimitFilter(quotaRateLimitFilterName, domain, 0, false)
+	if err != nil {
+		return fmt.Errorf("failed to build quota rate limit filter: %w", err)
+	}
+	filters = append(filters, requestFilter, chargeFilter)
+
 	for _, currChain := range filterChains {
 		httpConManager, hcmIndex, err := findHCM(currChain)
 		if err != nil {
 			continue
 		}
 
-		// Check if the filter already exists.
-		alreadyExists := false
-		for _, f := range httpConManager.HttpFilters {
-			if f.Name == quotaRateLimitFilterName {
-				alreadyExists = true
-				break
+		// The filters are always enabled at the HCM level. Routes without quota
+		// rate limit entries make them a no-op. We cannot use Disabled=true here
+		// because ext_proc clears the route cache after modifying headers, and
+		// the filter chain is created based on the initial route match (before
+		// ext_proc runs). The initial route typically lacks the quota entries,
+		// so a disabled filter would never be re-enabled.
+		modified := false
+		for _, filter := range filters {
+			// Check if the filter already exists.
+			alreadyExists := false
+			for _, f := range httpConManager.HttpFilters {
+				if f.Name == filter.Name {
+					alreadyExists = true
+					break
+				}
 			}
+			if alreadyExists {
+				continue
+			}
+
+			// Insert before the router filter.
+			inserted := false
+			for i, f := range httpConManager.HttpFilters {
+				if f.Name == wellknown.Router {
+					httpConManager.HttpFilters = append(httpConManager.HttpFilters, nil)
+					copy(httpConManager.HttpFilters[i+1:], httpConManager.HttpFilters[i:])
+					httpConManager.HttpFilters[i] = filter
+					inserted = true
+					break
+				}
+			}
+			if !inserted {
+				httpConManager.HttpFilters = append(httpConManager.HttpFilters, filter)
+			}
+			modified = true
 		}
-		if alreadyExists {
+		if !modified {
 			continue
-		}
-
-		rateLimitFilter, err := s.buildQuotaRateLimitFilter(domain)
-		if err != nil {
-			return fmt.Errorf("failed to build quota rate limit filter: %w", err)
-		}
-		// The filter is always enabled at the HCM level. Routes without
-		// per-route RateLimitPerRoute config will have no rate limit actions,
-		// making the filter a no-op. We cannot use Disabled=true here because
-		// ext_proc clears the route cache after modifying headers, and the
-		// filter chain is created based on the initial route match (before
-		// ext_proc runs). The initial route typically lacks the per-route
-		// config, so a disabled filter would never be re-enabled.
-
-		// Insert before the router filter.
-		inserted := false
-		for i, f := range httpConManager.HttpFilters {
-			if f.Name == wellknown.Router {
-				httpConManager.HttpFilters = append(httpConManager.HttpFilters, nil)
-				copy(httpConManager.HttpFilters[i+1:], httpConManager.HttpFilters[i:])
-				httpConManager.HttpFilters[i] = rateLimitFilter
-				inserted = true
-				break
-			}
-		}
-		if !inserted {
-			httpConManager.HttpFilters = append(httpConManager.HttpFilters, rateLimitFilter)
 		}
 
 		hcmAny, err := toAny(httpConManager)
@@ -243,11 +303,17 @@ func (s *Server) injectQuotaRateLimitFilterIntoListener(ln *listenerv3.Listener,
 	return nil
 }
 
-// buildQuotaRateLimitFilter creates the envoy.filters.http.ratelimit filter
-// for QuotaPolicy enforcement in the HCM filter chain.
-func (s *Server) buildQuotaRateLimitFilter(domain string) (*httpconnectionmanagerv3.HttpFilter, error) {
+// buildQuotaRateLimitFilter creates an envoy.filters.http.ratelimit filter
+// for QuotaPolicy enforcement in the HCM filter chain. The stage selects which
+// route-level rate limit entries the filter evaluates (the request-time filter
+// uses quotaRequestRateLimitStage; the charge filter reads its entries from
+// per-route config, where stages do not apply). A filter that does not enforce
+// still charges its entries but never refuses the request, and leaves the
+// x-ratelimit-* response headers to the enforcing filter.
+func (s *Server) buildQuotaRateLimitFilter(name, domain string, stage uint32, enforcing bool) (*httpconnectionmanagerv3.HttpFilter, error) {
 	rateLimitCfg := &ratelimitfilterv3.RateLimit{
 		Domain: domain,
+		Stage:  stage,
 		RateLimitService: &ratelimitv3.RateLimitServiceConfig{
 			GrpcService: &corev3.GrpcService{
 				TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
@@ -264,6 +330,12 @@ func (s *Server) buildQuotaRateLimitFilter(domain string) (*httpconnectionmanage
 		EnableXRatelimitHeaders:        ratelimitfilterv3.RateLimit_DRAFT_VERSION_03,
 		RateLimitedAsResourceExhausted: false,
 	}
+	if !enforcing {
+		rateLimitCfg.FilterEnforced = &corev3.RuntimeFractionalPercent{
+			DefaultValue: &typev3.FractionalPercent{Numerator: 0, Denominator: typev3.FractionalPercent_HUNDRED},
+		}
+		rateLimitCfg.EnableXRatelimitHeaders = ratelimitfilterv3.RateLimit_OFF
+	}
 
 	cfgAny, err := anypb.New(rateLimitCfg)
 	if err != nil {
@@ -271,7 +343,7 @@ func (s *Server) buildQuotaRateLimitFilter(domain string) (*httpconnectionmanage
 	}
 
 	return &httpconnectionmanagerv3.HttpFilter{
-		Name: quotaRateLimitFilterName,
+		Name: name,
 		ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{
 			TypedConfig: cfgAny,
 		},
@@ -304,7 +376,7 @@ func (s *Server) patchRoutesWithQuotaRateLimits(
 			policies := s.policiesForRoute(ctx, route, quotaBackendPolicies)
 			modelInfo := s.resolveRouteModelInfo(ctx, route)
 
-			if err := enableQuotaRateLimitOnRoute(s.log, route, policies, modelInfo); err != nil {
+			if err := enableQuotaRateLimitOnRoute(s.log, route, policies, modelInfo, s.quotaReleaseAdmissionReserves); err != nil {
 				s.log.Error(err, "failed to enable quota rate limit on route", "route", route.Name)
 			}
 			patched = true
@@ -516,7 +588,7 @@ func (s *Server) resolveRouteModelInfo(ctx context.Context, route *routev3.Route
 // modelInfo provides the backend→ModelNameOverride mapping used for filtering (a policy's
 // target and modelName must match a backend override) and for request-time descriptors.
 // If nil, all models are included.
-func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies []aigv1a1.QuotaPolicy, modelInfo *routeModelInfo) error {
+func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies []aigv1a1.QuotaPolicy, modelInfo *routeModelInfo, releaseReserves bool) error {
 	var rateLimitActions []*routev3.RateLimit
 
 	// streamDoneActions collects the stream-done RateLimit entries built inline during
@@ -525,6 +597,32 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 	// that may produce the same descriptor key for the same model and rule index.
 	var streamDoneActions []*routev3.RateLimit
 	seenStreamDoneKeys := make(map[string]bool)
+	// reserveActions collects the admission reserve entries, charged by the
+	// charge filter at decode time, and releaseActions the entries releasing
+	// them at stream done.
+	var reserveActions, releaseActions []*routev3.RateLimit
+	// settleActions collects the settlement entries of the stream-done entries
+	// whose bucket reserves for at least one model. Like the stream-done
+	// entries, they are shared across targets and models, and seenSettleKeys
+	// deduplicates them by the same key.
+	var settleActions []*routev3.RateLimit
+	seenSettleKeys := make(map[string]bool)
+	// addStreamDone adds the stream-done entry of a bucket under its
+	// deduplication key, and its settlement when the bucket reserves.
+	addStreamDone := func(dupKey string, actions []*routev3.RateLimit_Action, bucketKey string, reserves bool) {
+		if !seenStreamDoneKeys[dupKey] {
+			seenStreamDoneKeys[dupKey] = true
+			streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
+				Actions:           actions,
+				HitsAddend:        quotaHitsAddend(translator.QuotaCostMetadataKey(bucketKey)),
+				ApplyOnStreamDone: true,
+			})
+		}
+		if releaseReserves && reserves && !seenSettleKeys[dupKey] {
+			seenSettleKeys[dupKey] = true
+			settleActions = append(settleActions, buildSettleEntry(actions, bucketKey))
+		}
+	}
 
 	var backendModels map[string][]string
 	if modelInfo != nil {
@@ -563,28 +661,35 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 				}
 			}
 
-			if len(pmq.Quota.BucketRules) == 0 && pmq.Quota.DefaultBucket.Limit > 0 {
-				entries := buildSimpleModelEntries(modelName, policy.Namespace, policy.Spec.TargetRefs, backendModels)
+			reserves, releases := buildAdmissionReserveEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)
+			reserveActions = append(reserveActions, reserves...)
+			if releaseReserves {
+				releaseActions = append(releaseActions, releases...)
+			}
+
+			if len(pmq.Quota.BucketRules) == 0 && pmq.Quota.DefaultBucket != nil && pmq.Quota.DefaultBucket.Limit > 0 {
+				entries := buildSimpleModelEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)
 				rateLimitActions = append(rateLimitActions, entries...)
 				// Simple case: 2-level stream-done (backend_name + model_name_override).
 				// All simple entries are identical (metadata-only actions, same hits_addend).
+				// Requests-metric buckets burn down by the request-time +1 only.
 				const simpleStreamDoneKey = "_simple_"
-				if !seenStreamDoneKeys[simpleStreamDoneKey] {
-					seenStreamDoneKeys[simpleStreamDoneKey] = true
-					streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
-						Actions:           baseDescriptorActions(),
-						HitsAddend:        quotaHitsAddend(),
-						ApplyOnStreamDone: true,
-					})
+				if pmq.Quota.DefaultBucket.CostMetric != aigv1a1.QuotaCostMetricRequests {
+					addStreamDone(simpleStreamDoneKey, baseDescriptorActions(),
+						translator.QuotaCostDefaultBucketKey(), quotaValueReserves(pmq.Quota.DefaultBucket))
 				}
 			} else if len(pmq.Quota.BucketRules) > 0 {
 				bucketActions := buildBucketRuleLimitEntries(modelName, policy.Namespace, &pmq.Quota, policy.Spec.TargetRefs, backendModels)
 				rateLimitActions = append(rateLimitActions, bucketActions...)
 				// Bucket rules: one stream-done per unique rule/header structure.
 				// Stream-done actions read backend/model from dynamic metadata and
-				// hits_addend uses a single quota_cost key, so entries are identical
-				// regardless of target or model.
+				// hits_addend reads the rule's own cost key, so entries are identical
+				// regardless of target or model (rule keys are index-based).
+				// Requests-metric buckets burn down by the request-time +1 only.
 				for rIdx, rule := range pmq.Quota.BucketRules {
+					if rule.Quota.CostMetric == aigv1a1.QuotaCostMetricRequests {
+						continue
+					}
 					headers := flattenAndSortClientSelectorHeaders(rule.ClientSelectors)
 					var dupKey string
 					for mIdx, hdr := range headers {
@@ -593,60 +698,89 @@ func enableQuotaRateLimitOnRoute(_ logr.Logger, route *routev3.Route, policies [
 					if len(headers) == 0 {
 						dupKey += "|" + translator.BucketRuleDescriptorKey(rIdx, 0, "", "")
 					}
-					if !seenStreamDoneKeys[dupKey] {
-						seenStreamDoneKeys[dupKey] = true
-						clientActions := buildClientSelectorStreamDoneActions(rIdx, rule.ClientSelectors)
-						streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
-							Actions:           append(baseDescriptorActions(), clientActions...),
-							HitsAddend:        quotaHitsAddend(),
-							ApplyOnStreamDone: true,
-						})
-					}
+					addStreamDone(dupKey,
+						append(baseDescriptorActions(), buildClientSelectorStreamDoneActions(rIdx, rule.ClientSelectors)...),
+						translator.QuotaCostRuleBucketKey(rIdx), quotaValueReserves(&rule.Quota))
 				}
 				// Default bucket: 3-level stream-done with GenericKey (always fires).
-				if pmq.Quota.DefaultBucket.Limit > 0 {
+				if pmq.Quota.DefaultBucket != nil && pmq.Quota.DefaultBucket.Limit > 0 &&
+					pmq.Quota.DefaultBucket.CostMetric != aigv1a1.QuotaCostMetricRequests {
 					defaultKey := translator.DefaultBucketDescriptorKey(len(pmq.Quota.BucketRules))
-					dupDefaultKey := defaultKey
-					if !seenStreamDoneKeys[dupDefaultKey] {
-						seenStreamDoneKeys[dupDefaultKey] = true
-						streamDoneActions = append(streamDoneActions, &routev3.RateLimit{
-							Actions: append(baseDescriptorActions(), &routev3.RateLimit_Action{
-								ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
-									GenericKey: &routev3.RateLimit_Action_GenericKey{
-										DescriptorKey:   defaultKey,
-										DescriptorValue: defaultKey,
-									},
-								},
-							}),
-							HitsAddend:        quotaHitsAddend(),
-							ApplyOnStreamDone: true,
-						})
-					}
+					addStreamDone(defaultKey,
+						append(baseDescriptorActions(), defaultBucketAction(len(pmq.Quota.BucketRules))),
+						translator.QuotaCostDefaultBucketKey(), quotaValueReserves(pmq.Quota.DefaultBucket))
 				}
 			}
 		}
 	}
 
-	rateLimitActions = append(rateLimitActions, streamDoneActions...)
-
-	if len(rateLimitActions) == 0 {
+	if len(rateLimitActions) == 0 && len(streamDoneActions) == 0 {
 		return nil
 	}
 
-	perRouteConfig := &ratelimitfilterv3.RateLimitPerRoute{
-		Domain:     translator.QuotaDomain,
-		RateLimits: rateLimitActions,
+	// Identical request-time entries arise when several QuotaPolicies target
+	// the same backend (one policy per AIGatewayRoute, routes sharing a
+	// backend) or a policy lists a target more than once: every duplicate
+	// charges its bucket again per request, so a limit of N admits only
+	// floor(N/2) requests. Dedupe by full entry identity — same descriptors
+	// AND same limit override — the request-time counterpart of the
+	// stream-done seenStreamDoneKeys guard. Admission reserve entries are
+	// charged per request too, and their releases taken back per request, so
+	// the charge filter entries are deduped the same way.
+	var err error
+	if rateLimitActions, err = dedupeRateLimits(rateLimitActions); err != nil {
+		return fmt.Errorf("failed to dedupe request-time rate limit entries: %w", err)
 	}
 
-	perRouteAny, err := anypb.New(perRouteConfig)
+	// Request-time entries go on the route itself: only route-level rate limits
+	// support the per-request limit override, and the stage scopes them to the
+	// request-time quota filter (Envoy Gateway's stage-0 filter ignores them).
+	// The post-translate hook can mutate the same route more than once, so any
+	// quota-stage entries already present are replaced — never accumulated —
+	// while entries emitted by Envoy Gateway (other stages) survive untouched,
+	// mirroring the assign semantics of the stream-done TypedPerFilterConfig
+	// path below.
+	if routeAction := route.GetRoute(); routeAction != nil && len(rateLimitActions) > 0 {
+		kept := routeAction.RateLimits[:0]
+		for _, rl := range routeAction.RateLimits {
+			if rl.GetStage().GetValue() != quotaRequestRateLimitStage {
+				kept = append(kept, rl)
+			}
+		}
+		for _, rl := range rateLimitActions {
+			rl.Stage = wrapperspb.UInt32(quotaRequestRateLimitStage)
+		}
+		kept = append(kept, rateLimitActions...)
+		routeAction.RateLimits = kept
+	}
+
+	// Admission reserve, stream-done charge, settlement and release entries go
+	// in the per-route config of the charge filter: only typed_per_filter_config
+	// entries support a hits_addend. Envoy sends the stream-done entries in this
+	// order, so a counter is charged the remainder and the settlement before the
+	// reserve is taken off it: the release, floored at 0 by the rate limit
+	// service, is then rarely clipped on a counter of a window that has just
+	// started.
+	chargeActions, err := dedupeRateLimits(slices.Concat(reserveActions, streamDoneActions, settleActions, releaseActions))
 	if err != nil {
-		return fmt.Errorf("failed to marshal RateLimitPerRoute: %w", err)
+		return fmt.Errorf("failed to dedupe charge rate limit entries: %w", err)
 	}
+	if len(chargeActions) > 0 {
+		perRouteConfig := &ratelimitfilterv3.RateLimitPerRoute{
+			Domain:     translator.QuotaDomain,
+			RateLimits: chargeActions,
+		}
 
-	if route.TypedPerFilterConfig == nil {
-		route.TypedPerFilterConfig = make(map[string]*anypb.Any)
+		perRouteAny, err := anypb.New(perRouteConfig)
+		if err != nil {
+			return fmt.Errorf("failed to marshal RateLimitPerRoute: %w", err)
+		}
+
+		if route.TypedPerFilterConfig == nil {
+			route.TypedPerFilterConfig = make(map[string]*anypb.Any)
+		}
+		route.TypedPerFilterConfig[quotaRateLimitFilterName] = perRouteAny
 	}
-	route.TypedPerFilterConfig[quotaRateLimitFilterName] = perRouteAny
 	return nil
 }
 
@@ -695,7 +829,7 @@ func baseDescriptorActions() []*routev3.RateLimit_Action {
 // buildSimpleModelEntries creates RateLimit entries for a model with no bucket rules.
 // Produces 2-level descriptors (backend_name, model_name_override) matching the
 // translator's simple case where rate_limit is directly on the model descriptor.
-func buildSimpleModelEntries(modelName, policyNamespace string, targets []gwapiv1a2.LocalPolicyTargetReference, routeModelNames map[string][]string) []*routev3.RateLimit {
+func buildSimpleModelEntries(modelName, policyNamespace string, quota *aigv1a1.QuotaDefinition, targets []gwapiv1a2.LocalPolicyTargetReference, routeModelNames map[string][]string) []*routev3.RateLimit {
 	var entries []*routev3.RateLimit
 
 	// Request-time entries only. Stream-done is added once per model in enableQuotaRateLimitOnRoute.
@@ -703,18 +837,175 @@ func buildSimpleModelEntries(modelName, policyNamespace string, targets []gwapiv
 		resolvedModel := resolveModelName(string(target.Name), modelName, routeModelNames)
 		entries = append(entries, &routev3.RateLimit{
 			Actions: requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel),
+			Limit:   buildQuotaLimitOverride(quota.DefaultBucket),
 		})
 	}
 
 	return entries
 }
 
-// quotaHitsAddend returns the HitsAddend that reads the quota cost from dynamic
-// metadata stored by the ext_proc filter.
-func quotaHitsAddend() *routev3.RateLimit_HitsAddend {
+// buildQuotaLimitOverride returns the per-request limit override for a QuotaValue
+// with a dynamicOverride source, or nil when none is configured. The override
+// reads the {"requests_per_unit", "unit"} struct that the injected quota
+// override Lua filter parses from the configured header into dynamic metadata;
+// when the metadata is absent (header missing or malformed), Envoy falls back
+// to the static limit configured in the rate limit service.
+func buildQuotaLimitOverride(v *aigv1a1.QuotaValue) *routev3.RateLimit_Override {
+	if v == nil || v.DynamicOverride == nil {
+		return nil
+	}
+	unit, ok := rateLimitUnitForQuotaDuration(v.Duration)
+	if !ok {
+		return nil
+	}
+	return &routev3.RateLimit_Override{
+		OverrideSpecifier: &routev3.RateLimit_Override_DynamicMetadata_{
+			DynamicMetadata: &routev3.RateLimit_Override_DynamicMetadata{
+				MetadataKey: &metadatav3.MetadataKey{
+					Key: aigv1b1.AIGatewayFilterMetadataNamespace,
+					Path: []*metadatav3.MetadataKey_PathSegment{{
+						Segment: &metadatav3.MetadataKey_PathSegment_Key{
+							Key: quotaLimitOverrideMetadataKey(v.DynamicOverride.FromHeader, unit),
+						},
+					}},
+				},
+			},
+		},
+	}
+}
+
+// quotaOverrideSpec identifies one dynamic override source: the request header
+// carrying the plain-number limit and the rate limit unit derived from the
+// bucket duration. The pair determines the dynamic metadata key.
+type quotaOverrideSpec struct {
+	headerName string
+	unit       string
+}
+
+// collectQuotaOverrideSpecs gathers the distinct (header, unit) dynamic
+// override sources across all policies, sorted for deterministic Lua script
+// generation. Shadow rules are skipped: the rate limit service's override path
+// bypasses shadow mode, and the CRD CEL validation forbids the combination.
+func collectQuotaOverrideSpecs(policies []aigv1a1.QuotaPolicy) []quotaOverrideSpec {
+	seen := make(map[quotaOverrideSpec]bool)
+	addValue := func(v *aigv1a1.QuotaValue) {
+		if v == nil || v.DynamicOverride == nil {
+			return
+		}
+		unit, ok := rateLimitUnitForQuotaDuration(v.Duration)
+		if !ok {
+			return
+		}
+		seen[quotaOverrideSpec{headerName: strings.ToLower(v.DynamicOverride.FromHeader), unit: unit}] = true
+	}
+	for i := range policies {
+		for _, pmq := range policies[i].Spec.PerModelQuotas {
+			addValue(pmq.Quota.DefaultBucket)
+			for j := range pmq.Quota.BucketRules {
+				rule := &pmq.Quota.BucketRules[j]
+				if rule.ShadowMode != nil && *rule.ShadowMode {
+					continue
+				}
+				addValue(&rule.Quota)
+			}
+		}
+	}
+	specs := make([]quotaOverrideSpec, 0, len(seen))
+	for spec := range seen {
+		specs = append(specs, spec)
+	}
+	sort.Slice(specs, func(i, j int) bool {
+		if specs[i].headerName != specs[j].headerName {
+			return specs[i].headerName < specs[j].headerName
+		}
+		return specs[i].unit < specs[j].unit
+	})
+	return specs
+}
+
+// buildQuotaOverrideLuaFilter generates the Lua filter that parses each
+// configured override header into the {requests_per_unit, unit} dynamic
+// metadata struct read by RateLimit_Override_DynamicMetadata. A missing or
+// non-numeric header writes nothing, so Envoy falls back to the static limit;
+// 0 is a valid value that blocks the bucket. requests_per_unit is a uint32 in
+// the rate limit protocol, hence the bounds check.
+func buildQuotaOverrideLuaFilter(specs []quotaOverrideSpec) (*httpconnectionmanagerv3.HttpFilter, error) {
+	var sb strings.Builder
+	sb.WriteString("local overrides = {\n")
+	for _, spec := range specs {
+		fmt.Fprintf(&sb, "  {header = %q, key = %q, unit = %q},\n",
+			spec.headerName, quotaLimitOverrideMetadataKey(spec.headerName, spec.unit), spec.unit)
+	}
+	sb.WriteString("}\n")
+	fmt.Fprintf(&sb, `function envoy_on_request(request_handle)
+  for _, o in ipairs(overrides) do
+    local v = request_handle:headers():get(o.header)
+    if v ~= nil then
+      local n = tonumber(v)
+      if n ~= nil and n >= 0 and n <= 4294967295 and n == math.floor(n) then
+        request_handle:streamInfo():dynamicMetadata():set(%q, o.key,
+          {requests_per_unit = n, unit = o.unit})
+      end
+      -- The override header is internal to the gateway: strip it so it never
+      -- reaches the upstream provider or a chained gateway tier.
+      request_handle:headers():remove(o.header)
+    end
+  end
+end
+`, aigv1b1.AIGatewayFilterMetadataNamespace)
+
+	luaCfg := &luav3.Lua{
+		DefaultSourceCode: &corev3.DataSource{
+			Specifier: &corev3.DataSource_InlineString{InlineString: sb.String()},
+		},
+	}
+	cfgAny, err := anypb.New(luaCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal lua filter config: %w", err)
+	}
+	return &httpconnectionmanagerv3.HttpFilter{
+		Name: quotaOverrideLuaFilterName,
+		ConfigType: &httpconnectionmanagerv3.HttpFilter_TypedConfig{
+			TypedConfig: cfgAny,
+		},
+	}, nil
+}
+
+// quotaLimitOverrideMetadataKey derives the dynamic metadata key under which a
+// parsed quota limit override is stored for the given header and rate limit
+// unit. Written by the quota override Lua filter and read by the route-level
+// limit override.
+func quotaLimitOverrideMetadataKey(headerName, unit string) string {
+	return "quota_limit_override_" + strings.ToLower(headerName) + "_" + unit
+}
+
+// rateLimitUnitForQuotaDuration maps a QuotaValue duration ("1s", "1m", "1h",
+// "1d") to the corresponding rate limit unit. Returns false for unknown
+// durations.
+func rateLimitUnitForQuotaDuration(duration string) (string, bool) {
+	switch duration {
+	case "1s":
+		return "SECOND", true
+	case "1m":
+		return "MINUTE", true
+	case "1h":
+		return "HOUR", true
+	case "1d":
+		return "DAY", true
+	default:
+		return "", false
+	}
+}
+
+// quotaHitsAddend returns the HitsAddend that reads one bucket's charge (its
+// quota cost or its admission reserve) from the dynamic metadata key stored by
+// the ext_proc filter. When the key was not written for the current request (a
+// bucket another model does not have), the format resolves to nothing and
+// Envoy ignores the descriptor.
+func quotaHitsAddend(metadataKey string) *routev3.RateLimit_HitsAddend {
 	return &routev3.RateLimit_HitsAddend{
 		Format: fmt.Sprintf("%%DYNAMIC_METADATA(%s:%s)%%",
-			aigv1b1.AIGatewayFilterMetadataNamespace, quotaCostMetadataKey),
+			aigv1b1.AIGatewayFilterMetadataNamespace, metadataKey),
 	}
 }
 
@@ -735,26 +1026,154 @@ func buildBucketRuleLimitEntries(modelName, policyNamespace string, quota *aigv1
 			clientActions := buildClientSelectorActions(rIdx, rule.ClientSelectors)
 			actions := requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
 			actions = append(actions, clientActions...)
-			entries = append(entries, &routev3.RateLimit{Actions: actions})
+			entry := &routev3.RateLimit{Actions: actions}
+			// Shadow rules never enforce, and the rate limit service's override path
+			// bypasses shadow mode; the CRD CEL validation forbids the combination.
+			if rule.ShadowMode == nil || !*rule.ShadowMode {
+				entry.Limit = buildQuotaLimitOverride(&rule.Quota)
+			}
+			entries = append(entries, entry)
 		}
 
-		if quota.DefaultBucket.Limit > 0 {
-			defaultKey := translator.DefaultBucketDescriptorKey(len(quota.BucketRules))
-			defaultAction := &routev3.RateLimit_Action{
-				ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
-					GenericKey: &routev3.RateLimit_Action_GenericKey{
-						DescriptorKey:   defaultKey,
-						DescriptorValue: defaultKey,
-					},
-				},
-			}
+		if quota.DefaultBucket != nil && quota.DefaultBucket.Limit > 0 {
 			actions := requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
-			actions = append(actions, defaultAction)
-			entries = append(entries, &routev3.RateLimit{Actions: actions})
+			actions = append(actions, defaultBucketAction(len(quota.BucketRules)))
+			entries = append(entries, &routev3.RateLimit{
+				Actions: actions,
+				Limit:   buildQuotaLimitOverride(quota.DefaultBucket),
+			})
 		}
 	}
 
 	return entries
+}
+
+// buildAdmissionReserveEntries creates the admission reserve entries of a
+// model's quota, and the entries releasing them: one of each per target backend
+// and token bucket carrying an AdmissionReserve.
+//
+// Each reserve entry repeats the descriptor actions of the bucket's enforcing
+// request-time entry, so the reserve lands on the counter that entry judges. It
+// reads its hits_addend from the reserve's quota_reserve metadata, which the
+// router ext_proc writes at admission for every request. It carries no limit
+// override and no stage: the charge filter evaluates it from its per-route
+// config and never enforces it.
+//
+// Each release entry repeats the reserve entry's descriptor actions and takes
+// the quota_release metadata (the reserve) off that counter at stream done, as
+// negative hits. Envoy evaluates the actions again on the request headers at
+// stream done, so a Distinct selector's RequestHeaders action reads the value
+// the reserve was charged under, as the stream-done charges do.
+func buildAdmissionReserveEntries(modelName, policyNamespace string, quota *aigv1a1.QuotaDefinition, targets []gwapiv1a2.LocalPolicyTargetReference, routeModelNames map[string][]string) (reserves, releases []*routev3.RateLimit) {
+	// reserveKeys returns the reserve and release metadata keys of a bucket, or
+	// "" when the bucket has no reserve.
+	reserveKeys := func(v *aigv1a1.QuotaValue) (reserve, release string) {
+		if !quotaValueReserves(v) {
+			return "", ""
+		}
+		return translator.QuotaReserveMetadataKey(v.AdmissionReserve.UsageEstimate, v.AdmissionReserve.Percent),
+			translator.QuotaReleaseMetadataKey(v.AdmissionReserve.UsageEstimate, v.AdmissionReserve.Percent)
+	}
+	add := func(actions []*routev3.RateLimit_Action, reserveKey, releaseKey string) {
+		reserves = append(reserves, &routev3.RateLimit{
+			Actions:    actions,
+			HitsAddend: quotaHitsAddend(reserveKey),
+		})
+		release := quotaHitsAddend(releaseKey)
+		release.IsNegativeHits = true
+		releases = append(releases, &routev3.RateLimit{
+			Actions:           slices.Clone(actions),
+			HitsAddend:        release,
+			ApplyOnStreamDone: true,
+		})
+	}
+
+	var defaultReserve, defaultRelease string
+	if quota.DefaultBucket != nil && quota.DefaultBucket.Limit > 0 {
+		defaultReserve, defaultRelease = reserveKeys(quota.DefaultBucket)
+	}
+	ruleReserves := make([]string, len(quota.BucketRules))
+	ruleReleases := make([]string, len(quota.BucketRules))
+	for rIdx := range quota.BucketRules {
+		ruleReserves[rIdx], ruleReleases[rIdx] = reserveKeys(&quota.BucketRules[rIdx].Quota)
+	}
+
+	for _, target := range targets {
+		resolvedModel := resolveModelName(string(target.Name), modelName, routeModelNames)
+		base := func() []*routev3.RateLimit_Action {
+			return requestTimeBaseActions(policyNamespace, string(target.Name), resolvedModel)
+		}
+		if len(quota.BucketRules) == 0 {
+			if defaultReserve != "" {
+				add(base(), defaultReserve, defaultRelease)
+			}
+			continue
+		}
+		for rIdx, key := range ruleReserves {
+			if key == "" {
+				continue
+			}
+			add(append(base(), buildClientSelectorActions(rIdx, quota.BucketRules[rIdx].ClientSelectors)...),
+				key, ruleReleases[rIdx])
+		}
+		if defaultReserve != "" {
+			add(append(base(), defaultBucketAction(len(quota.BucketRules))), defaultReserve, defaultRelease)
+		}
+	}
+	return reserves, releases
+}
+
+// quotaValueReserves reports whether a bucket charges an admission reserve.
+func quotaValueReserves(v *aigv1a1.QuotaValue) bool {
+	return v != nil && v.AdmissionReserve != nil && v.CostMetric != aigv1a1.QuotaCostMetricRequests
+}
+
+// buildSettleEntry creates the settlement entry of a reserving bucket's
+// stream-done entry: the same descriptor actions, charging the quota_settle
+// metadata (the part of the cost the reserve covers) to the serving counter at
+// stream done. With the remainder charged by the stream-done entry, the serving
+// counter is charged the whole cost at completion: the reserve is either
+// released by its release entry or, when the rate limit service did not charge
+// it, never charged.
+func buildSettleEntry(actions []*routev3.RateLimit_Action, bucketKey string) *routev3.RateLimit {
+	return &routev3.RateLimit{
+		Actions:           slices.Clone(actions),
+		HitsAddend:        quotaHitsAddend(translator.QuotaSettleMetadataKey(bucketKey)),
+		ApplyOnStreamDone: true,
+	}
+}
+
+// defaultBucketAction returns the GenericKey action that selects a model's
+// default bucket in a quota with bucket rules.
+func defaultBucketAction(numRules int) *routev3.RateLimit_Action {
+	defaultKey := translator.DefaultBucketDescriptorKey(numRules)
+	return &routev3.RateLimit_Action{
+		ActionSpecifier: &routev3.RateLimit_Action_GenericKey_{
+			GenericKey: &routev3.RateLimit_Action_GenericKey{
+				DescriptorKey:   defaultKey,
+				DescriptorValue: defaultKey,
+			},
+		},
+	}
+}
+
+// dedupeRateLimits drops rate limit entries identical to an earlier one,
+// keeping the first occurrence in order.
+func dedupeRateLimits(entries []*routev3.RateLimit) ([]*routev3.RateLimit, error) {
+	seen := make(map[string]struct{}, len(entries))
+	deduped := entries[:0]
+	for _, rl := range entries {
+		keyBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(rl)
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := seen[string(keyBytes)]; dup {
+			continue
+		}
+		seen[string(keyBytes)] = struct{}{}
+		deduped = append(deduped, rl)
+	}
+	return deduped, nil
 }
 
 // resolveModelName returns the model name to use for request-time descriptors.

@@ -984,7 +984,7 @@ func TestOpenAIToGCPVertexAITranslatorV1Embedding_ResponseError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			translator := NewEmbeddingOpenAIToGCPVertexAITranslator("text-embedding-004", "").(*openAIToGCPVertexAITranslatorV1Embedding)
 
-			headerMut, bodyMut, err := translator.ResponseError(tc.headers, strings.NewReader(tc.body))
+			headerMut, bodyMut, _, err := translator.ResponseError(tc.headers, strings.NewReader(tc.body))
 
 			require.NoError(t, err)
 			require.NotNil(t, headerMut)

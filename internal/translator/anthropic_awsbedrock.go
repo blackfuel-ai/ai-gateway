@@ -827,21 +827,21 @@ func (a *anthropicToAWSBedrockTranslator) bedrockStopReasonToAnthropicStopReason
 
 // ResponseError implements [AnthropicMessagesTranslator.ResponseError].
 func (a *anthropicToAWSBedrockTranslator) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, mutatedBody []byte, err error,
+	newHeaders []internalapi.Header, mutatedBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
 	var errorMessage string
 	if v, ok := respHeaders[contentTypeHeaderName]; ok && strings.Contains(v, jsonContentType) {
 		var bedrockError awsbedrock.BedrockException
 		if err = json.NewDecoder(body).Decode(&bedrockError); err != nil {
-			return nil, nil, fmt.Errorf("failed to unmarshal error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to unmarshal error body: %w", err)
 		}
 		errorMessage = bedrockError.Message
 	} else {
 		var buf []byte
 		buf, err = io.ReadAll(body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
 		errorMessage = string(buf)
 	}
@@ -854,12 +854,13 @@ func (a *anthropicToAWSBedrockTranslator) ResponseError(respHeaders map[string]s
 	}
 	mutatedBody, err = json.Marshal(anthropicError)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 	}
 	newHeaders = []internalapi.Header{
 		{contentTypeHeaderName, jsonContentType},
 		{contentLengthHeaderName, strconv.Itoa(len(mutatedBody))},
 	}
+	errInfo = LLMErrorInfo{Type: anthropicError.Error.Type}
 	return
 }
 

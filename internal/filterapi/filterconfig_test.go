@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -21,21 +22,51 @@ func TestUnmarshalConfigYaml(t *testing.T) {
 	config := `
 schema:
   name: OpenAI
+emitErrorMetadata: true
 llmRequestCosts:
 - metadataKey: token_usage_key
   routeName: ns/my-route
   type: OutputToken
+usageEstimates:
+- metadataKey: estimated_input_token
+  cel: input_tokens
+  byHeader: x-client-id
+  emitMetric: true
+  emitHeader: true
+usageEstimatePeriod: 60000000000 # 1m, in nanoseconds
+admissionReserves:
+- metadataKey: quota_reserve_estimated_input_token_90
+  usageEstimate: estimated_input_token
+  percent: 90
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
 	cfg, err := filterapi.UnmarshalConfigYaml(configPath)
 	require.NoError(t, err)
 
 	expectedCfg := &filterapi.Config{
+		EmitErrorMetadata: true,
 		LLMRequestCosts: []filterapi.LLMRequestCost{
 			{
 				MetadataKey: "token_usage_key",
 				RouteName:   "ns/my-route",
 				Type:        filterapi.LLMRequestCostTypeOutputToken,
+			},
+		},
+		UsageEstimates: []filterapi.UsageEstimate{
+			{
+				MetadataKey: "estimated_input_token",
+				CEL:         "input_tokens",
+				ByHeader:    "x-client-id",
+				EmitMetric:  true,
+				EmitHeader:  true,
+			},
+		},
+		UsageEstimatePeriod: time.Minute,
+		AdmissionReserves: []filterapi.AdmissionReserve{
+			{
+				MetadataKey:   "quota_reserve_estimated_input_token_90",
+				UsageEstimate: "estimated_input_token",
+				Percent:       90,
 			},
 		},
 	}

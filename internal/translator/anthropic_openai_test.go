@@ -80,7 +80,9 @@ func TestAnthropicToOpenAITranslator_RequestBody(t *testing.T) {
 			require.NotNil(t, headers)
 			require.NotNil(t, body)
 
-			// Verify the two headers: path and content-length.
+			// Verify the headers: only :path and content-length are rewritten. The
+			// original-path headers set by the router phase keep the client's
+			// original path (nothing selects a processor from them).
 			require.Len(t, headers, 2)
 			assert.Equal(t, pathHeaderName, headers[0].Key())
 			assert.Equal(t, "/v1/chat/completions", headers[0].Value())
@@ -330,6 +332,75 @@ func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming(t *testing.T) {
 	})
 }
 
+// TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_UsageSplit pins
+// that a non-streaming response reports the usage split the upstream sent --
+// cached, cache-creation and reasoning tokens. The streaming path reports the
+// same split through setOpenAIStreamUsage; a non-streaming response that drops
+// it reads downstream as a fully uncached prompt with no reasoning.
+func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_UsageSplit(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	content := "Hello!"
+	openAIResp := openai.ChatCompletionResponse{
+		ID:    "chatcmpl-cache",
+		Model: "gpt-4o",
+		Choices: []openai.ChatCompletionResponseChoice{
+			{
+				FinishReason: openai.ChatCompletionChoicesFinishReasonStop,
+				Message:      openai.ChatCompletionResponseChoiceMessage{Content: &content, Role: "assistant"},
+			},
+		},
+		Usage: openai.Usage{
+			PromptTokens:     1000,
+			CompletionTokens: 20,
+			// An OpenAI upstream counts these inside PromptTokens.
+			PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 900, CacheWriteTokens: 64},
+			// And these inside CompletionTokens.
+			CompletionTokensDetails: &openai.CompletionTokensDetails{ReasoningTokens: 8},
+		},
+	}
+	respBytes, err := json.Marshal(openAIResp)
+	require.NoError(t, err)
+
+	_, _, tokenUsage, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "application/json"},
+		bytes.NewReader(respBytes),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+
+	cached, cachedSet := tokenUsage.CachedInputTokens()
+	require.True(t, cachedSet, "cached input tokens must be reported")
+	assert.Equal(t, uint32(900), cached)
+
+	created, createdSet := tokenUsage.CacheCreationInputTokens()
+	require.True(t, createdSet, "cache creation tokens must be reported")
+	assert.Equal(t, uint32(64), created)
+
+	reasoning, reasoningSet := tokenUsage.ReasoningTokens()
+	require.True(t, reasoningSet, "reasoning tokens must be reported")
+	assert.Equal(t, uint32(8), reasoning)
+
+	// The cached count lives inside prompt_tokens, so the input total is the
+	// upstream's prompt_tokens and not prompt_tokens plus the cache counts.
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	require.True(t, inputSet)
+	assert.Equal(t, uint32(1000), inputTokens)
+
+	// Reasoning tokens likewise live inside completion_tokens.
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	require.True(t, outputSet)
+	assert.Equal(t, uint32(20), outputTokens)
+}
+
 func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
 	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
 
@@ -389,6 +460,109 @@ func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
 	require.JSONEq(t, `{"type":"message_stop"}`, events[5].data)
 }
 
+// TestAnthropicToOpenAITranslator_ResponseBody_Streaming_UsageOnFinishReasonChunk covers
+// the OpenRouter/GLM-5.2 streaming framing on the /v1/messages path: the upstream attaches
+// the usage object to the final content chunk (non-empty choices + finish_reason), with no
+// dedicated choices:[] usage-only chunk. The anthropic→OpenAI translator must still capture
+// genai_tokens_* from that chunk (incl. cached/reasoning subsets). RED before the
+// handleChunk fix (usage dropped → zero tokens), GREEN after.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_UsageOnFinishReasonChunk(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Usage rides on the finish_reason chunk (non-empty choices); no separate usage-only
+	// chunk. cached_tokens/reasoning_tokens mirror GLM-5.2's shape.
+	input := "data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello!\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data: {\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15,\"prompt_tokens_details\":{\"cached_tokens\":4},\"completion_tokens_details\":{\"reasoning_tokens\":2}}}\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, tokenUsage, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	// Billing surface: usage captured from the finish_reason chunk (the fix).
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	totalTokens, totalSet := tokenUsage.TotalTokens()
+	require.True(t, inputSet)
+	require.True(t, outputSet)
+	require.True(t, totalSet)
+	assert.Equal(t, uint32(10), inputTokens)
+	assert.Equal(t, uint32(5), outputTokens)
+	assert.Equal(t, uint32(15), totalTokens)
+	// Parity: cached/reasoning subsets flow through on the /v1/messages path.
+	cached, cachedSet := tokenUsage.CachedInputTokens()
+	reasoning, reasoningSet := tokenUsage.ReasoningTokens()
+	require.True(t, cachedSet)
+	require.True(t, reasoningSet)
+	assert.Equal(t, uint32(4), cached)
+	assert.Equal(t, uint32(2), reasoning)
+
+	// Reconstructed Anthropic stream still closes correctly with the output token count.
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	assert.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":6,"cache_read_input_tokens":4,"output_tokens":5}}`, events[4].data)
+	assert.Equal(t, "message_stop", events[5].eventType)
+}
+
+// The space after "data:" is optional per the SSE spec, so a backend emitting the
+// compact "data:{…}" framing must still have its usage-only chunk extracted rather
+// than silently dropped (BLA-2215).
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_CompactDataPrefix(t *testing.T) {
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+
+	// Same chunks as the canonical streaming test, but every event uses the compact
+	// "data:{…}" prefix (no space after the colon).
+	input := "data:{\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello!\"}}],\"model\":\"gpt-4o\"}\n\n" +
+		"data:{\"id\":\"chatcmpl-xyz\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data:{\"id\":\"chatcmpl-xyz\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n" +
+		"data:[DONE]\n\n"
+
+	_, body, tokenUsage, responseModel, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+	assert.Equal(t, "gpt-4o", responseModel)
+
+	inputTokens, inputSet := tokenUsage.InputTokens()
+	outputTokens, outputSet := tokenUsage.OutputTokens()
+	assert.True(t, inputSet)
+	assert.Equal(t, uint32(10), inputTokens)
+	assert.True(t, outputSet)
+	assert.Equal(t, uint32(5), outputTokens)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 6)
+	assert.Equal(t, "message_delta", events[4].eventType)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":5}}`, events[4].data)
+}
+
 func TestAnthropicToOpenAITranslator_ResponseBody_StreamingRequestModelFallback(t *testing.T) {
 	// When the OpenAI chunk has no model, responseModel should fall back to requestModel.
 	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "my-override")
@@ -422,6 +596,7 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 		body        string
 		wantErrType string
 		wantErrMsg  string
+		wantErrInfo LLMErrorInfo
 	}{
 		{
 			name:        "JSON error from OpenAI backend",
@@ -429,6 +604,23 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}}`,
 			wantErrType: "invalid_request_error",
 			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error"},
+		},
+		{
+			name:        "JSON error from OpenAI-compatible backend with numeric code",
+			headers:     map[string]string{contentTypeHeaderName: "application/json"},
+			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","code":400}}`,
+			wantErrType: "invalid_request_error",
+			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
+		},
+		{
+			name:        "JSON error from OpenAI backend with string code",
+			headers:     map[string]string{contentTypeHeaderName: "application/json"},
+			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","code":"context_length_exceeded"}}`,
+			wantErrType: "invalid_request_error",
+			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "context_length_exceeded"},
 		},
 		{
 			name:        "JSON error with numeric code from OpenAI-compatible backend",
@@ -436,6 +628,7 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 			body:        `{"type":"error","error":{"type":"invalid_request_error","message":"Bad request","param":null,"code":400}}`,
 			wantErrType: "invalid_request_error",
 			wantErrMsg:  "Bad request",
+			wantErrInfo: LLMErrorInfo{Type: "invalid_request_error", Code: "400"},
 		},
 		{
 			name:        "non-JSON 400 error",
@@ -512,9 +705,14 @@ func TestAnthropicToOpenAITranslator_ResponseError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
-			headers, mutatedBody, err := translator.ResponseError(tt.headers, strings.NewReader(tt.body))
+			headers, mutatedBody, errInfo, err := translator.ResponseError(tt.headers, strings.NewReader(tt.body))
 			require.NoError(t, err)
 			require.NotNil(t, mutatedBody)
+
+			// errInfo.Type tracks the OpenAI/status-derived error type; Code is only
+			// populated for JSON OpenAI errors that carry one.
+			assert.Equal(t, tt.wantErrType, errInfo.Type)
+			assert.Equal(t, tt.wantErrInfo.Code, errInfo.Code)
 
 			// Verify content-type and content-length headers are set.
 			require.Len(t, headers, 2)
@@ -1055,4 +1253,382 @@ func TestAnthropicToOpenAITranslator_ResponseBody_StreamStateNilGuard(t *testing
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "stream state not initialized")
+}
+
+// newStreamingAnthropicTranslator initialises a translator in streaming mode for
+// the byte-silence tests below.
+func newStreamingAnthropicTranslator(t *testing.T) AnthropicMessagesTranslator {
+	t.Helper()
+	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3-haiku")
+	reqBody := &anthropic.MessagesRequest{
+		Model:     "claude-3-haiku",
+		MaxTokens: 100,
+		Stream:    true,
+		Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}}},
+	}
+	_, _, err := translator.RequestBody(nil, reqBody, false)
+	require.NoError(t, err)
+	return translator
+}
+
+// A mid-stream call that consumes only an SSE keepalive comment block (OpenRouter's
+// ": OPENROUTER PROCESSING") must emit an Anthropic ping instead of an empty body —
+// an empty non-nil body suppresses the upstream bytes entirely and the downstream
+// connection goes byte-silent for the whole prefill (BLA-2721).
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_KeepaliveCommentEmitsPing(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(": OPENROUTER PROCESSING\n\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 1)
+	assert.Equal(t, "ping", events[0].eventType)
+	require.JSONEq(t, `{"type":"ping"}`, events[0].data)
+}
+
+// The endOfStream call is exempt from ping emission: processBuffer emits the
+// closing events there, so a trailing keepalive comment must not add a ping.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_NoPingAtEndOfStream(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	// A first call delivers real content so the closing events have a block to close.
+	_, _, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(`data: {"id":"chatcmpl-ka","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}],"model":"gpt-4o"}`+"\n\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(": OPENROUTER PROCESSING\n\ndata: [DONE]\n\n"),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+
+	for _, e := range parseSSEEventsFromBytes(body) {
+		assert.NotEqual(t, "ping", e.eventType)
+	}
+}
+
+// A call that emits real Anthropic events must not add a ping, and a keepalive-only
+// call in between must — the mid-stream cadence a paced upstream produces.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_PingOnlyWhenSilent(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	// Keepalive-only call → ping.
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(": OPENROUTER PROCESSING\n\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 1)
+	assert.Equal(t, "ping", events[0].eventType)
+
+	// Content call → normal events, no ping.
+	_, body, _, _, err = translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(`data: {"id":"chatcmpl-pw","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"}}],"model":"gpt-4o"}`+"\n\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	events = parseSSEEventsFromBytes(body)
+	require.NotEmpty(t, events)
+	for _, e := range events {
+		assert.NotEqual(t, "ping", e.eventType)
+	}
+}
+
+// Valid-but-eventless protocol blocks (finish_reason-only chunk, [DONE]) and
+// incomplete buffered fragments are normal stream flow and must NOT ping — the
+// data-plane e2e tests deliver the stream one event per extproc call and assert
+// exact output.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_NoPingOnEventlessProtocolBlocks(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	// Open the message with a content call so the eventless blocks below arrive
+	// mid-stream (a fresh stream's first delta emits message_start).
+	_, _, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(`data: {"id":"chatcmpl-ne","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}],"model":"gpt-4o"}`+"\n\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"finish_reason-only chunk", `data: {"id":"chatcmpl-ne","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"},
+		{"done marker", "data: [DONE]\n\n"},
+		// Kept last: the unterminated line stays buffered and would merge into a
+		// subsequent call's first line.
+		{"partial fragment", `data: {"id":"chatcmpl-ne","choi`},
+	} {
+		_, body, _, _, err := translator.ResponseBody(
+			map[string]string{"content-type": "text/event-stream"},
+			strings.NewReader(tc.input),
+			false,
+			nil,
+		)
+		require.NoError(t, err, tc.name)
+		assert.Empty(t, body, "%s must suppress silently, not ping", tc.name)
+	}
+}
+
+// A malformed chunk is skipped by processEventBlock; mid-stream the call must
+// still produce a ping rather than byte-silence.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_MalformedChunkEmitsPing(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader("data: {not-json\n\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 1)
+	assert.Equal(t, "ping", events[0].eventType)
+}
+
+// OpenRouter's plain-string reasoning delta ({"delta":{"reasoning":"..."}} — the
+// GLM shape) must open a thinking block and stream thinking_delta events, closed
+// before the text block starts.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_ReasoningStringField(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	input := `data: {"id":"chatcmpl-rs","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"thinking step 0..."}}],"model":"gpt-4o"}` + "\n\n" +
+		`data: {"id":"chatcmpl-rs","choices":[{"index":0,"delta":{"reasoning":"thinking step 1..."}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-rs","choices":[{"index":0,"delta":{"content":"Answer"}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-rs","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-rs","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	events := parseSSEEventsFromBytes(body)
+	var blockTypes []string
+	var thinkingDeltas int
+	for _, e := range events {
+		if e.eventType == "content_block_start" {
+			if bytes.Contains([]byte(e.data), []byte(`"thinking"`)) {
+				blockTypes = append(blockTypes, "thinking")
+			} else if bytes.Contains([]byte(e.data), []byte(`"text"`)) {
+				blockTypes = append(blockTypes, "text")
+			}
+		}
+		if e.eventType == "content_block_delta" && bytes.Contains([]byte(e.data), []byte(`"thinking_delta"`)) {
+			thinkingDeltas++
+		}
+	}
+	assert.Equal(t, []string{"thinking", "text"}, blockTypes)
+	assert.Equal(t, 2, thinkingDeltas)
+}
+
+// reasoning_content emitted as a bare string (vLLM/DeepSeek shape) must unmarshal
+// into StreamReasoningContent.Text instead of failing the chunk (a failed chunk is
+// silently skipped → suppressed into byte-silence).
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_ReasoningContentString(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	input := `data: {"id":"chatcmpl-rc","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Thinking..."}}],"model":"gpt-4o"}` + "\n\n" +
+		`data: {"id":"chatcmpl-rc","choices":[{"index":0,"delta":{"content":"Answer"}}]}` + "\n\n" +
+		`data: {"id":"chatcmpl-rc","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(input),
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEventsFromBytes(body)
+	var sawThinkingDelta bool
+	for _, e := range events {
+		if e.eventType == "content_block_delta" && bytes.Contains([]byte(e.data), []byte(`"thinking_delta"`)) {
+			sawThinkingDelta = true
+			require.JSONEq(t, `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Thinking..."}}`, e.data)
+		}
+	}
+	assert.True(t, sawThinkingDelta, "expected a thinking_delta from string-form reasoning_content")
+}
+
+// SSE permits CRLF line endings: CRLF-framed keepalive comments must still ping, and
+// CRLF-framed chunks must still translate rather than buffer until end-of-stream.
+func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_CRLFFraming(t *testing.T) {
+	translator := newStreamingAnthropicTranslator(t)
+
+	_, body, _, _, err := translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(": OPENROUTER PROCESSING\r\n\r\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	events := parseSSEEventsFromBytes(body)
+	require.Len(t, events, 1)
+	assert.Equal(t, "ping", events[0].eventType)
+
+	_, body, _, _, err = translator.ResponseBody(
+		map[string]string{"content-type": "text/event-stream"},
+		strings.NewReader(`data: {"id":"chatcmpl-crlf","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"}}],"model":"gpt-4o"}`+"\r\n\r\n"),
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	events = parseSSEEventsFromBytes(body)
+	require.NotEmpty(t, events)
+	assert.Equal(t, "message_start", events[0].eventType)
+	for _, e := range events {
+		assert.NotEqual(t, "ping", e.eventType)
+	}
+}
+
+// toolFixture builds a custom tool whose schema keys are deliberately
+// non-alphabetical, so any round-trip through a Go map would show up.
+func toolFixture(t *testing.T, name string) anthropic.ToolUnion {
+	t.Helper()
+	var tool anthropic.ToolUnion
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"custom","name":"`+name+`","description":"d",`+
+		`"input_schema":{"required":["path"],"type":"object","properties":{"path":{"type":"string"},"count":{"type":"number"}}}}`), &tool))
+	return tool
+}
+
+// toolReplayRequest is a conversation that has already made tool calls, i.e. the
+// shape every turn of an agentic session after the first one takes.
+func toolReplayRequest(t *testing.T, toolNames []string) *anthropic.MessagesRequest {
+	t.Helper()
+	tools := make([]anthropic.ToolUnion, 0, len(toolNames))
+	for _, name := range toolNames {
+		tools = append(tools, toolFixture(t, name))
+	}
+	return &anthropic.MessagesRequest{
+		Model:     "claude-3",
+		MaxTokens: 100,
+		Tools:     tools,
+		Messages: []anthropic.MessageParam{
+			{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "write hello"}},
+			{
+				Role: anthropic.MessageRoleAssistant,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{ToolUse: &anthropic.ToolUseBlockParam{
+							Type: "tool_use", ID: "tool-1", Name: "Write",
+							Input: map[string]any{
+								"file_path": "/tmp/a.txt", "content": "hello",
+								"offset": float64(1), "limit": float64(2), "replace": true,
+							},
+						}},
+					},
+				},
+			},
+			{
+				Role: anthropic.MessageRoleUser,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{ToolResult: &anthropic.ToolResultBlockParam{
+							Type: "tool_result", ToolUseID: "tool-1",
+							Content: &anthropic.ToolResultContent{Text: "ok"},
+						}},
+					},
+				},
+			},
+			{
+				Role: anthropic.MessageRoleAssistant,
+				Content: anthropic.MessageContent{
+					Array: []anthropic.ContentBlockParam{
+						{ToolUse: &anthropic.ToolUseBlockParam{
+							Type: "tool_use", ID: "tool-2", Name: "Read",
+							Input: map[string]any{
+								"path": "/tmp/a.txt", "limit": float64(10),
+								"offset": float64(0), "encoding": "utf-8",
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestAnthropicToOpenAITranslator_RequestBody_ByteStableWithToolUseReplay is the
+// end-to-end regression lock for the prefix-cache bug: the same logical request
+// must translate to identical bytes every time, or the backend re-prefills the
+// whole conversation on every turn.
+func TestAnthropicToOpenAITranslator_RequestBody_ByteStableWithToolUseReplay(t *testing.T) {
+	body := toolReplayRequest(t, []string{"Write", "Read", "Edit"})
+
+	var want []byte
+	// Repeat: Go randomises map order per range, so a single pair of runs can
+	// agree by luck even when the encoding is unstable.
+	for i := 0; i < 200; i++ {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		_, got, err := translator.RequestBody(nil, body, false)
+		require.NoError(t, err)
+		require.NotEmpty(t, got)
+		if want == nil {
+			want = got
+			continue
+		}
+		require.True(t, bytes.Equal(want, got),
+			"translated request body must be byte-stable (iteration %d)\n want: %s\n  got: %s", i, want, got)
+	}
+}
+
+// TestAnthropicToOpenAITranslator_RequestBody_AppendingToolIsPrefixStable pins the
+// property that keeps a client's newly loaded tool cheap.
+//
+// Clients append new tool schemas to the end of the array. As long as the gateway
+// passes that order through untouched, the serialised tools block for N+1 tools
+// has the block for N tools as an exact byte prefix, so only the tail has to be
+// recomputed upstream. Sorting or otherwise normalising the array would break
+// this and turn every tool load into a full re-prefill.
+func TestAnthropicToOpenAITranslator_RequestBody_AppendingToolIsPrefixStable(t *testing.T) {
+	before := toolReplayRequest(t, []string{"Write", "Read", "Edit"})
+	after := toolReplayRequest(t, []string{"Write", "Read", "Edit", "Bash"})
+
+	toolsBlock := func(body *anthropic.MessagesRequest) string {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		_, raw, err := translator.RequestBody(nil, body, false)
+		require.NoError(t, err)
+		var decoded struct {
+			Tools json.RawMessage `json:"tools"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		require.NotEmpty(t, decoded.Tools)
+		return string(decoded.Tools)
+	}
+
+	toolsBefore, toolsAfter := toolsBlock(before), toolsBlock(after)
+	// Drop the closing bracket: everything up to it must survive the append.
+	prefix := strings.TrimSuffix(toolsBefore, "]")
+	require.NotEqual(t, toolsBefore, prefix)
+	assert.True(t, strings.HasPrefix(toolsAfter, prefix),
+		"appending a tool must not perturb the tools already sent\n before: %s\n  after: %s", toolsBefore, toolsAfter)
 }

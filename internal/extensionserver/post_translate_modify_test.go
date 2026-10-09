@@ -12,9 +12,11 @@ import (
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
+	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	httpconnectionmanagerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
@@ -23,8 +25,10 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -547,7 +551,7 @@ func newMetadataForwardingServer(t *testing.T) (*Server, client.Client) {
 	} {
 		require.NoError(t, c.Create(t.Context(), obj))
 	}
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 	return s, c
 }
@@ -591,7 +595,7 @@ func Test_metadataForwardingNamespacesForSnapshot(t *testing.T) {
 	t.Run("an unidentifiable snapshot forwards nothing and says so", func(t *testing.T) {
 		var buf bytes.Buffer
 		logged, err := New(newFakeClient(), logr.FromSlogHandler(slog.NewTextHandler(&buf, nil)), udsPath,
-			false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+			false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 		require.NoError(t, err)
 
 		got, err := logged.metadataForwardingNamespacesForSnapshot(t.Context(),
@@ -610,7 +614,7 @@ func Test_maybeModifyCluster_forwardsDeclaredMetadataNamespaces(t *testing.T) {
 		namespaces, err := s.metadataForwardingNamespacesForSnapshot(t.Context(), snapshotOf(gatewayNames...))
 		require.NoError(t, err)
 		cluster := &clusterv3.Cluster{Name: clusterName}
-		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, namespaces))
+		require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, namespaces, nil))
 		return extProcFilterConfig(t, cluster)
 	}
 
@@ -669,7 +673,7 @@ func Test_maybeModifyCluster_rebuildsOwnFiltersOnExistingChain(t *testing.T) {
 			},
 		},
 	}))
-	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false)
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
 	require.NoError(t, err)
 
 	// A chain as an earlier pass left it: our two filters, no forwarding namespaces.
@@ -696,7 +700,7 @@ func Test_maybeModifyCluster_rebuildsOwnFiltersOnExistingChain(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, []string{"envoy.filters.http.ext_authz"}))
+	require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, []string{"envoy.filters.http.ext_authz"}, nil))
 
 	cfg := extProcFilterConfig(t, cluster)
 	require.Equal(t, []string{"envoy.filters.http.ext_authz"},
@@ -711,4 +715,505 @@ func Test_maybeModifyCluster_rebuildsOwnFiltersOnExistingChain(t *testing.T) {
 		names = append(names, f.GetName())
 	}
 	require.Equal(t, []string{aiGatewayExtProcName, aiGatewayHeaderMutationName, "envoy.filters.http.upstream_codec"}, names)
+}
+
+func Test_maybeModifyCluster_handlesMirrorClusters(t *testing.T) {
+	// Envoy Gateway names mirror backend clusters "httproute/<ns>/<name>/rule/<ruleIdx>-mirror-<mirrorIdx>".
+	// The extension server must apply the same upstream ExtProc + header-mutation filters
+	// to mirror clusters as it does to primary clusters so shadow traffic honors
+	// per-backend ModelNameOverride / HeaderMutation / BodyMutation.
+	c := newFakeClient()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+						{Name: "primary"},
+					},
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+						{
+							BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+								Name:              "shadow",
+								ModelNameOverride: "shadow-model",
+							},
+						},
+					},
+				},
+			},
+		},
+	}))
+
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+
+	// Envoy Gateway names mirror clusters with 1-based indexing — the first
+	// mirror of rule 0 is "0-mirror-1". The extension server must convert that
+	// back to 0-based for slice access into httpRouteRule.Mirrors.
+	mirrorCluster := &clusterv3.Cluster{
+		Name: "httproute/ns/myroute/rule/0-mirror-1",
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{LbEndpoints: []*endpointv3.LbEndpoint{{
+					HostIdentifier: &endpointv3.LbEndpoint_Endpoint{Endpoint: &endpointv3.Endpoint{Hostname: "shadow.example.com"}},
+				}}},
+			},
+		},
+	}
+	err = s.maybeModifyCluster(t.Context(), mirrorCluster, nil, nil)
+	require.NoError(t, err)
+
+	// Cluster metadata must contain the mirror backend name and the mirror flag
+	// (used downstream to suppress LLMRequestCost double-emission).
+	require.NotNil(t, mirrorCluster.Metadata)
+	internalMD := mirrorCluster.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+	require.NotNil(t, internalMD)
+	require.Equal(t,
+		internalapi.PerRouteRuleMirrorBackendName("ns", "shadow", "myroute", 0, 0),
+		internalMD.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue())
+	require.True(t, internalMD.Fields[internalapi.InternalMetadataMirrorKey].GetBoolValue())
+
+	// Endpoint metadata must mirror the cluster-level metadata.
+	epMD := mirrorCluster.LoadAssignment.Endpoints[0].LbEndpoints[0].Metadata
+	require.NotNil(t, epMD)
+	epInternal := epMD.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+	require.Equal(t,
+		internalapi.PerRouteRuleMirrorBackendName("ns", "shadow", "myroute", 0, 0),
+		epInternal.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue())
+	require.True(t, epInternal.Fields[internalapi.InternalMetadataMirrorKey].GetBoolValue())
+	// Like primary endpoints, the mirror endpoint carries its upstream host for backend auth (e.g. SigV4).
+	require.Equal(t, "shadow.example.com", epInternal.Fields[internalapi.InternalMetadataUpstreamHostKey].GetStringValue())
+
+	// TypedExtensionProtocolOptions must include the upstream ExtProc filter and
+	// the header-mutation filter — same chain we install on primary clusters.
+	raw, ok := mirrorCluster.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+	require.True(t, ok, "mirror cluster must carry HttpProtocolOptions with ExtProc filter")
+	var po httpv3.HttpProtocolOptions
+	require.NoError(t, raw.UnmarshalTo(&po))
+	filterNames := make([]string, 0, len(po.HttpFilters))
+	for _, f := range po.HttpFilters {
+		filterNames = append(filterNames, f.Name)
+	}
+	require.Contains(t, filterNames, aiGatewayExtProcName)
+	require.Contains(t, filterNames, "envoy.filters.http.header_mutation")
+}
+
+func Test_maybeModifyCluster_mirrorIndexIsOneBased(t *testing.T) {
+	// Envoy Gateway emits mirror cluster names with 1-based mirror indices
+	// (the first mirror of rule 0 is "0-mirror-1", the second is "0-mirror-2").
+	// The extension server must convert that suffix back to 0-based for slice
+	// access into httpRouteRule.Mirrors. Without the conversion, every single-
+	// mirror route silently skips ExtProc injection on the mirror cluster
+	// because mirrors[1] is out of range against a length-1 slice — observed
+	// in the local-dev shadow-traffic e2e against commit 0975e451 before the
+	// fix landed.
+	c := newFakeClient()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+						{Name: "primary"},
+					},
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+						{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "shadow-a"}},
+						{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "shadow-b"}},
+					},
+				},
+			},
+		},
+	}))
+
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+
+	cases := []struct {
+		clusterName        string
+		expectInstalled    bool
+		expectBackend      string
+		expectMirrorIndex0 int // 0-based mirror index after the conversion
+	}{
+		// "0-mirror-1" → mirrors[0] = shadow-a, ExtProc inserted.
+		{"httproute/ns/myroute/rule/0-mirror-1", true, "shadow-a", 0},
+		// "0-mirror-2" → mirrors[1] = shadow-b, ExtProc inserted.
+		{"httproute/ns/myroute/rule/0-mirror-2", true, "shadow-b", 1},
+		// "0-mirror-0" is invalid (mirror indices start at 1) — bail without error.
+		{"httproute/ns/myroute/rule/0-mirror-0", false, "", 0},
+		// "0-mirror-3" exceeds the slice — bail without error.
+		{"httproute/ns/myroute/rule/0-mirror-3", false, "", 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.clusterName, func(t *testing.T) {
+			cluster := &clusterv3.Cluster{
+				Name: tc.clusterName,
+				LoadAssignment: &endpointv3.ClusterLoadAssignment{
+					Endpoints: []*endpointv3.LocalityLbEndpoints{
+						{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
+					},
+				},
+			}
+			require.NoError(t, s.maybeModifyCluster(t.Context(), cluster, nil, nil))
+
+			_, installed := cluster.TypedExtensionProtocolOptions["envoy.extensions.upstreams.http.v3.HttpProtocolOptions"]
+			require.Equal(t, tc.expectInstalled, installed,
+				"ExtProc filter chain installation should match expectation for %q", tc.clusterName)
+
+			if tc.expectInstalled {
+				internalMD := cluster.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+				require.NotNil(t, internalMD)
+				require.Equal(t,
+					internalapi.PerRouteRuleMirrorBackendName("ns", tc.expectBackend, "myroute", 0, tc.expectMirrorIndex0),
+					internalMD.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue(),
+					"cluster metadata must reference the correct 0-based mirror entry for %q", tc.clusterName)
+			}
+		})
+	}
+}
+
+func Test_maybeModifyCluster_rejectsMalformedMirrorClusterName(t *testing.T) {
+	// Malformed mirror suffixes (non-numeric indices) should log and bail without
+	// returning an error so a bad cluster name doesn't tear down the whole xDS push.
+	c := newFakeClient()
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+	for _, name := range []string{
+		"httproute/ns/myroute/rule/abc-mirror-0",
+		"httproute/ns/myroute/rule/0-mirror-xyz",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, s.maybeModifyCluster(t.Context(), &clusterv3.Cluster{Name: name}, nil, nil))
+		})
+	}
+}
+
+// Test_maybeModifyCluster_inferencePoolMirror verifies that a mirror cluster whose
+// AIGatewayRoute mirror leg targets an InferencePool is rewritten to ORIGINAL_DST keyed on the
+// MIRROR endpoint-picker header, carries the mirror + pool metadata, drops the placeholder
+// Service endpoints, and reports the (rule cluster → pool) pair to the collector.
+func Test_maybeModifyCluster_inferencePoolMirror(t *testing.T) {
+	c := newFakeClient()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "primary"}},
+					Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+						{
+							BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+								Name:  "mirror-pool",
+								Group: ptr.To("inference.networking.k8s.io"),
+								Kind:  ptr.To("InferencePool"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}))
+	require.NoError(t, c.Create(t.Context(), &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "mirror-pool", Namespace: "ns",
+			Annotations: map[string]string{"aigateway.envoyproxy.io/processing-body-mode": "buffered"},
+		},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{
+				Name: "mirror-pool-epp",
+				Port: ptr.To(gwaiev1.Port{Number: 9002}),
+			},
+		},
+	}))
+
+	s, err := New(c, logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+
+	mirrorCluster := &clusterv3.Cluster{
+		Name: "httproute/ns/myroute/rule/0-mirror-1",
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
+			},
+		},
+	}
+	collected := map[string]*gwaiev1.InferencePool{}
+	require.NoError(t, s.maybeModifyCluster(t.Context(), mirrorCluster, nil, collected))
+
+	// ORIGINAL_DST keyed on the mirror endpoint-picker header, placeholder endpoints dropped.
+	require.Equal(t, clusterv3.Cluster_ORIGINAL_DST, mirrorCluster.GetType())
+	require.Equal(t, clusterv3.Cluster_CLUSTER_PROVIDED, mirrorCluster.LbPolicy)
+	lb := mirrorCluster.GetOriginalDstLbConfig()
+	require.NotNil(t, lb)
+	require.True(t, lb.UseHttpHeader)
+	require.Equal(t, internalapi.MirrorEndpointPickerHeaderKey, lb.HttpHeaderName)
+	require.Nil(t, mirrorCluster.LoadAssignment)
+
+	// Mirror attribution + pool metadata are both present (the pool metadata is what makes
+	// buildClustersForInferencePoolEndpointPickers emit the mirror pool's EPP cluster).
+	internalMD := mirrorCluster.Metadata.FilterMetadata[internalapi.InternalEndpointMetadataNamespace]
+	require.NotNil(t, internalMD)
+	require.Equal(t,
+		internalapi.PerRouteRuleMirrorBackendName("ns", "mirror-pool", "myroute", 0, 0),
+		internalMD.Fields[internalapi.InternalMetadataBackendNameKey].GetStringValue())
+	require.True(t, internalMD.Fields[internalapi.InternalMetadataMirrorKey].GetBoolValue())
+	pool := getInferencePoolByMetadata(mirrorCluster.Metadata)
+	require.NotNil(t, pool)
+	require.Equal(t, "mirror-pool", pool.Name)
+	require.Equal(t, "buffered", pool.Annotations["aigateway.envoyproxy.io/processing-body-mode"])
+
+	// The collector maps the rule cluster to the pool for listener/vhost patching.
+	require.Len(t, collected, 1)
+	require.Equal(t, "mirror-pool", collected["httproute/ns/myroute/rule/0"].Name)
+
+	// The EPP cluster is emitted for the mirror pool, exactly once even when two clusters
+	// reference the same pool.
+	eppClusters, err := buildClustersForInferencePoolEndpointPickers(
+		[]*clusterv3.Cluster{mirrorCluster, mirrorCluster})
+	require.NoError(t, err)
+	require.Len(t, eppClusters, 1)
+	require.Equal(t, clusterNameForInferencePool(pool), eppClusters[0].Name)
+
+	// A mirror pool without an endpoint picker leaves the cluster as Envoy Gateway generated it
+	// and is not collected for listener patching.
+	var noEPPPool gwaiev1.InferencePool
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "ns", Name: "mirror-pool"}, &noEPPPool))
+	noEPPPool.Spec.EndpointPickerRef = nil
+	require.NoError(t, c.Update(t.Context(), &noEPPPool))
+	noEPPCluster := &clusterv3.Cluster{
+		Name: "httproute/ns/myroute/rule/0-mirror-1",
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			Endpoints: []*endpointv3.LocalityLbEndpoints{
+				{LbEndpoints: []*endpointv3.LbEndpoint{{}}},
+			},
+		},
+	}
+	collected = map[string]*gwaiev1.InferencePool{}
+	require.NoError(t, s.maybeModifyCluster(t.Context(), noEPPCluster, nil, collected))
+	require.NotEqual(t, clusterv3.Cluster_ORIGINAL_DST, noEPPCluster.GetType())
+	require.NotNil(t, noEPPCluster.LoadAssignment)
+	require.Nil(t, getInferencePoolByMetadata(noEPPCluster.Metadata))
+	require.Empty(t, collected)
+}
+
+// Test_patchListenerAndVirtualHost_mirrorPool verifies the downstream wiring for a mirror pool:
+// the listener chain gains [mirror-EPP, mirror endpoint copy filter] BEFORE the primary pool's
+// EPP filter (all before the router), and per-route config enables the mirror filters only on
+// the mirror rule's route.
+func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+
+	primaryPool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary-pool", Namespace: "ns"},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "primary-epp", Port: ptr.To(gwaiev1.Port{Number: 9002})},
+		},
+	}
+	mirrorPool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-pool", Namespace: "ns"},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "mirror-epp", Port: ptr.To(gwaiev1.Port{Number: 9002})},
+		},
+	}
+
+	routerFilter := &httpconnectionmanagerv3.HttpFilter{Name: "envoy.filters.http.router"}
+	hcmIn := &httpconnectionmanagerv3.HttpConnectionManager{
+		HttpFilters: []*httpconnectionmanagerv3.HttpFilter{routerFilter},
+	}
+	hcmAny, err := toAny(hcmIn)
+	require.NoError(t, err)
+	listener := &listenerv3.Listener{
+		Name: "test-listener",
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+			}},
+		}},
+	}
+	s.patchListenerWithInferencePoolFilters(listener,
+		[]*gwaiev1.InferencePool{primaryPool}, []*gwaiev1.InferencePool{mirrorPool})
+
+	hcm, _, err := findHCM(listener.FilterChains[0])
+	require.NoError(t, err)
+	names := make([]string, 0, len(hcm.HttpFilters))
+	for _, f := range hcm.HttpFilters {
+		names = append(names, f.Name)
+	}
+	mirrorEPPName := httpFilterNameForInferencePool(mirrorPool)
+	primaryEPPName := httpFilterNameForInferencePool(primaryPool)
+	idx := func(n string) int {
+		for i, v := range names {
+			if v == n {
+				return i
+			}
+		}
+		return -1
+	}
+	require.GreaterOrEqual(t, idx(mirrorEPPName), 0, "mirror EPP filter missing: %v", names)
+	require.GreaterOrEqual(t, idx(mirrorEndpointCopyFilterName), 0, "copy filter missing: %v", names)
+	require.GreaterOrEqual(t, idx(primaryEPPName), 0, "primary EPP filter missing: %v", names)
+	require.Less(t, idx(mirrorEPPName), idx(mirrorEndpointCopyFilterName), "mirror EPP must precede the copy filter")
+	require.Less(t, idx(mirrorEndpointCopyFilterName), idx(primaryEPPName), "copy filter must precede the primary EPP")
+	require.Equal(t, "envoy.filters.http.router", names[len(names)-1])
+
+	// Failure semantics: the mirror EPP filter is fail-open (its failure drops the shadow
+	// clone, never the primary request), the primary EPP filter fail-closed.
+	extProcOf := func(i int) *extprocv3.ExternalProcessor {
+		ep := &extprocv3.ExternalProcessor{}
+		require.NoError(t, hcm.HttpFilters[i].GetTypedConfig().UnmarshalTo(ep))
+		return ep
+	}
+	mirrorEP := extProcOf(idx(mirrorEPPName))
+	require.True(t, mirrorEP.FailureModeAllow, "mirror EPP must be fail-open")
+	require.True(t, mirrorEP.DisableImmediateResponse, "mirror EPP ImmediateResponse must not reach the caller")
+	primaryEP := extProcOf(idx(primaryEPPName))
+	require.False(t, primaryEP.FailureModeAllow, "primary EPP must stay fail-closed")
+	require.False(t, primaryEP.DisableImmediateResponse)
+
+	// Virtual host per-route config: the mirror rule's route keeps the mirror filters enabled;
+	// a plain route gets everything disabled including the copy filter.
+	mirrorRuleCluster := "httproute/ns/myroute/rule/0"
+	vh := &routev3.VirtualHost{
+		Routes: []*routev3.Route{
+			{
+				Name: "mirror-rule-route",
+				Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: mirrorRuleCluster},
+				}},
+			},
+			{
+				Name: "plain-route",
+				Action: &routev3.Route_Route{Route: &routev3.RouteAction{
+					ClusterSpecifier: &routev3.RouteAction_Cluster{Cluster: "httproute/ns/other/rule/0"},
+				}},
+			},
+		},
+	}
+	mirrorMap := map[string]*gwaiev1.InferencePool{mirrorRuleCluster: mirrorPool}
+	require.NoError(t, s.patchVirtualHostWithInferencePool(vh,
+		[]*gwaiev1.InferencePool{primaryPool}, []*gwaiev1.InferencePool{mirrorPool}, mirrorMap))
+
+	mirrorRoute := vh.Routes[0]
+	plainRoute := vh.Routes[1]
+	// Mirror route: mirror EPP enabled (no disable override), primary EPP disabled (route
+	// metadata carries no primary pool in this synthetic setup).
+	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEPPName)
+	require.Contains(t, mirrorRoute.TypedPerFilterConfig, primaryEPPName)
+	// Plain route: every foreign EPP filter disabled.
+	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEPPName)
+	require.Contains(t, plainRoute.TypedPerFilterConfig, primaryEPPName)
+	// The copy filter is never per-route disabled — a generic FilterConfig disable is evaluated
+	// against the INITIAL route match, which on this listener precedes the aigateway extproc's
+	// model-header injection, so it would strip the filter from every real request stream.
+	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
+	require.NotContains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
+}
+
+// Test_patchListenerWithInferencePoolFilters_mirrorPoolWithoutEPP: a mirror pool without an
+// endpoint picker gets neither an EPP filter nor the copy filter.
+func Test_patchListenerWithInferencePoolFilters_mirrorPoolWithoutEPP(t *testing.T) {
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+
+	hcmAny, err := toAny(&httpconnectionmanagerv3.HttpConnectionManager{
+		HttpFilters: []*httpconnectionmanagerv3.HttpFilter{{Name: "envoy.filters.http.router"}},
+	})
+	require.NoError(t, err)
+	listener := &listenerv3.Listener{
+		Name: "test-listener",
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+			}},
+		}},
+	}
+	s.patchListenerWithInferencePoolFilters(listener, nil, []*gwaiev1.InferencePool{
+		{ObjectMeta: metav1.ObjectMeta{Name: "mirror-pool", Namespace: "ns"}},
+	})
+
+	hcm, _, err := findHCM(listener.FilterChains[0])
+	require.NoError(t, err)
+	require.Len(t, hcm.HttpFilters, 1)
+	require.Equal(t, "envoy.filters.http.router", hcm.HttpFilters[0].Name)
+}
+
+// Test_buildMirrorEndpointCopyFilter_copiesWithoutRemovingSource: the copy filter strips a
+// spoofed mirror header first, then copies the standard endpoint-picker header WITHOUT removing
+// it — the standard header must survive for the mirror's deployment-id-pinned rule, whose
+// cluster keys ORIGINAL_DST on it with no later EPP to re-set it.
+func Test_buildMirrorEndpointCopyFilter_copiesWithoutRemovingSource(t *testing.T) {
+	f, err := buildMirrorEndpointCopyFilter()
+	require.NoError(t, err)
+	hm := &header_mutationv3.HeaderMutation{}
+	require.NoError(t, f.GetTypedConfig().UnmarshalTo(hm))
+	muts := hm.GetMutations().GetRequestMutations()
+	require.Len(t, muts, 2)
+	require.Equal(t, internalapi.MirrorEndpointPickerHeaderKey, muts[0].GetRemove(),
+		"first mutation must strip a client-supplied mirror header")
+	appendMut := muts[1].GetAppend()
+	require.NotNil(t, appendMut)
+	require.Equal(t, internalapi.MirrorEndpointPickerHeaderKey, appendMut.GetHeader().GetKey())
+	for _, m := range muts {
+		require.NotEqual(t, internalapi.EndpointPickerHeaderKey, m.GetRemove(),
+			"the standard endpoint-picker header must never be removed")
+	}
+}
+
+// Test_patchListenerWithInferencePoolFilters_sharedPool: a pool referenced both as a mirror leg
+// and as a primary backendRef (the mirror's deployment-id-pinned probe rule) yields exactly one
+// EPP filter — the fail-open mirror variant. The filter name is keyed by pool identity, so
+// without cross-list dedup the chain would carry two same-named filters.
+func Test_patchListenerWithInferencePoolFilters_sharedPool(t *testing.T) {
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+
+	sharedPool := &gwaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-pool", Namespace: "ns"},
+		Spec: gwaiev1.InferencePoolSpec{
+			EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "shared-epp", Port: ptr.To(gwaiev1.Port{Number: 9002})},
+		},
+	}
+
+	routerFilter := &httpconnectionmanagerv3.HttpFilter{Name: "envoy.filters.http.router"}
+	hcmIn := &httpconnectionmanagerv3.HttpConnectionManager{
+		HttpFilters: []*httpconnectionmanagerv3.HttpFilter{routerFilter},
+	}
+	hcmAny, err := toAny(hcmIn)
+	require.NoError(t, err)
+	listener := &listenerv3.Listener{
+		Name: "test-listener",
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+			}},
+		}},
+	}
+	s.patchListenerWithInferencePoolFilters(listener,
+		[]*gwaiev1.InferencePool{sharedPool}, []*gwaiev1.InferencePool{sharedPool})
+
+	hcm, _, err := findHCM(listener.FilterChains[0])
+	require.NoError(t, err)
+	sharedName := httpFilterNameForInferencePool(sharedPool)
+	var matches []*httpconnectionmanagerv3.HttpFilter
+	for _, f := range hcm.HttpFilters {
+		if f.Name == sharedName {
+			matches = append(matches, f)
+		}
+	}
+	require.Len(t, matches, 1, "shared pool must yield exactly one EPP filter, got names: %v",
+		func() []string {
+			names := make([]string, 0, len(hcm.HttpFilters))
+			for _, f := range hcm.HttpFilters {
+				names = append(names, f.Name)
+			}
+			return names
+		}())
+	ep := &extprocv3.ExternalProcessor{}
+	require.NoError(t, matches[0].GetTypedConfig().UnmarshalTo(ep))
+	require.True(t, ep.FailureModeAllow, "shared pool filter must be the fail-open mirror variant")
+	require.True(t, ep.DisableImmediateResponse)
 }

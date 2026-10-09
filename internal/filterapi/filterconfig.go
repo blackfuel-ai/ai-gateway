@@ -52,6 +52,54 @@ type Config struct {
 	UnscopedModels []Model `json:"unscopedModels,omitempty"`
 	// MCPConfig is the configuration for the MCPRoute implementations.
 	MCPConfig *MCPConfig `json:"mcpConfig,omitempty"`
+	// EmitErrorMetadata, when true, makes the filter emit dynamic metadata describing
+	// upstream error responses (llm_error_type, llm_error_code, backend_name, route_name,
+	// model_name_override) under the "io.envoy.ai_gateway" namespace for non-2xx responses.
+	EmitErrorMetadata bool `json:"emitErrorMetadata,omitempty"`
+	// UsageEstimates configures the token usage estimates emitted as dynamic metadata
+	// when a request is admitted.
+	UsageEstimates []UsageEstimate `json:"usageEstimates,omitempty"`
+	// UsageEstimatePeriod is the length of the periods the usage estimates accumulate
+	// completed requests over. It must be positive when UsageEstimates is set.
+	UsageEstimatePeriod time.Duration `json:"usageEstimatePeriod,omitempty"`
+	// AdmissionReserves configures the quota reserves computed from the usage
+	// estimates when a request is admitted. Set exclusively by the QuotaPolicy
+	// controller.
+	AdmissionReserves []AdmissionReserve `json:"admissionReserves,omitempty"`
+}
+
+// AdmissionReserve is the share of a usage estimate a quota bucket is charged when a
+// request is admitted. Its value, Percent of the estimate rounded to the nearest
+// integer and 0 when the request has no estimate, is stored as dynamic metadata
+// under MetadataKey, which the rate limit charge entries read, and under
+// ReleaseMetadataKey, which the rate limit release entries read.
+type AdmissionReserve struct {
+	// MetadataKey is the key of the dynamic metadata storing the reserve.
+	MetadataKey string `json:"metadataKey"`
+	// ReleaseMetadataKey is the key of the dynamic metadata storing the amount
+	// released at stream end from every counter the reserve was charged to.
+	ReleaseMetadataKey string `json:"releaseMetadataKey,omitempty"`
+	// UsageEstimate is the MetadataKey of the UsageEstimate the reserve is computed from.
+	UsageEstimate string `json:"usageEstimate"`
+	// Percent of the usage estimate reserved, between 1 and 100.
+	Percent uint32 `json:"percent"`
+}
+
+// UsageEstimate configures one token usage estimate emitted when a request is admitted.
+// The estimate is drawn from the responses completed in the last completed period for
+// requests carrying the same ByHeader value and model, and computed by the CEL expression.
+type UsageEstimate struct {
+	// MetadataKey is the key of the dynamic metadata storing the estimate.
+	MetadataKey string `json:"metadataKey"`
+	// CEL is the CEL expression evaluated on the estimated usage and the measured ratios.
+	CEL string `json:"cel"`
+	// ByHeader is the lower-cased name of the request header grouping the requests.
+	ByHeader string `json:"byHeader"`
+	// EmitMetric also records the estimate in metrics.
+	EmitMetric bool `json:"emitMetric,omitempty"`
+	// EmitHeader also sends the estimate upstream in the request header named by
+	// UsageEstimateHeader, which a request without an estimate is sent without.
+	EmitHeader bool `json:"emitHeader,omitempty"`
 }
 
 // Model corresponds to the OpenAI model object in the OpenAI-compatible APIs
@@ -107,6 +155,15 @@ type LLMRequestCost struct {
 	// only evaluated when the request's model name matches. This allows a single
 	// metadata key to be shared across models without conflicting overwrites.
 	Model string `json:"model,omitempty"`
+	// AdmissionReserveMetadataKey is set exclusively by the QuotaPolicy controller,
+	// on the cost of a bucket that reserves at admission: the MetadataKey of that
+	// AdmissionReserve. The cost stored is then the computed cost minus the reserve,
+	// or 0 when the reserve covers it.
+	AdmissionReserveMetadataKey string `json:"admissionReserveMetadataKey,omitempty"`
+	// AdmissionSettleMetadataKey is set exclusively by the QuotaPolicy controller,
+	// on the cost of a bucket that reserves at admission: the key of the dynamic
+	// metadata storing the part of the computed cost the reserve covers.
+	AdmissionSettleMetadataKey string `json:"admissionSettleMetadataKey,omitempty"`
 }
 
 // LLMRequestCostType specifies the kind of the request cost calculation.
@@ -207,6 +264,11 @@ type Backend struct {
 	// HeaderValueFilters filter individual values out of multi-valued request headers before sending
 	// the request to the backend. Optional.
 	HeaderValueFilters []HTTPHeaderValueFilter `json:"headerValueFilters,omitempty"`
+	// IsMirror is true when this backend entry corresponds to a shadow (mirror) destination.
+	// When set, the upstream processor skips LLMRequestCost dynamic-metadata emission for
+	// the mirror leg so that cost metrics are not double-counted by the access-log /
+	// billing pipeline (the primary leg has already emitted them).
+	IsMirror bool `json:"isMirror,omitempty"`
 }
 
 // BackendAuth corresponds partially to BackendSecurityPolicy in api/v1alpha1/api.go.
@@ -383,6 +445,11 @@ type HTTPBodyMutation struct {
 	// Remove the given JSON field(s) from the HTTP request body before sending to the backend.
 	// The value of Remove is a list of top-level field names to remove.
 	Remove []string `json:"remove,omitempty"`
+	// SetDefault sets the given JSON field (name, value) only when the field is
+	// not already defined in the request body. Applied after Set and Remove —
+	// an explicit Set on the same path wins. An explicit null in the request
+	// body is considered "defined" and suppresses the default.
+	SetDefault []HTTPBodyField `json:"setDefault,omitempty"`
 }
 
 // HTTPBodyField represents a JSON field name and value for body mutation

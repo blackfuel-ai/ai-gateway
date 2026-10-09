@@ -9,9 +9,8 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
+	"regexp"
 	"strings"
-
-	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
@@ -131,19 +130,23 @@ func appendAnthropicAssistantMessage(messages []openai.ChatCompletionMessagePara
 	for _, block := range msg.Content.Array {
 		switch {
 		case block.Thinking != nil:
+			// vLLM's CustomThinkCompletionContentParam requires the reasoning
+			// under a "thinking" key; the Anthropic signature cannot round-trip
+			// through an OpenAI backend and is dropped.
 			hasThinking = true
 			thinking := block.Thinking.Thinking
-			signature := block.Thinking.Signature
 			contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-				Type:      openai.ChatCompletionAssistantMessageParamContentTypeThinking,
-				Text:      &thinking,
-				Signature: &signature,
+				Type:     openai.ChatCompletionAssistantMessageParamContentTypeThinking,
+				Thinking: &thinking,
 			})
 		case block.RedactedThinking != nil:
+			// Redacted thinking has no OpenAI equivalent; replay the opaque data
+			// through the same vLLM-native thinking shape so the part validates.
 			hasThinking = true
+			data := block.RedactedThinking.Data
 			contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-				Type:            openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking,
-				RedactedContent: &openai.RedactedContentUnion{Value: block.RedactedThinking.Data},
+				Type:     openai.ChatCompletionAssistantMessageParamContentTypeThinking,
+				Thinking: &data,
 			})
 		case block.Text != nil:
 			text := block.Text.Text
@@ -290,17 +293,22 @@ func toolResultToText(tr *anthropic.ToolResultBlockParam) string {
 	return sb.String()
 }
 
+// billingHeaderRe matches the x-anthropic-billing-header line that Claude Code
+// injects into the system prompt. Its cch= hash changes every turn, which breaks
+// vLLM/OpenAI-compatible prefix caching, so we strip it on the OpenAI translation path.
+var billingHeaderRe = regexp.MustCompile(`(?m)^x-anthropic-billing-header:[^\n]*\n?`)
+
 // anthropicSystemPromptToText extracts a plain string from an Anthropic system prompt,
 // concatenating text blocks if the prompt is in array form.
 func anthropicSystemPromptToText(s *anthropic.SystemPrompt) string {
 	if s.Text != "" {
-		return s.Text
+		return billingHeaderRe.ReplaceAllString(s.Text, "")
 	}
 	var sb strings.Builder
 	for _, t := range s.Texts {
 		sb.WriteString(t.Text)
 	}
-	return sb.String()
+	return billingHeaderRe.ReplaceAllString(sb.String(), "")
 }
 
 // anthropicContentToText extracts a plain text string from Anthropic message content.
@@ -320,6 +328,26 @@ func anthropicContentToText(content anthropic.MessageContent) string {
 
 // anthropicToolsToOpenAI converts Anthropic custom tools to OpenAI function tools.
 // Only ToolUnion entries with a custom Tool variant are converted; built-in tool types are skipped.
+//
+// The given order is passed through untouched, and must stay that way. Chat
+// templates render the tool declarations near the head of the prompt - Kimi K2's
+// published template emits them as a tool_declare block ahead of the system
+// message and every conversation message - so the tools array is the head of the
+// cacheable prefix. Clients append newly loaded tools to the end, which is already
+// optimal: every tool sent before keeps its position and only the tail has to be
+// re-prefilled. Sorting or otherwise normalising the array would insert new tools
+// into the middle and collapse the common prefix on every tool-load event.
+// TestAnthropicToolsToOpenAI_PreservesGivenOrder guards this.
+//
+// InputSchema is a RawMessage sub-slice of the original request body, spliced back
+// out verbatim, so the request we emit is byte-identical between turns. The
+// template then re-serialises the block (normalising whitespace away) but does not
+// sort keys, so it is our key order that has to be stable, and the passthrough is
+// what keeps it so.
+//
+// TODO: provider-native tools (bash, text editor, web search) and union members
+// whose type did not parse are silently dropped here. Pre-existing behaviour; the
+// tools_dropped access-log field makes it visible in the meantime.
 func anthropicToolsToOpenAI(tools []anthropic.ToolUnion) []openai.Tool {
 	if len(tools) == 0 {
 		return nil
@@ -534,6 +562,21 @@ type sseMessageUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
+// anthropicWireInputTokens converts OpenAI's gross prompt-token count (which already
+// includes any cached/cache-creation portion) into Anthropic's input_tokens semantics,
+// where cache_read_input_tokens/cache_creation_input_tokens are additive on top of
+// input_tokens. Reporting the raw gross count alongside the cache breakdown would have
+// an Anthropic-compliant client double-count the cached portion. Floored at zero since
+// the cache breakdown is sourced from a separate field on the same usage object and
+// could in principle exceed the gross count on a non-compliant backend.
+func anthropicWireInputTokens(gross int, cacheRead, cacheCreation uint32) int {
+	nonCache := gross - int(cacheRead) - int(cacheCreation)
+	if nonCache < 0 {
+		return 0
+	}
+	return nonCache
+}
+
 type sseContentBlockStartText struct {
 	Type         string       `json:"type"`
 	Index        int          `json:"index"`
@@ -630,12 +673,32 @@ type sseMessageDeltaBody struct {
 }
 
 type sseOutputUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens"`
 }
 
 type sseMessageStop struct {
 	Type string `json:"type"`
+}
+
+type ssePing struct {
+	Type string `json:"type"`
+}
+
+// emitPing emits an Anthropic ping SSE event. Anthropic streams may include any
+// number of ping events at any position; compliant clients treat them as no-ops.
+// Used to keep the downstream connection byte-alive when the upstream sent
+// traffic that translates to no Anthropic event (keepalive comments,
+// unparseable chunks) — see responseBodyStreaming.
+func emitPing(out *[]byte) error {
+	data, err := json.Marshal(ssePing{Type: "ping"})
+	if err != nil {
+		return fmt.Errorf("failed to marshal ping: %w", err)
+	}
+	appendAnthropicSSEEvent(out, "ping", data)
+	return nil
 }
 
 // openAIStreamToAnthropicState tracks the state for converting OpenAI SSE chunks to Anthropic SSE events.
@@ -663,15 +726,27 @@ type streamToolCall struct {
 }
 
 // processBuffer processes the buffered OpenAI SSE data and emits Anthropic SSE events.
-func (s *openAIStreamToAnthropicState) processBuffer(out *[]byte, endOfStream bool) error {
-	// Loop through all event blocks that are separated by a blank line
+// It reports whether a ping should keep the downstream connection byte-alive: true when
+// at least one complete block was processed and none of them was a valid protocol block
+// (only keepalive comments and undecodable garbage) — the traffic shapes an upstream
+// emits precisely to hold the connection open, which must not be suppressed into
+// byte-silence (BLA-2721). Valid-but-eventless blocks (finish_reason-only chunks,
+// [DONE]) and incomplete buffered fragments are normal protocol flow and never ping.
+func (s *openAIStreamToAnthropicState) processBuffer(out *[]byte, endOfStream bool) (pingWorthy bool, err error) {
+	blocksProcessed, validBlocks := 0, 0
+	// Loop through all event blocks that are separated by a blank line (LF or CRLF).
 	for {
-		eventBlock, remaining, found := bytes.Cut(s.buffer.Bytes(), []byte("\n\n"))
+		eventBlock, remaining, found := nextSSEEvent(s.buffer.Bytes())
 		if !found {
 			break
 		}
-		if err := s.processEventBlock(eventBlock, out); err != nil {
-			return err
+		valid, err := s.processEventBlock(eventBlock, out)
+		if err != nil {
+			return false, err
+		}
+		blocksProcessed++
+		if valid {
+			validBlocks++
 		}
 		// Clear buffer and add back remaining SSE data
 		s.buffer.Reset()
@@ -683,19 +758,23 @@ func (s *openAIStreamToAnthropicState) processBuffer(out *[]byte, endOfStream bo
 		if s.buffer.Len() > 0 {
 			remaining := s.buffer.Bytes()
 			s.buffer.Reset()
-			if err := s.processEventBlock(remaining, out); err != nil {
-				return err
+			if _, err := s.processEventBlock(remaining, out); err != nil {
+				return false, err
 			}
 		}
 		if !s.closingEmitted {
-			return s.emitClosingEvents(out)
+			return false, s.emitClosingEvents(out)
 		}
+		return false, nil
 	}
-	return nil
+	return blocksProcessed > 0 && validBlocks == 0, nil
 }
 
-// processEventBlock processes a single SSE event block (data between consecutive \n\n separators).
-func (s *openAIStreamToAnthropicState) processEventBlock(block []byte, out *[]byte) error {
+// processEventBlock processes a single SSE event block (data between consecutive \n\n
+// separators). It reports whether the block was a valid protocol block: a well-formed
+// data event or the [DONE] marker. Comment-only blocks (SSE keepalives such as
+// OpenRouter's ": OPENROUTER PROCESSING") and undecodable data report false.
+func (s *openAIStreamToAnthropicState) processEventBlock(block []byte, out *[]byte) (valid bool, err error) {
 	var eventData []byte
 	for line := range bytes.SplitSeq(block, []byte("\n")) {
 		if after, ok := cutSSEDataPrefix(line); ok {
@@ -707,21 +786,21 @@ func (s *openAIStreamToAnthropicState) processEventBlock(block []byte, out *[]by
 	}
 
 	if len(eventData) == 0 {
-		return nil
+		return false, nil
 	}
 
 	// Skip the [DONE] marker; closing events are emitted on the usage chunk or endOfStream.
 	if bytes.Equal(eventData, sseDoneMessage) {
-		return nil
+		return true, nil
 	}
 
 	var chunk openai.ChatCompletionResponseChunk
 	if err := json.Unmarshal(eventData, &chunk); err != nil {
 		// Skip malformed chunks silently.
-		return nil
+		return false, nil
 	}
 
-	return s.handleChunk(&chunk, out)
+	return true, s.handleChunk(&chunk, out)
 }
 
 // handleChunk converts a single OpenAI ChatCompletionResponseChunk to Anthropic SSE events.
@@ -734,24 +813,25 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 		s.model = chunk.Model
 	}
 
-	// Usage-only chunk (emitted when stream_options.include_usage=true)
-	// One of the two ways to indicate stream end (other is endOfStream)
-	if len(chunk.Choices) == 0 && chunk.Usage != nil {
+	// Capture token usage from any chunk that carries it — including the final content
+	// chunk (non-empty choices + finish_reason), the framing OpenRouter/GLM-5.2 uses on
+	// the /v1/messages path. OpenAI accounting (setOpenAIStreamUsage): prompt_tokens
+	// already includes cached tokens. Latest-wins; setting (not accumulating) avoids
+	// double-counting if a trailing usage-only chunk also arrives.
+	if chunk.Usage != nil {
 		s.inputTokens = chunk.Usage.PromptTokens
 		s.outputTokens = chunk.Usage.CompletionTokens
-		// OpenAI's cached_tokens/cache_write_tokens are a breakdown within
-		// prompt_tokens, not additive like Anthropic's native cache fields, so we don't
-		// forward them here to avoid double-counting.
-		s.tokenUsage = metrics.ExtractTokenUsageFromExplicitCaching(
-			int64(s.inputTokens),
-			int64(s.outputTokens),
-			ptr.To(int64(0)),
-			ptr.To(int64(0)),
-		)
-		return s.emitClosingEvents(out)
+		setOpenAIStreamUsage(&s.tokenUsage, chunk.Usage)
 	}
 
+	// A usage-only chunk (empty choices, emitted when stream_options.include_usage=true)
+	// is one of the two stream-end signals (the other is endOfStream) — emit closing
+	// events. A chunk with non-empty choices is still processed below even if it carried
+	// usage, so its content and finish_reason are not dropped.
 	if len(chunk.Choices) == 0 {
+		if chunk.Usage != nil {
+			return s.emitClosingEvents(out)
+		}
 		return nil
 	}
 
@@ -770,6 +850,12 @@ func (s *openAIStreamToAnthropicState) handleChunk(chunk *openai.ChatCompletionR
 		// Handle reasoning/thinking content (must come before text).
 		if delta.ReasoningContent != nil {
 			if err := s.handleReasoningDelta(delta.ReasoningContent, out); err != nil {
+				return err
+			}
+		} else if delta.Reasoning != nil && *delta.Reasoning != "" {
+			// OpenRouter's plain-string reasoning delta; same thinking-block
+			// machinery. reasoning_content wins if both are ever present.
+			if err := s.handleReasoningDelta(&openai.StreamReasoningContent{Text: *delta.Reasoning}, out); err != nil {
 				return err
 			}
 		}
@@ -831,7 +917,8 @@ func (s *openAIStreamToAnthropicState) emitMessageStart(out *[]byte) error {
 			Model:        cmp.Or(s.model, s.requestModel),
 			StopReason:   nil,
 			StopSequence: nil,
-			// Input tokens are not yet known; they will be reported in message_delta.usage.
+			// Input and cache token counts are not yet known here; they are reported on
+			// the message_delta event once the upstream usage chunk arrives.
 			Usage: sseMessageUsage{InputTokens: 0, OutputTokens: 0},
 		},
 	}
@@ -1063,13 +1150,20 @@ func (s *openAIStreamToAnthropicState) emitClosingEvents(out *[]byte) error {
 		stopReason = string(anthropic.StopReasonEndTurn)
 	}
 
-	// Backfill input_tokens here (not message_start): OpenAI doesn't report it until now.
+	// Emit message_delta with stop_reason and the final token usage. input_tokens and the
+	// cache fields ride message_delta because for OpenAI-backed streams the usage is not
+	// known until the terminal (or finish_reason) chunk, after message_start was emitted.
+	// Cache counts come from s.tokenUsage, populated by setOpenAIStreamUsage on capture.
+	cacheRead, _ := s.tokenUsage.CachedInputTokens()
+	cacheCreation, _ := s.tokenUsage.CacheCreationInputTokens()
 	msgDeltaPayload := sseMessageDelta{
 		Type:  "message_delta",
 		Delta: sseMessageDeltaBody{StopReason: stopReason, StopSequence: nil},
 		Usage: sseOutputUsage{
-			InputTokens:  s.inputTokens,
-			OutputTokens: s.outputTokens,
+			InputTokens:              anthropicWireInputTokens(s.inputTokens, cacheRead, cacheCreation),
+			CacheReadInputTokens:     int(cacheRead),
+			CacheCreationInputTokens: int(cacheCreation),
+			OutputTokens:             s.outputTokens,
 		},
 	}
 	data, err := json.Marshal(msgDeltaPayload)

@@ -8,6 +8,10 @@ package filterapi
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/google/cel-go/cel"
 
@@ -45,6 +49,35 @@ type RuntimeConfig struct {
 	UnscopedModels []Model
 	// Backends is the map of backends by name.
 	Backends map[string]*RuntimeBackend
+	// EmitErrorMetadata mirrors filterapi.Config.EmitErrorMetadata: when true, the
+	// filter emits error dynamic metadata for non-2xx upstream responses.
+	EmitErrorMetadata bool
+	// UsageEstimates is the list of token usage estimates emitted when a request is admitted.
+	UsageEstimates []RuntimeUsageEstimate
+	// UsageEstimatePeriod is the length of the periods the usage estimates accumulate
+	// completed requests over.
+	UsageEstimatePeriod time.Duration
+	// AdmissionReserves is the list of quota reserves computed from the usage estimates
+	// when a request is admitted.
+	AdmissionReserves []AdmissionReserve
+}
+
+// RuntimeUsageEstimate is a usage estimate with its compiled CEL program.
+type RuntimeUsageEstimate struct {
+	*UsageEstimate
+	CELProg cel.Program
+	// Header is the request header carrying the estimate upstream, empty without EmitHeader.
+	Header string
+}
+
+// usageEstimateHeaderKey matches the metadata keys a usage estimate header can be named after:
+// replacing their underscores by hyphens gives each key its own header name.
+var usageEstimateHeaderKey = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// UsageEstimateHeader returns the name of the request header carrying the usage estimate
+// stored under metadataKey upstream.
+func UsageEstimateHeader(metadataKey string) string {
+	return internalapi.UsageEstimateHeaderPrefix + strings.ReplaceAll(metadataKey, "_", "-")
 }
 
 // RuntimeBackend is a filter backend with its auth handler that is derived from the filterapi.Backend configuration.
@@ -123,13 +156,44 @@ func NewRuntimeConfig(ctx context.Context, config *Config, fn NewBackendAuthHand
 		costs = append(costs, RuntimeRequestCost{LLMRequestCost: c, CELProg: prog})
 	}
 
+	if len(config.UsageEstimates) > 0 && config.UsageEstimatePeriod <= 0 {
+		return nil, fmt.Errorf("usage estimate period must be positive, got %s", config.UsageEstimatePeriod)
+	}
+	usageEstimates := make([]RuntimeUsageEstimate, 0, len(config.UsageEstimates))
+	for i := range config.UsageEstimates {
+		e := &config.UsageEstimates[i]
+		prog, err := llmcostcel.NewEstimateProgram(e.CEL)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create CEL program for usage estimate %q: %w", e.MetadataKey, err)
+		}
+		re := RuntimeUsageEstimate{UsageEstimate: e, CELProg: prog}
+		if e.EmitHeader {
+			if !usageEstimateHeaderKey.MatchString(e.MetadataKey) {
+				return nil, fmt.Errorf("usage estimate %q emits a header: its metadata key must contain only lower-case letters, digits and underscores", e.MetadataKey)
+			}
+			re.Header = UsageEstimateHeader(e.MetadataKey)
+		}
+		usageEstimates = append(usageEstimates, re)
+	}
+
+	for i := range config.AdmissionReserves {
+		r := &config.AdmissionReserves[i]
+		if !slices.ContainsFunc(config.UsageEstimates, func(e UsageEstimate) bool { return e.MetadataKey == r.UsageEstimate }) {
+			return nil, fmt.Errorf("admission reserve %q references undeclared usage estimate %q", r.MetadataKey, r.UsageEstimate)
+		}
+	}
+
 	return &RuntimeConfig{
-		UUID:               config.UUID,
-		Backends:           backends,
-		GlobalRequestCosts: globalCosts,
-		RequestCosts:       costs,
-		DeclaredModels:     config.Models,
-		ModelsByHost:       config.ModelsByHost,
-		UnscopedModels:     config.UnscopedModels,
+		UUID:                config.UUID,
+		Backends:            backends,
+		GlobalRequestCosts:  globalCosts,
+		RequestCosts:        costs,
+		DeclaredModels:      config.Models,
+		ModelsByHost:        config.ModelsByHost,
+		UnscopedModels:      config.UnscopedModels,
+		EmitErrorMetadata:   config.EmitErrorMetadata,
+		UsageEstimates:      usageEstimates,
+		UsageEstimatePeriod: config.UsageEstimatePeriod,
+		AdmissionReserves:   config.AdmissionReserves,
 	}, nil
 }

@@ -180,8 +180,9 @@ func TestTypeSafeToTypeSafeTranslatorSystemOne_ResponseError(t *testing.T) {
 	} {
 		t.Run("non_json_error_"+tc.status, func(t *testing.T) {
 			respHeaders := map[string]string{statusHeaderName: tc.status, contentTypeHeaderName: "text/plain"}
-			headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader("Overloaded"))
+			headerMutation, bodyMutation, errInfo, err := translator.ResponseError(respHeaders, strings.NewReader("Overloaded"))
 			require.NoError(t, err)
+			require.Equal(t, LLMErrorInfo{Type: tc.expType}, errInfo)
 			require.Len(t, headerMutation, 2)
 			var typesafeErr typesafeschema.SystemOneError
 			require.NoError(t, json.Unmarshal(bodyMutation, &typesafeErr))
@@ -192,15 +193,25 @@ func TestTypeSafeToTypeSafeTranslatorSystemOne_ResponseError(t *testing.T) {
 
 	t.Run("json_error_passthrough", func(t *testing.T) {
 		respHeaders := map[string]string{statusHeaderName: "400", contentTypeHeaderName: jsonContentType}
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(`{"detail":{"error_type":"api_usage_error","message":"Unknown model: no-such-model"}}`))
+		headerMutation, bodyMutation, errInfo, err := translator.ResponseError(respHeaders, strings.NewReader(`{"detail":{"error_type":"api_usage_error","message":"Unknown model: no-such-model"}}`))
 		require.NoError(t, err)
 		require.Nil(t, headerMutation)
 		require.Nil(t, bodyMutation)
+		require.Equal(t, LLMErrorInfo{Type: typesafeschema.ErrorTypeAPIUsage}, errInfo)
+	})
+
+	t.Run("json_error_passthrough_unparseable", func(t *testing.T) {
+		respHeaders := map[string]string{statusHeaderName: "400", contentTypeHeaderName: jsonContentType}
+		headerMutation, bodyMutation, errInfo, err := translator.ResponseError(respHeaders, strings.NewReader(`not json`))
+		require.NoError(t, err)
+		require.Nil(t, headerMutation)
+		require.Nil(t, bodyMutation)
+		require.Zero(t, errInfo)
 	})
 
 	t.Run("read_error", func(t *testing.T) {
 		respHeaders := map[string]string{statusHeaderName: "500", contentTypeHeaderName: "text/plain"}
-		_, _, err := translator.ResponseError(respHeaders, alwaysErrReader{})
+		_, _, _, err := translator.ResponseError(respHeaders, alwaysErrReader{})
 		require.ErrorContains(t, err, "failed to read error body")
 	})
 }

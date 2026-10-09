@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/yaml"
 
+	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	testsinternal "github.com/envoyproxy/ai-gateway/tests/internal"
 )
@@ -140,6 +141,31 @@ func TestGatewayConfigs(t *testing.T) {
 		{
 			name:   "bad_metadata_forwarding_namespace.yaml",
 			expErr: "metadata namespaces may only contain letters, digits, '.', '_', '/' and '-'",
+		},
+		{name: "usage-estimates.yaml"},
+		{
+			name:   "usage-estimate-empty-header.yaml",
+			expErr: "spec.usageEstimates[0].byHeader",
+		},
+		{
+			name:   "usage-estimate-empty-cel.yaml",
+			expErr: "spec.usageEstimates[0].cel",
+		},
+		{
+			name:   "usage-estimate-duplicate-key.yaml",
+			expErr: "Duplicate value",
+		},
+		{
+			name:   "usage-estimate-header-invalid-key.yaml",
+			expErr: "metadataKey must contain only lower-case letters, digits and underscores when emitHeader is set",
+		},
+		{
+			name:   "usage-estimate-period-too-short.yaml",
+			expErr: "usageEstimatePeriod must be between 5s and 10m",
+		},
+		{
+			name:   "usage-estimate-period-too-long.yaml",
+			expErr: "usageEstimatePeriod must be between 5s and 10m",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -373,6 +399,73 @@ func TestMCPRoutes(t *testing.T) {
 			} else {
 				require.NoError(t, c.Create(ctx, mcpRoute))
 				require.NoError(t, c.Delete(ctx, mcpRoute))
+			}
+		})
+	}
+}
+
+func TestQuotaPolicies(t *testing.T) {
+	c, _, _ := testsinternal.NewEnvTest(t)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name   string
+		expErr string
+	}{
+		{name: "basic-dynamic-override.yaml"},
+		{name: "no-service-quota.yaml"},
+		{name: "per-bucket-cost.yaml"},
+		{
+			name:   "cost-expression-with-requests.yaml",
+			expErr: "costExpression cannot be combined with costMetric=Requests",
+		},
+		{
+			name:   "shadow-with-override.yaml",
+			expErr: "dynamicOverride cannot be combined with shadowMode",
+		},
+		{
+			name:   "service-quota-override.yaml",
+			expErr: "serviceQuota does not support dynamicOverride",
+		},
+		{
+			name:   "empty-from-header.yaml",
+			expErr: "spec.perModelQuotas[0].quota.defaultBucket.dynamicOverride.fromHeader",
+		},
+		{name: "admission-reserve.yaml"},
+		{
+			name:   "admission-reserve-with-requests.yaml",
+			expErr: "admissionReserve cannot be combined with costMetric=Requests",
+		},
+		{
+			name:   "admission-reserve-with-shadow.yaml",
+			expErr: "admissionReserve cannot be combined with shadowMode",
+		},
+		{
+			name:   "admission-reserve-zero-percent.yaml",
+			expErr: "spec.perModelQuotas[0].quota.defaultBucket.admissionReserve.percent",
+		},
+		{
+			name:   "admission-reserve-empty-usage-estimate.yaml",
+			expErr: "spec.perModelQuotas[0].quota.defaultBucket.admissionReserve.usageEstimate",
+		},
+		{
+			name:   "service-quota-admission-reserve.yaml",
+			expErr: "serviceQuota does not support admissionReserve",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := testdata.ReadFile(path.Join("testdata/quotapolicies", tc.name))
+			require.NoError(t, err)
+
+			quotaPolicy := &aigv1a1.QuotaPolicy{}
+			err = yaml.UnmarshalStrict(data, quotaPolicy)
+			require.NoError(t, err)
+
+			if tc.expErr != "" {
+				require.ErrorContains(t, c.Create(ctx, quotaPolicy), tc.expErr)
+			} else {
+				require.NoError(t, c.Create(ctx, quotaPolicy))
+				require.NoError(t, c.Delete(ctx, quotaPolicy))
 			}
 		})
 	}

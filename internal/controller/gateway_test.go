@@ -33,11 +33,13 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
+	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/controller/rotators"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
@@ -434,7 +436,7 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 	for range 2 { // Reconcile twice to make sure the secret update path is working.
 		const someNamespace = "some-namespace"
 		configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
-		effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+		effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil, false, nil, 0)
 		require.NoError(t, err)
 		require.True(t, effective, "expected filter config to be effective")
 
@@ -586,7 +588,7 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		c, kube := setup(t, nil)
 		const someNamespace = "some-namespace"
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
-			newRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil)
+			newRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil, false, nil, 0)
 		require.NoError(t, err)
 
 		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
@@ -598,7 +600,7 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		c, kube := setup(t, grant)
 		const someNamespace = "some-namespace"
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
-			newRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil)
+			newRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil, false, nil, 0)
 		require.NoError(t, err)
 
 		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
@@ -627,7 +629,7 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 
 		const someNamespace = "some-namespace"
 		_, err = c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
-			newRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil)
+			newRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil, false, nil, 0)
 		require.NoError(t, err)
 
 		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
@@ -638,7 +640,7 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		c, kube := setup(t, nil)
 		const someNamespace = "some-namespace"
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
-			newRoute("InferencePool", "pool1"), nil, "uuid", nil, nil)
+			newRoute("InferencePool", "pool1"), nil, "uuid", nil, nil, false, nil, 0)
 		require.NoError(t, err)
 
 		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
@@ -659,7 +661,7 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 
 		const someNamespace = "some-namespace"
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
-			newRoute("InferencePool", "pool1"), nil, "uuid", nil, nil)
+			newRoute("InferencePool", "pool1"), nil, "uuid", nil, nil, false, nil, 0)
 		require.NoError(t, err)
 
 		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
@@ -667,6 +669,86 @@ func TestGatewayController_reconcileFilterConfigSecret_CrossNamespaceReferenceGr
 		require.NotNil(t, fc.Backends[0].Auth)
 		require.NotNil(t, fc.Backends[0].Auth.APIKey)
 		require.Equal(t, "supersecret", fc.Backends[0].Auth.APIKey.Key)
+	})
+
+	newMirrorRoute := func(kind, name string) []aigv1b1.AIGatewayRoute {
+		group := aiServiceBackendGroup
+		if kind == "InferencePool" {
+			group = inferencePoolGroup
+		}
+		return []aigv1b1.AIGatewayRoute{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: routeNamespace},
+				Spec: aigv1b1.AIGatewayRouteSpec{
+					Rules: []aigv1b1.AIGatewayRouteRule{
+						{
+							Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+								{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+									Name:      name,
+									Namespace: ptr.To(gwapiv1.Namespace(backendNamespace)),
+									Group:     ptr.To(group),
+									Kind:      ptr.To(kind),
+								}},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("AIServiceBackend cross-namespace mirror without ReferenceGrant is rejected", func(t *testing.T) {
+		c, kube := setup(t, nil)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil, false, nil, 0)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Empty(t, fc.Backends, "cross-namespace mirror backend without a ReferenceGrant must not be wired into the filter config")
+	})
+
+	t.Run("AIServiceBackend cross-namespace mirror with ReferenceGrant is allowed", func(t *testing.T) {
+		grant := referenceGrant(aiServiceBackendGroup, aiGatewayRouteKind, aiServiceBackendGroup, aiServiceBackendKind)
+		c, kube := setup(t, grant)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute("AIServiceBackend", "backend1"), nil, "uuid", nil, nil, false, nil, 0)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Len(t, fc.Backends, 1)
+		require.True(t, fc.Backends[0].IsMirror)
+		require.Equal(t, internalapi.PerRouteRuleMirrorBackendName(routeNamespace, "backend1", "route1", 0, 0), fc.Backends[0].Name)
+		require.NotNil(t, fc.Backends[0].Auth)
+		require.NotNil(t, fc.Backends[0].Auth.APIKey)
+		require.Equal(t, "supersecret", fc.Backends[0].Auth.APIKey.Key)
+	})
+
+	t.Run("InferencePool cross-namespace mirror without ReferenceGrant is rejected", func(t *testing.T) {
+		c, kube := setup(t, nil)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute("InferencePool", "pool1"), nil, "uuid", nil, nil, false, nil, 0)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Empty(t, fc.Backends, "cross-namespace mirror inference pool without a ReferenceGrant must not be wired into the filter config")
+	})
+
+	t.Run("InferencePool cross-namespace mirror with ReferenceGrant is allowed", func(t *testing.T) {
+		grant := referenceGrant(aiServiceBackendGroup, aiGatewayRouteKind, inferencePoolGroup, inferencePoolKind)
+		c, kube := setup(t, grant)
+		const someNamespace = "some-namespace"
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", routeNamespace, someNamespace,
+			newMirrorRoute("InferencePool", "pool1"), nil, "uuid", nil, nil, false, nil, 0)
+		require.NoError(t, err)
+
+		fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", routeNamespace)
+		require.Len(t, fc.Backends, 1)
+		require.True(t, fc.Backends[0].IsMirror)
+		require.Equal(t, internalapi.PerRouteRuleMirrorBackendName(routeNamespace, "pool1", "route1", 0, 0), fc.Backends[0].Name)
+		require.Equal(t, filterapi.APISchemaOpenAI, fc.Backends[0].Schema.Name)
 	})
 }
 
@@ -753,7 +835,7 @@ func TestGatewayController_reconcileFilterConfigSecret_HostnameScopedModels(t *t
 	}
 
 	const someNamespace = "some-namespace"
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-hostname", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-hostname", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -825,7 +907,7 @@ func TestGatewayController_reconcileFilterConfigSecret_AllUnscopedRoutesLeaveUns
 	}))
 
 	const someNamespace = "some-namespace"
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-unscoped-only", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw-unscoped-only", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective)
 
@@ -899,7 +981,7 @@ func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostA
 
 	const someNamespace = "some-namespace"
 
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
@@ -968,7 +1050,7 @@ func TestGatewayController_reconcileFilterConfigSecret_RouteLevelLLMRequestCostA
 	require.NoError(t, err)
 
 	const someNamespace = "some-namespace"
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -1019,7 +1101,7 @@ func TestGatewayController_reconcileFilterConfigSecret_InvalidCELExpression(t *t
 	require.NoError(t, err)
 
 	const someNamespace = "some-namespace"
-	_, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	_, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil, false, nil, 0)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid CEL expression")
 }
@@ -1113,7 +1195,7 @@ func TestGatewayController_reconcileFilterConfigSecret_SkipsDeletedRoutes(t *tes
 	configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
 
 	// Reconcile filter config secret.
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "foouuid", nil, nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective, "expected filter config to be effective")
 
@@ -1961,7 +2043,7 @@ func TestGatewayController_reconcileFilterConfigSecret_BailsOnContextCanceled(t 
 		}},
 	}}
 
-	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil)
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil, false, nil, 0)
 	require.ErrorIs(t, err, context.Canceled)
 
 	_, getErr := kube.CoreV1().Secrets(configNamespace).Get(t.Context(),
@@ -2003,7 +2085,7 @@ func TestGatewayController_reconcileFilterConfigSecret_BailsOnContextDeadlineRea
 		}},
 	}}
 
-	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil)
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil, false, nil, 0)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 
 	_, getErr := kube.CoreV1().Secrets(configNamespace).Get(t.Context(),
@@ -2055,7 +2137,7 @@ func TestGatewayController_reconcileFilterConfigSecret_BailsOnContextCanceledLis
 		}},
 	}}
 
-	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil)
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, configNamespace, routes, nil, "uuid", nil, nil, false, nil, 0)
 	require.ErrorIs(t, err, context.Canceled)
 
 	_, getErr := kube.CoreV1().Secrets(configNamespace).Get(t.Context(),
@@ -3514,10 +3596,10 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 	const someNamespace = "some-namespace"
 	configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
 
-	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, nil, "mcp-uuid", nil, nil)
+	effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, nil, "mcp-uuid", nil, nil, false, nil, 0)
 	require.NoError(t, err)
 	require.False(t, effective) // No MCP routes, so not effective.
-	effective, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, mcpRoutes, "mcp-uuid", nil, nil)
+	effective, err = c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, nil, mcpRoutes, "mcp-uuid", nil, nil, false, nil, 0)
 	require.NoError(t, err)
 	require.True(t, effective)
 
@@ -4178,6 +4260,29 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 				Remove: []string{},
 			},
 		},
+		{
+			name: "set, remove, and setDefault together",
+			input: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{
+					{Path: "service_tier", Value: "\"scale\""},
+				},
+				Remove: []string{"internal_flag"},
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "stream", Value: "false"},
+				},
+			},
+			expected: &filterapi.HTTPBodyMutation{
+				Set: []filterapi.HTTPBodyField{
+					{Path: "service_tier", Value: "\"scale\""},
+				},
+				Remove: []string{"internal_flag"},
+				SetDefault: []filterapi.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "stream", Value: "false"},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -4310,7 +4415,7 @@ func TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults(t *testing
 			require.NoError(t, err)
 
 			const someNamespace = "some-namespace"
-			effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, tt.routes, nil, "test-uuid", tt.globalCosts, nil)
+			effective, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, tt.routes, nil, "test-uuid", tt.globalCosts, nil, false, nil, 0)
 			require.NoError(t, err)
 			require.True(t, effective)
 
@@ -4328,6 +4433,263 @@ func TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults(t *testing
 			requireLLMRequestCostsEqual(t, tt.expectedRouteScopedCosts, fc.LLMRequestCosts)
 		})
 	}
+}
+
+func TestGatewayController_reconcileFilterConfigSecret_EmitErrorMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		emit bool
+	}{{"enabled", true}, {"disabled", false}} {
+		emit := tc.emit
+		t.Run(tc.name, func(t *testing.T) {
+			fakeClient := requireNewFakeClientWithIndexes(t)
+			kube := fake2.NewClientset()
+			c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+				"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+			const gwNamespace = "ns"
+			backend := &aigv1b1.AIServiceBackend{
+				ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: gwNamespace},
+				Spec: aigv1b1.AIServiceBackendSpec{
+					BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+				},
+			}
+			require.NoError(t, fakeClient.Create(t.Context(), backend))
+
+			routes := []aigv1b1.AIGatewayRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+					Spec: aigv1b1.AIGatewayRouteSpec{
+						Rules: []aigv1b1.AIGatewayRouteRule{
+							{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+						},
+					},
+				},
+			}
+
+			const someNamespace = "some-namespace"
+			configName := FilterConfigBundleIndexSecretName("gw", gwNamespace)
+			_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, emit, nil, 0)
+			require.NoError(t, err)
+
+			secret, err := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), configName, metav1.GetOptions{})
+			require.NoError(t, err)
+			indexRaw := ""
+			if b, exists := secret.Data[FilterConfigBundleIndexKey]; exists {
+				indexRaw = string(b)
+			} else if s, exists := secret.StringData[FilterConfigBundleIndexKey]; exists {
+				indexRaw = s
+			}
+			require.NotEmpty(t, indexRaw)
+			index, err := filterapi.UnmarshalConfigBundleIndex([]byte(indexRaw))
+			require.NoError(t, err)
+			cfg, err := filterapi.ReassembleBundleConfig(index, func(part filterapi.ConfigBundlePart) ([]byte, error) {
+				partSecret, getErr := kube.CoreV1().Secrets(someNamespace).Get(t.Context(), part.Name, metav1.GetOptions{})
+				if getErr != nil {
+					return nil, getErr
+				}
+				if b, exists := partSecret.Data[FilterConfigBundlePartKey]; exists {
+					return b, nil
+				}
+				if b, exists := partSecret.StringData[FilterConfigBundlePartKey]; exists {
+					return []byte(b), nil
+				}
+				return nil, fmt.Errorf("missing key %q in part secret %s", FilterConfigBundlePartKey, part.Name)
+			})
+			require.NoError(t, err)
+			require.Equal(t, emit, cfg.EmitErrorMetadata)
+		})
+	}
+}
+
+func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing.T) {
+	const gwNamespace, someNamespace = "ns", "some-namespace"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+				},
+			},
+		},
+	}
+	newController := func(t *testing.T) (*GatewayController, *fake2.Clientset) {
+		fakeClient := requireNewFakeClientWithIndexes(t)
+		kube := fake2.NewClientset()
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+			"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+		require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		}))
+		return c, kube
+	}
+
+	t.Run("converted", func(t *testing.T) {
+		c, kube := newController(t)
+		estimates := []aigv1b1.UsageEstimate{
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "X-Client-Id", EmitMetric: true, EmitHeader: true},
+			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
+			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+		}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, estimates, 30*time.Second)
+		require.NoError(t, err)
+
+		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+		require.Equal(t, []filterapi.UsageEstimate{
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id", EmitMetric: true, EmitHeader: true},
+			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
+			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+		}, cfg.UsageEstimates)
+		require.Equal(t, 30*time.Second, cfg.UsageEstimatePeriod)
+	})
+
+	t.Run("no period without estimates", func(t *testing.T) {
+		c, kube := newController(t)
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, nil, time.Minute)
+		require.NoError(t, err)
+
+		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+		require.Zero(t, cfg.UsageEstimatePeriod)
+	})
+
+	t.Run("invalid CEL", func(t *testing.T) {
+		c, _ := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "bad", CEL: "input_tokens +", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `invalid usage estimate "bad"`)
+	})
+
+	t.Run("CEL not returning a number", func(t *testing.T) {
+		c, _ := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "bad", CEL: "model", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `invalid usage estimate "bad": invalid CEL expression: CEL expression must return an int, uint or double, got string`)
+	})
+
+	// An LLMRequestCost written at completion under the same dynamic metadata key
+	// would overwrite the estimate written at admission.
+	t.Run("collides with a global cost", func(t *testing.T) {
+		c, _ := newController(t)
+		gwConfig := &aigv1b1.GatewayConfig{Spec: aigv1b1.GatewayConfigSpec{
+			GlobalLLMRequestCosts: []aigv1b1.LLMRequestCost{{MetadataKey: "estimated_input_token", Type: aigv1b1.LLMRequestCostTypeInputToken}},
+		}}
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid",
+			gwConfig.Spec.GlobalLLMRequestCosts, nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `usage estimate metadataKey "estimated_input_token" collides with an LLMRequestCost metadataKey`)
+	})
+
+	t.Run("collides with a route cost", func(t *testing.T) {
+		c, _ := newController(t)
+		withCost := []aigv1b1.AIGatewayRoute{*routes[0].DeepCopy()}
+		withCost[0].Spec.LLMRequestCosts = []aigv1b1.LLMRequestCost{{MetadataKey: "estimated_cache_rate", Type: aigv1b1.LLMRequestCostTypeInputToken}}
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, withCost, nil, "test-uuid", nil, nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `usage estimate metadataKey "estimated_cache_rate" collides with an LLMRequestCost metadataKey`)
+	})
+
+	t.Run("distinct from the costs", func(t *testing.T) {
+		c, _ := newController(t)
+		withCost := []aigv1b1.AIGatewayRoute{*routes[0].DeepCopy()}
+		withCost[0].Spec.LLMRequestCosts = []aigv1b1.LLMRequestCost{{MetadataKey: "used_token", Type: aigv1b1.LLMRequestCostTypeInputToken}}
+		globalCosts := []aigv1b1.LLMRequestCost{{MetadataKey: "billing", Type: aigv1b1.LLMRequestCostTypeTotalToken}}
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, withCost, nil, "test-uuid", globalCosts, nil, false, estimates, time.Minute)
+		require.NoError(t, err)
+	})
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_AdmissionReserves checks that a
+// QuotaPolicy bucket with an admission reserve marks its injected cost with the
+// reserve key and declares the reserve once, and that a reserve on a usage estimate
+// the gateway does not declare stops the filter configuration update.
+func TestGatewayController_reconcileFilterConfigSecret_AdmissionReserves(t *testing.T) {
+	const gwNamespace, someNamespace = "ns", "some-namespace"
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1"}}},
+				},
+			},
+		},
+	}
+	fresh := "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
+	reserve := &aigv1a1.QuotaAdmissionReserve{UsageEstimate: "estimated_fresh", Percent: 90}
+	newController := func(t *testing.T) (*GatewayController, *fake2.Clientset) {
+		fakeClient := requireNewFakeClientWithIndexes(t)
+		kube := fake2.NewClientset()
+		c := newTestGatewayController(fakeClient, kube, ctrl.Log, "envoy-gateway-system",
+			"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+		require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+			ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIServiceBackendSpec{
+				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			},
+		}))
+		require.NoError(t, fakeClient.Create(t.Context(), &aigv1a1.QuotaPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: gwNamespace},
+			Spec: aigv1a1.QuotaPolicySpec{
+				TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
+					{Group: "aigateway.envoyproxy.io", Kind: "AIServiceBackend", Name: "backend1"},
+				},
+				PerModelQuotas: []aigv1a1.PerModelQuota{{
+					ModelName: ptr.To("model-a"),
+					Quota: aigv1a1.QuotaDefinition{
+						DefaultBucket: &aigv1a1.QuotaValue{Limit: 1000, Duration: "1h"},
+						BucketRules: []aigv1a1.QuotaRule{
+							{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m", CostExpression: &fresh, AdmissionReserve: reserve}},
+							{Quota: aigv1a1.QuotaValue{Limit: 1000, Duration: "1h", CostExpression: &fresh, AdmissionReserve: reserve}},
+						},
+					},
+				}},
+			},
+		}))
+		return c, kube
+	}
+
+	t.Run("reserve and settle keys on the reserved bucket costs", func(t *testing.T) {
+		c, kube := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_fresh", CEL: "input_tokens - cached_input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, estimates, time.Minute)
+		require.NoError(t, err)
+
+		cfg := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+		require.Equal(t, []filterapi.AdmissionReserve{
+			{
+				MetadataKey: "quota_reserve_estimated_fresh_90", ReleaseMetadataKey: "quota_release_estimated_fresh_90",
+				UsageEstimate: "estimated_fresh", Percent: 90,
+			},
+		}, cfg.AdmissionReserves)
+		reserveKeys := make(map[string]string)
+		settleKeys := make(map[string]string)
+		for _, rc := range cfg.LLMRequestCosts {
+			reserveKeys[rc.MetadataKey] = rc.AdmissionReserveMetadataKey
+			settleKeys[rc.MetadataKey] = rc.AdmissionSettleMetadataKey
+		}
+		require.Equal(t, map[string]string{
+			"quota_cost_default": "",
+			"quota_cost_rule-0":  "quota_reserve_estimated_fresh_90",
+			"quota_cost_rule-1":  "quota_reserve_estimated_fresh_90",
+		}, reserveKeys)
+		require.Equal(t, map[string]string{
+			"quota_cost_default": "",
+			"quota_cost_rule-0":  "quota_settle_rule-0",
+			"quota_cost_rule-1":  "quota_settle_rule-1",
+		}, settleKeys)
+	})
+
+	t.Run("reserve on an undeclared usage estimate", func(t *testing.T) {
+		c, _ := newController(t)
+		estimates := []aigv1b1.UsageEstimate{{MetadataKey: "estimated_input", CEL: "input_tokens", ByHeader: "x-client-id"}}
+		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, estimates, time.Minute)
+		require.ErrorContains(t, err, `admission reserve "quota_reserve_estimated_fresh_90" references usage estimate "estimated_fresh", which the GatewayConfig does not declare`)
+	})
 }
 
 func Test_mergeBodyMutations(t *testing.T) {
@@ -4480,6 +4842,45 @@ func Test_mergeBodyMutations(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "setDefault — route wins on same path, others pass through",
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "route_only", Value: "\"r\""},
+				},
+			},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"low\""},
+					{Path: "backend_only", Value: "\"b\""},
+				},
+			},
+			expected: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "backend_only", Value: "\"b\""},
+					{Path: "reasoning_effort", Value: "\"none\""},
+					{Path: "route_only", Value: "\"r\""},
+				},
+			},
+		},
+		{
+			name: "setDefault — only one side defines it, copied through",
+			routeLevel: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "model", Value: "\"gpt-4\""}},
+			},
+			backendLevel: &aigv1b1.HTTPBodyMutation{
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+				},
+			},
+			expected: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "model", Value: "\"gpt-4\""}},
+				SetDefault: []aigv1b1.HTTPBodyField{
+					{Path: "reasoning_effort", Value: "\"none\""},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -4623,4 +5024,216 @@ func TestGatewayController_warnUndeclaredMetadataNamespaces(t *testing.T) {
 	logged = nil
 	c.warnUndeclaredMetadataNamespaces(ec, []string{"declared.ns", "missing.ns", "other-missing.ns"}, "gw", "ns")
 	require.Empty(t, logged)
+}
+
+// TestGatewayController_reconcileFilterConfigSecret_Mirrors exercises the shadow
+// traffic mirroring backend resolution loop in reconcileFilterConfigSecret: a
+// valid mirror is emitted as a filterapi.Backend with IsMirror set, a mirror
+// referencing a missing backend is skipped, and an InferencePool mirror is
+// skipped (unsupported).
+func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	kube := fake2.NewClientset()
+	c := newTestGatewayController(fakeClient, kube, ctrl.Log, "ns",
+		"docker.io/envoyproxy/ai-gateway-extproc:latest", "info", false, nil, true)
+
+	const gwNamespace = "ns"
+	primary := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "primary", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			APISchema:  aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaOpenAI, Version: ptr.To("v1")},
+			BackendRef: gwapiv1.BackendObjectReference{Name: "primary-svc", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+		},
+	}
+	mirrorBackend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "mirror-backend", Namespace: gwNamespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			APISchema:  aigv1b1.VersionedAPISchema{Name: aigv1b1.APISchemaOpenAI, Version: ptr.To("v1")},
+			BackendRef: gwapiv1.BackendObjectReference{Name: "mirror-svc", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+			HeaderMutation: &aigv1b1.HTTPHeaderMutation{
+				Set: []gwapiv1.HTTPHeader{{Name: "x-backend", Value: "mirror"}},
+			},
+			BodyMutation: &aigv1b1.HTTPBodyMutation{
+				Set: []aigv1b1.HTTPBodyField{{Path: "shadow", Value: "true"}},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), primary))
+	require.NoError(t, fakeClient.Create(t.Context(), mirrorBackend))
+
+	routes := []aigv1b1.AIGatewayRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route1", Namespace: gwNamespace},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				Rules: []aigv1b1.AIGatewayRouteRule{
+					{
+						BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "primary"}},
+						Mirrors: []aigv1b1.AIGatewayRouteRuleMirror{
+							{
+								BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+									Name:              "mirror-backend",
+									ModelNameOverride: "shadow-model",
+									HeaderMutation:    &aigv1b1.HTTPHeaderMutation{Set: []gwapiv1.HTTPHeader{{Name: "x-mirror", Value: "1"}}},
+									BodyMutation:      &aigv1b1.HTTPBodyMutation{Set: []aigv1b1.HTTPBodyField{{Path: "mirror_field", Value: `"v"`}}},
+								},
+							},
+							// References a backend that does not exist: must be skipped, not fatal.
+							{BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{Name: "does-not-exist"}},
+							// An InferencePool mirror is emitted with the OpenAI-schema defaults
+							// (no AIServiceBackend/BSP behind it).
+							{
+								BackendRef: aigv1b1.AIGatewayRouteRuleBackendRef{
+									Name:              "some-pool",
+									Group:             ptr.To("inference.networking.k8s.io"),
+									Kind:              ptr.To("InferencePool"),
+									ModelNameOverride: "pool-shadow-model",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	const someNamespace = "some-namespace"
+	_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, nil, 0)
+	require.NoError(t, err)
+
+	fc := requireFilterConfigFromBundle(t, kube, someNamespace, "gw", gwNamespace)
+
+	// The valid mirror is emitted with IsMirror and its overrides.
+	wantName := internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "mirror-backend", "route1", 0, 0)
+	var mirror *filterapi.Backend
+	for i := range fc.Backends {
+		if fc.Backends[i].Name == wantName {
+			mirror = &fc.Backends[i]
+			break
+		}
+	}
+	require.NotNil(t, mirror, "expected mirror backend %q in filter config", wantName)
+	require.True(t, mirror.IsMirror)
+	require.Equal(t, "shadow-model", mirror.ModelNameOverride)
+	require.NotNil(t, mirror.HeaderMutation)
+	require.NotNil(t, mirror.BodyMutation)
+
+	// The missing-backend mirror must have been skipped.
+	for i := range fc.Backends {
+		require.NotEqual(t, internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "does-not-exist", "route1", 0, 1), fc.Backends[i].Name)
+	}
+
+	// The InferencePool mirror is emitted with IsMirror, the route-level override, and the
+	// OpenAI-schema default (pools carry no AIServiceBackend).
+	poolMirrorName := internalapi.PerRouteRuleMirrorBackendName(gwNamespace, "some-pool", "route1", 0, 2)
+	var poolMirror *filterapi.Backend
+	for i := range fc.Backends {
+		if fc.Backends[i].Name == poolMirrorName {
+			poolMirror = &fc.Backends[i]
+			break
+		}
+	}
+	require.NotNil(t, poolMirror, "expected pool mirror backend %q in filter config", poolMirrorName)
+	require.True(t, poolMirror.IsMirror)
+	require.Equal(t, "pool-shadow-model", poolMirror.ModelNameOverride)
+	require.Equal(t, filterapi.APISchemaOpenAI, poolMirror.Schema.Name)
+	require.Nil(t, poolMirror.Auth)
+}
+
+func TestGatewayReconcilePredicate(t *testing.T) {
+	p := gatewayReconcilePredicate()
+
+	gw := func(generation int64, annotations map[string]string) *gwapiv1.Gateway {
+		return &gwapiv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "gw",
+				Namespace:   "default",
+				Generation:  generation,
+				Annotations: annotations,
+			},
+		}
+	}
+	const key = GatewayConfigAnnotationKey
+
+	t.Run("update", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			oldGw, newGw *gwapiv1.Gateway
+			want         bool
+		}{
+			{
+				name:  "generation changed",
+				oldGw: gw(1, nil), newGw: gw(2, nil),
+				want: true,
+			},
+			{
+				name:  "annotation added",
+				oldGw: gw(1, nil), newGw: gw(1, map[string]string{key: "cfg"}),
+				want: true,
+			},
+			{
+				name:  "annotation set from empty",
+				oldGw: gw(1, map[string]string{key: ""}), newGw: gw(1, map[string]string{key: "cfg"}),
+				want: true,
+			},
+			{
+				name:  "annotation changed",
+				oldGw: gw(1, map[string]string{key: "cfgA"}), newGw: gw(1, map[string]string{key: "cfgB"}),
+				want: true,
+			},
+			{
+				name:  "annotation emptied (set to empty string)",
+				oldGw: gw(1, map[string]string{key: "cfg"}), newGw: gw(1, map[string]string{key: ""}),
+				want: true,
+			},
+			{
+				name:  "annotation removed",
+				oldGw: gw(1, map[string]string{key: "cfg"}), newGw: gw(1, nil),
+				want: true,
+			},
+			{
+				name:  "absent vs empty string (both mean no config)",
+				oldGw: gw(1, nil), newGw: gw(1, map[string]string{key: ""}),
+				want: false,
+			},
+			{
+				name:  "no-op (same generation and annotation)",
+				oldGw: gw(1, map[string]string{key: "cfg"}), newGw: gw(1, map[string]string{key: "cfg"}),
+				want: false,
+			},
+			{
+				name:  "unrelated annotation changed only",
+				oldGw: gw(1, map[string]string{"other": "a"}), newGw: gw(1, map[string]string{"other": "b"}),
+				want: false,
+			},
+			{
+				// The reconciler itself stamps this annotation; reacting to it would loop.
+				name:  "gateway-config-hash annotation changed only",
+				oldGw: gw(1, map[string]string{key: "cfg", gatewayConfigHashAnnotationKey: "aaaa"}),
+				newGw: gw(1, map[string]string{key: "cfg", gatewayConfigHashAnnotationKey: "bbbb"}),
+				want:  false,
+			},
+			{
+				name:  "gateway-config-hash annotation added only",
+				oldGw: gw(1, map[string]string{key: "cfg"}),
+				newGw: gw(1, map[string]string{key: "cfg", gatewayConfigHashAnnotationKey: "aaaa"}),
+				want:  false,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got := p.Update(event.UpdateEvent{ObjectOld: tc.oldGw, ObjectNew: tc.newGw})
+				require.Equal(t, tc.want, got)
+			})
+		}
+	})
+
+	t.Run("nil objects are dropped", func(t *testing.T) {
+		require.False(t, p.Update(event.UpdateEvent{ObjectOld: nil, ObjectNew: gw(1, nil)}))
+		require.False(t, p.Update(event.UpdateEvent{ObjectOld: gw(1, nil), ObjectNew: nil}))
+	})
+
+	t.Run("create, delete, generic default to true", func(t *testing.T) {
+		require.True(t, p.Create(event.CreateEvent{Object: gw(1, nil)}))
+		require.True(t, p.Delete(event.DeleteEvent{Object: gw(1, nil)}))
+		require.True(t, p.Generic(event.GenericEvent{Object: gw(1, nil)}))
+	})
 }

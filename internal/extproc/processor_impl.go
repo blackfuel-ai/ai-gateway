@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/backendauth"
 	"github.com/envoyproxy/ai-gateway/internal/bodymutator"
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
@@ -98,6 +99,10 @@ type (
 		tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT]
 		// span is the tracing span for this request, created in ProcessRequestBody.
 		span tracingapi.Span[RespT, RespChunkT]
+		// toolsDigest fingerprints the tool definitions on the request, for
+		// attributing backend prefix-cache misses. Computed once here rather than in
+		// the upstream filter so a retry does not recompute it.
+		toolsDigest toolsDigest
 		// upstreamFilterCount is the number of upstream filters that have been processed.
 		// This is used to determine if the request is a retry request.
 		upstreamFilterCount int
@@ -108,6 +113,8 @@ type (
 		stream            bool
 		debugLogEnabled   bool
 		enableRedaction   bool
+		// usageEstimate is the usage estimate state of the request.
+		usageEstimate usageEstimateState
 	}
 	// upstreamProcessor implements [Processor] for the upstream filter for the standard LLM endpoints.
 	//
@@ -130,6 +137,9 @@ type (
 		handler            filterapi.BackendAuthHandler
 		// unsupportedBackendErr is set by SetBackend and answered as a 422 in ProcessRequestHeaders.
 		unsupportedBackendErr error
+		// isMirror is true when the resolved backend is a shadow/mirror destination.
+		// Mirror legs skip LLMRequestCost dynamic-metadata emission to avoid double-billing.
+		isMirror bool
 		// cost is the cost of the request that is accumulated during the processing of the response.
 		costs metrics.TokenUsage
 		// metrics tracking.
@@ -239,7 +249,9 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		mutatedOriginalBody []byte
 		err                 error
 	)
-	costConfigured := len(r.config.RequestCosts) > 0 || len(r.config.GlobalRequestCosts) > 0
+	// Usage estimates learn from the usage of responses, which a streamed OpenAI
+	// response only reports when the request asks for it.
+	costConfigured := len(r.config.RequestCosts) > 0 || len(r.config.GlobalRequestCosts) > 0 || len(r.config.UsageEstimates) > 0
 	contentType := r.requestHeaders["content-type"]
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		originalModel, body, stream, mutatedOriginalBody, err = r.eh.ParseMultipartBody(rawBody.Body, contentType, costConfigured)
@@ -295,8 +307,10 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 	})
 	originalPath := r.requestHeaders[":path"]
 	// These original-path headers are owned by extproc, so set them unconditionally.
-	// A client-supplied or pre-existing value must not shadow the gateway's own value,
-	// as downstream logic (e.g. processor lookup on retry) keys off it.
+	// A client-supplied or pre-existing value must not shadow the gateway's own value:
+	// access logs and a downstream gateway tier read these headers. Processor selection
+	// does NOT key off them — the upstream-level processor is derived from the router
+	// processor of the same request (see routerEntry in server.go).
 	r.requestHeaders[originalPathHeader] = originalPath
 	additionalHeaders = append(additionalHeaders, &corev3.HeaderValueOption{
 		// Overwrite unconditionally so a client-supplied or pre-existing value is replaced, not appended.
@@ -309,12 +323,18 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		Header:       &corev3.HeaderValue{Key: internalapi.EnvoyOriginalPathHeader, RawValue: []byte(originalPath)},
 	})
 	r.originalModel = originalModel
+	usageEstimateMetadata, usageEstimateHeaders, removedUsageEstimateHeaders := r.estimateUsage(ctx, len(rawBody.Body), logger)
+	additionalHeaders = append(additionalHeaders, usageEstimateHeaders...)
 	r.originalRequestBody = body
+	if msgReq, ok := any(body).(*anthropic.MessagesRequest); ok {
+		r.toolsDigest = computeToolsDigest(msgReq.Tools)
+	}
 	r.stream = stream
 
 	// Tracing may need to inject headers, so create a header mutation here.
 	headerMutation := &extprocv3.HeaderMutation{
-		SetHeaders: additionalHeaders,
+		SetHeaders:    additionalHeaders,
+		RemoveHeaders: removedUsageEstimateHeaders,
 	}
 	r.span = r.tracer.StartSpanAndInjectHeaders(
 		ctx,
@@ -333,6 +353,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 				},
 			},
 		},
+		DynamicMetadata: usageEstimateMetadata,
 	}, nil
 }
 
@@ -455,8 +476,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 				},
 			},
 			DynamicMetadata: mergeDynamicMetadata(
-				buildBackendDynamicMetadata(u.backendName),
-				buildRequestHeaderDynamicMetadata(u.requestHeaders),
+				mergeDynamicMetadata(
+					buildBackendDynamicMetadata(u.backendName),
+					buildRequestHeaderDynamicMetadata(u.requestHeaders),
+				),
+				buildToolsDigestDynamicMetadata(u.parent.toolsDigest),
 			),
 		}, nil
 	}
@@ -467,6 +491,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	}
 	dm = mergeDynamicMetadata(dm, buildBackendDynamicMetadata(u.backendName))
 	dm = mergeDynamicMetadata(dm, buildRequestHeaderDynamicMetadata(u.requestHeaders))
+	dm = mergeDynamicMetadata(dm, buildToolsDigestDynamicMetadata(u.parent.toolsDigest))
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
@@ -576,7 +601,8 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	if code, _ := strconv.Atoi(u.responseHeaders[":status"]); !isGoodStatusCode(code) {
 		var newHeaders []internalapi.Header
 		var newBody []byte
-		newHeaders, newBody, err = u.translator.ResponseError(u.responseHeaders, decodingResult.reader)
+		var errInfo translator.LLMErrorInfo
+		newHeaders, newBody, errInfo, err = u.translator.ResponseError(u.responseHeaders, decodingResult.reader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to transform response error: %w", err)
 		}
@@ -592,7 +618,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		}
 		// Mark so the deferred handler records failure.
 		recordRequestCompletionErr = true
-		return &extprocv3.ProcessingResponse{
+		resp := &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
@@ -601,7 +627,11 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 					},
 				},
 			},
-		}, nil
+		}
+		if body.EndOfStream && u.parent.config != nil && u.parent.config.EmitErrorMetadata {
+			resp.DynamicMetadata = buildErrorDynamicMetadata(errInfo, code, u.requestHeaders, u.backendName, u.routeName)
+		}
+		return resp, nil
 	}
 
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
@@ -637,19 +667,35 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		out, _ := u.costs.OutputTokens()
 		u.metrics.RecordTokenLatency(ctx, out, body.EndOfStream, u.requestHeaders)
 		// Emit usage once at end-of-stream using final totals.
+		//
+		// Detach the request context with context.WithoutCancel before recording:
+		// on long-running streams the downstream client can cancel ctx between the
+		// last data delivery and the EndOfStream chunk, which causes some OTEL
+		// readers/exporters to silently drop the gen_ai.client.token.usage
+		// observation even though EndOfStream did fire (upstream envoyproxy/
+		// ai-gateway#2115). The access-log / dynamic-metadata billing path is
+		// emitted synchronously in this ProcessingResponse and is unaffected.
 		if body.EndOfStream {
-			u.metrics.RecordTokenUsage(ctx, u.costs, u.requestHeaders)
+			u.metrics.RecordTokenUsage(context.WithoutCancel(ctx), u.costs, u.requestHeaders)
 		}
 	} else {
-		u.metrics.RecordTokenUsage(ctx, u.costs, u.requestHeaders)
+		u.metrics.RecordTokenUsage(context.WithoutCancel(ctx), u.costs, u.requestHeaders)
+	}
+
+	if body.EndOfStream && !u.isMirror {
+		u.parent.recordUsageEstimateSuccess(ctx, &u.costs)
 	}
 
 	// Build dynamic metadata as soon as the accumulated usage changes (i.e. the chunk that carries
 	// the usage payload), not only at end-of-stream. This ensures the access log still captures usage
 	// even if the downstream client disconnects right after the terminal chunk, before EndOfStream
 	// is observed by the extproc. The EndOfStream write below remains as the final refresh.
-	if (body.EndOfStream || !tokenUsage.IsZero()) && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
-		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel)
+	//
+	// Mirror (shadow) backends must not emit LLMRequestCost dynamic metadata: the primary
+	// leg already emitted it and the downstream access-log / billing pipeline would
+	// otherwise double-count tokens for every mirrored request.
+	if (body.EndOfStream || !tokenUsage.IsZero()) && !u.isMirror && (len(u.parent.config.GlobalRequestCosts) > 0 || len(u.parent.config.RequestCosts) > 0) {
+		metadata, err := buildDynamicMetadata(u.parent.config.GlobalRequestCosts, u.parent.config.RequestCosts, &u.costs, u.requestHeaders, u.backendName, u.routeName, responseModel, u.parent.usageEstimate.reserves)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build dynamic metadata: %w", err)
 		}
@@ -696,12 +742,21 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 			u.metrics.RecordRequestCompletion(ctx, false, u.requestHeaders)
 		}
 	}()
+	// Record the backend on the metrics before any failure below, so that the
+	// deferred failure sample carries the provider label.
+	u.metrics.SetBackend(backend.Backend)
 	rp, ok := routeProcessor.(*routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT])
 	if !ok {
-		panic(fmt.Sprintf("BUG: expected routeProcessor to be of type *routerProcessor[%T], got %T", rp, routeProcessor))
+		// Request-derived state must never crash the process: fail this request only.
+		return fmt.Errorf("BUG: expected routeProcessor to be of type %T, got %T", rp, routeProcessor)
 	}
-	rp.upstreamFilterCount++
-	u.metrics.SetBackend(backend.Backend)
+	// Mirror (shadow) legs run their own upstream filter but are fire-and-forget:
+	// their response never returns downstream. They must not count as an upstream
+	// leg, otherwise the primary leg is misclassified as a retry (onRetry) when a
+	// mirror is configured on the rule.
+	if !backend.Backend.IsMirror {
+		rp.upstreamFilterCount++
+	}
 	// Some semantic conventions record the provider, which is only known now
 	// that routing has resolved a backend.
 	if bs, ok := rp.span.(tracingapi.BackendSpan); ok {
@@ -712,6 +767,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	}
 	u.modelNameOverride = backend.Backend.ModelNameOverride
 	u.backendName = backend.Backend.Name
+	u.isMirror = backend.Backend.IsMirror
 	u.routeName = routeName
 	u.handler = backend.Handler
 	u.headerMutator = headermutator.NewHeaderMutator(backend.Backend.HeaderMutation, rp.requestHeaders)
@@ -738,7 +794,18 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	if setter, ok := u.translator.(translator.ContentTypeSetter); ok {
 		setter.SetContentType(rp.requestHeaders["content-type"])
 	}
-	rp.upstreamFilter = u // Only assign after translator is confirmed valid
+	// The router processor delegates response handling to rp.upstreamFilter. Mirror
+	// legs must never claim that slot: both the primary and mirror upstream filters
+	// call SetBackend on the same shared router processor, and whichever runs last
+	// would otherwise own the response path. If the mirror won that race, the
+	// client-facing (primary) response would be processed by the mirror's processor,
+	// whose isMirror=true guard suppresses LLMRequestCost emission — silently
+	// dropping token/cost metadata from the access-log/billing pipeline for the
+	// entire request. Only non-mirror legs may own the response path; mirror cost
+	// suppression then becomes belt-and-suspenders at ProcessResponseBody.
+	if !backend.Backend.IsMirror {
+		rp.upstreamFilter = u // Only assign after translator is confirmed valid
+	}
 
 	if headerSetter, ok := u.translator.(translator.RequestHeadersSetter); ok {
 		headerSetter.SetRequestHeaders(u.requestHeaders)
@@ -793,8 +860,12 @@ func buildContentLengthDynamicMetadataOnRequest(contentLength int) *structpb.Str
 				Kind: &structpb.Value_StructValue{
 					StructValue: &structpb.Struct{
 						Fields: map[string]*structpb.Value{
+							// Stored as a string: the header_mutation filter renders this value verbatim
+							// into the content-length header, and Envoy's formatter renders NumberValue
+							// doubles in shortest form (100000 -> "1e+05"), which is an invalid
+							// Content-Length that strict HTTP/2 peers reject.
 							"content_length": {
-								Kind: &structpb.Value_NumberValue{NumberValue: float64(contentLength)},
+								Kind: &structpb.Value_StringValue{StringValue: strconv.Itoa(contentLength)},
 							},
 						},
 					},
@@ -822,6 +893,48 @@ func buildBackendDynamicMetadata(backendName string) *structpb.Struct {
 							"backend_name": structpb.NewStringValue(backendName),
 						},
 					},
+				},
+			},
+		},
+	}
+}
+
+// buildToolsDigestDynamicMetadata emits the tool fingerprint for this request so a
+// backend prefix-cache miss can be attributed from the access log. Grouping a
+// session's requests by time, the fields separate the three causes that otherwise
+// look identical:
+//
+//   - tools_count grows and tools_prefix_fp matches the previous tools_fp: the
+//     client appended a tool. Re-prefilling everything after it is arithmetic.
+//   - tools_count is unchanged but tools_fp changed: a stable tool set was
+//     mutated. That is the signature of a bug, in the gateway or the client.
+//   - tools_fp is unchanged but the request landed on a different endpoint: a cold
+//     replica, i.e. a routing problem rather than a prompt problem.
+//
+// Access logs are not sampled, unlike spans, which is why this is emitted here.
+// It is deliberately not a metric: a hash has unbounded cardinality, and "changed
+// since the last request in this session" is a query-time join that a stateless
+// per-request metric cannot express.
+func buildToolsDigestDynamicMetadata(d toolsDigest) *structpb.Struct {
+	if !d.present {
+		return nil
+	}
+	// Counts are stored as strings for the same reason as content_length: Envoy's
+	// formatter renders NumberValue doubles in shortest form (100000 -> "1e+05").
+	fields := map[string]*structpb.Value{
+		"tools_count":   structpb.NewStringValue(strconv.Itoa(d.count)),
+		"tools_dropped": structpb.NewStringValue(strconv.Itoa(d.dropped)),
+		"tools_bytes":   structpb.NewStringValue(strconv.Itoa(d.bytes)),
+	}
+	if d.fp != "" {
+		fields["tools_fp"] = structpb.NewStringValue(d.fp)
+		fields["tools_prefix_fp"] = structpb.NewStringValue(d.prefixFP)
+	}
+	return &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: {
+				Kind: &structpb.Value_StructValue{
+					StructValue: &structpb.Struct{Fields: fields},
 				},
 			},
 		},
@@ -945,7 +1058,11 @@ func evalRuntimeRequestCost(rc *filterapi.RuntimeRequestCost, costs *metrics.Tok
 // The metadata includes token usage costs and model information for downstream processing.
 // Two-tier precedence: for each metadataKey, check route-scoped requestCosts first (matching RouteName == routeName).
 // If found, use it. Otherwise, fall back to globalRequestCosts. If neither exists, the key is not emitted.
-func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string) (*structpb.Struct, error) {
+// A route-scoped cost on an admission reserve stores the cost minus the reserve charged at admission,
+// taken from admissionReserves, or 0 when the reserve covers it, and, when the reserve was charged,
+// the part of the cost the reserve covers under its settle key. Both derive from the cumulative usage,
+// so an early write before EndOfStream is replaced by later ones, never added to.
+func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCost, requestCosts []filterapi.RuntimeRequestCost, costs *metrics.TokenUsage, requestHeaders map[string]string, backendName, routeName, responseModel string, admissionReserves map[string]uint64) (*structpb.Struct, error) {
 	metadata := make(map[string]*structpb.Value, len(requestCosts)+len(globalRequestCosts)+3)
 
 	// Track which metadata keys have been populated by route-scoped costs.
@@ -972,6 +1089,14 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 		if err != nil {
 			return nil, err
 		}
+		if rc.AdmissionReserveMetadataKey != "" {
+			reserve, reserved := admissionReserves[rc.AdmissionReserveMetadataKey]
+			settled := min(cost, reserve)
+			cost -= settled
+			if reserved && rc.AdmissionSettleMetadataKey != "" {
+				metadata[rc.AdmissionSettleMetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(settled)}}
+			}
+		}
 		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
 		populatedKeys[rc.MetadataKey] = struct{}{}
 	}
@@ -989,19 +1114,7 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 		metadata[rc.MetadataKey] = &structpb.Value{Kind: &structpb.Value_NumberValue{NumberValue: float64(cost)}}
 	}
 
-	metadata["model_name_override"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: actualModel}}
-
-	if backendName != "" {
-		// backend_name itself is emitted by buildBackendDynamicMetadata in the request
-		// headers phase, so it is already on the stream by the time this runs.
-		//
-		// ai_service_backend_name stores the short "namespace/name" format, which the quota
-		// rate limit descriptor actions match against the rate limit service config.
-		metadata["ai_service_backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: shortBackend}}
-	}
-	if routeName != "" {
-		metadata["route_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: routeName}}
-	}
+	setRoutingContextMetadata(metadata, requestHeaders, backendName, routeName, false)
 
 	// responseModel is the actual model that served the request.
 	if responseModel != "" {
@@ -1021,4 +1134,65 @@ func buildDynamicMetadata(globalRequestCosts []filterapi.RuntimeGlobalRequestCos
 			},
 		},
 	}, nil
+}
+
+// setRoutingContextMetadata populates the routing-context dynamic metadata fields
+// (model_name_override, backend_name, route_name) shared between the success and
+// error metadata builders. backend_name/route_name are omitted when empty;
+// model_name_override is always set to the final request model.
+//
+// includeBackendName controls whether the raw backend_name field is set. On the
+// success path it is already emitted in the request-headers phase by
+// buildBackendDynamicMetadata, so setting it again here would be redundant; the
+// error path has no such earlier emission, so it opts in via includeBackendName.
+// ai_service_backend_name is always set when a backend is known: it is the
+// short "namespace/name" form the quota rate limit descriptor actions key on,
+// independent of the request-headers-phase backend_name.
+func setRoutingContextMetadata(metadata map[string]*structpb.Value, requestHeaders map[string]string, backendName, routeName string, includeBackendName bool) {
+	// Add the actual request model that was used (after any backend overrides were applied).
+	// At this point, the header contains the final model that was sent to the upstream.
+	actualModel := requestHeaders[internalapi.ModelNameHeaderKeyDefault]
+	metadata["model_name_override"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: actualModel}}
+
+	if backendName != "" {
+		if includeBackendName {
+			metadata["backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: backendName}}
+		}
+		// ai_service_backend_name stores the short "namespace/name" format, which the quota
+		// rate limit descriptor actions match against the rate limit service config.
+		metadata["ai_service_backend_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: internalapi.AIServiceBackendName(backendName)}}
+	}
+	if routeName != "" {
+		metadata["route_name"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: routeName}}
+	}
+}
+
+// buildErrorDynamicMetadata creates dynamic metadata for non-2xx upstream responses.
+// It emits llm_error_type and llm_error_code (falling back to a generic type and the
+// HTTP status code respectively when the translator could not extract them), plus the
+// shared routing-context fields. This is gated behind the EmitErrorMetadata config flag.
+func buildErrorDynamicMetadata(errInfo translator.LLMErrorInfo, statusCode int, requestHeaders map[string]string, backendName, routeName string) *structpb.Struct {
+	errorType := errInfo.Type
+	if errorType == "" {
+		errorType = "upstream_error"
+	}
+	errorCode := errInfo.Code
+	if errorCode == "" {
+		errorCode = strconv.Itoa(statusCode)
+	}
+	metadata := map[string]*structpb.Value{
+		"llm_error_type": {Kind: &structpb.Value_StringValue{StringValue: errorType}},
+		"llm_error_code": {Kind: &structpb.Value_StringValue{StringValue: errorCode}},
+	}
+	setRoutingContextMetadata(metadata, requestHeaders, backendName, routeName, true)
+
+	return &structpb.Struct{
+		Fields: map[string]*structpb.Value{
+			internalapi.AIGatewayFilterMetadataNamespace: {
+				Kind: &structpb.Value_StructValue{
+					StructValue: &structpb.Struct{Fields: metadata},
+				},
+			},
+		},
+	}
 }

@@ -256,12 +256,45 @@ func TestAnthropicSystemPromptToText(t *testing.T) {
 			system:   &anthropic.SystemPrompt{},
 			expected: "",
 		},
+		{
+			name:     "no billing header is unchanged",
+			system:   &anthropic.SystemPrompt{Text: "Line 1\nLine 2"},
+			expected: "Line 1\nLine 2",
+		},
+		{
+			name:     "strips billing header line, keeps surrounding content",
+			system:   &anthropic.SystemPrompt{Text: "Line 1\nx-anthropic-billing-header: cc_version=2.1.92; cch=8ae40;\nLine 3"},
+			expected: "Line 1\nLine 3",
+		},
+		{
+			name:     "strips billing header at end without trailing newline",
+			system:   &anthropic.SystemPrompt{Text: "Some prompt\nx-anthropic-billing-header: cc_version=2.1.92; cch=abc;"},
+			expected: "Some prompt\n",
+		},
+		{
+			name: "strips billing header from array form",
+			system: &anthropic.SystemPrompt{
+				Texts: []anthropic.TextBlockParam{
+					{Text: "You are helpful.\n"},
+					{Text: "x-anthropic-billing-header: cc_version=2.1.92; cch=8ae40;\n"},
+				},
+			},
+			expected: "You are helpful.\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, anthropicSystemPromptToText(tt.system))
 		})
 	}
+
+	// Regression guard: prompts differing only by the per-turn cch= hash must
+	// produce identical output, so the system prompt stays stable for prefix caching.
+	t.Run("different cch values produce identical output", func(t *testing.T) {
+		r1 := anthropicSystemPromptToText(&anthropic.SystemPrompt{Text: "prefix\nx-anthropic-billing-header: cc_version=2.1.92; cch=8ae40;\nsuffix"})
+		r2 := anthropicSystemPromptToText(&anthropic.SystemPrompt{Text: "prefix\nx-anthropic-billing-header: cc_version=2.1.92; cch=4e20a;\nsuffix"})
+		assert.Equal(t, r1, r2)
+	})
 }
 
 func TestAnthropicContentToText(t *testing.T) {
@@ -605,7 +638,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_TextStreaming(t *testing.T) 
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -673,7 +706,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_CachedTokens(t *testing.T) {
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	msg := accumulateAnthropicMessage(t, out)
@@ -708,7 +741,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ToolCallStreaming(t *testing
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -746,7 +779,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_EndOfStreamClosing(t *testin
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -764,7 +797,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_EndOfStreamClosing(t *testin
 		}
 	}
 	require.NotEmpty(t, msgDeltaData)
-	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`, msgDeltaData)
+	require.JSONEq(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}`, msgDeltaData)
 }
 
 func TestOpenAIStreamToAnthropicState_ProcessBuffer_EmptyInput(t *testing.T) {
@@ -774,7 +807,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_EmptyInput(t *testing.T) {
 	}
 
 	var out []byte
-	err := state.processBuffer(&out, false)
+	_, err := state.processBuffer(&out, false)
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -790,7 +823,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_SkipsDoneMarker(t *testing.T
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, false)
+	_, err := state.processBuffer(&out, false)
 	require.NoError(t, err)
 	// No events should be emitted for just [DONE].
 	assert.Empty(t, out)
@@ -807,7 +840,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_MalformedChunkSkipped(t *tes
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, false)
+	_, err := state.processBuffer(&out, false)
 	require.NoError(t, err)
 }
 
@@ -866,12 +899,13 @@ func TestAppendAnthropicAssistantMessage_ThinkingPlusText(t *testing.T) {
 	require.True(t, ok, "expected structured content array, got %T", assistantMsg.Content.Value)
 	require.Len(t, contentArray, 2)
 
-	// First block: thinking
+	// First block: thinking, carried under vLLM's "thinking" key; the
+	// signature does not survive translation to an OpenAI backend.
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	require.NotNil(t, contentArray[0].Text)
-	assert.Equal(t, "I should write a simple example.", *contentArray[0].Text)
-	require.NotNil(t, contentArray[0].Signature)
-	assert.Equal(t, "sig_abc123", *contentArray[0].Signature)
+	require.NotNil(t, contentArray[0].Thinking)
+	assert.Equal(t, "I should write a simple example.", *contentArray[0].Thinking)
+	assert.Nil(t, contentArray[0].Text)
+	assert.Nil(t, contentArray[0].Signature)
 
 	// Second block: text
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeText, contentArray[1].Type)
@@ -898,7 +932,15 @@ func TestAppendAnthropicAssistantMessage_ThinkingOnly(t *testing.T) {
 	require.True(t, ok, "expected structured content array, got %T", assistantMsg.Content.Value)
 	require.Len(t, contentArray, 1)
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	assert.Equal(t, "Just thinking...", *contentArray[0].Text)
+	require.NotNil(t, contentArray[0].Thinking)
+	assert.Equal(t, "Just thinking...", *contentArray[0].Thinking)
+
+	// vLLM's CustomThinkCompletionContentParam contract: the part must carry
+	// exactly {"type":"thinking","thinking":...} — a "text" or "signature" key
+	// makes a thinking-only assistant message 400 on vLLM backends (BLA-3379).
+	raw, err := json.Marshal(contentArray[0])
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"thinking","thinking":"Just thinking..."}`, string(raw))
 }
 
 func TestAppendAnthropicAssistantMessage_ThinkingPlusToolUse(t *testing.T) {
@@ -948,9 +990,9 @@ func TestAppendAnthropicAssistantMessage_MultipleThinkingBlocks(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, contentArray, 3)
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	assert.Equal(t, "First thought.", *contentArray[0].Text)
+	assert.Equal(t, "First thought.", *contentArray[0].Thinking)
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[1].Type)
-	assert.Equal(t, "Second thought.", *contentArray[1].Text)
+	assert.Equal(t, "Second thought.", *contentArray[1].Thinking)
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeText, contentArray[2].Type)
 	assert.Equal(t, "Done.", *contentArray[2].Text)
 }
@@ -975,9 +1017,34 @@ func TestAppendAnthropicAssistantMessage_RedactedThinking(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, contentArray, 3)
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[0].Type)
-	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeRedactedThinking, contentArray[1].Type)
-	require.NotNil(t, contentArray[1].RedactedContent)
+	// Redacted thinking replays its opaque data through the vLLM-native
+	// thinking shape; the "redacted_thinking" type has no backend equivalent.
+	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeThinking, contentArray[1].Type)
+	require.NotNil(t, contentArray[1].Thinking)
+	assert.Equal(t, "BASE64_OPAQUE_DATA", *contentArray[1].Thinking)
+	assert.Nil(t, contentArray[1].RedactedContent)
 	assert.Equal(t, openai.ChatCompletionAssistantMessageParamContentTypeText, contentArray[2].Type)
+}
+
+func TestAppendAnthropicAssistantMessage_RedactedThinkingOnly(t *testing.T) {
+	// redacted_thinking as the sole block has the same 400 corner as
+	// thinking-only: it must serialize to the vLLM-native thinking shape.
+	msg := anthropic.MessageParam{
+		Role: anthropic.MessageRoleAssistant,
+		Content: anthropic.MessageContent{
+			Array: []anthropic.ContentBlockParam{
+				{RedactedThinking: &anthropic.RedactedThinkingBlockParam{Type: "redacted_thinking", Data: "OPAQUE"}},
+			},
+		},
+	}
+	msgs := appendAnthropicAssistantMessage(nil, msg)
+	require.Len(t, msgs, 1)
+	contentArray, ok := msgs[0].OfAssistant.Content.Value.([]openai.ChatCompletionAssistantMessageParamContent)
+	require.True(t, ok)
+	require.Len(t, contentArray, 1)
+	raw, err := json.Marshal(contentArray[0])
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"thinking","thinking":"OPAQUE"}`, string(raw))
 }
 
 func TestAppendAnthropicAssistantMessage_NoThinkingUnchanged(t *testing.T) {
@@ -1230,7 +1297,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ThinkingStreaming(t *testing
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -1263,7 +1330,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ThinkingThenText(t *testing.
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -1306,7 +1373,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ThinkingThenToolCall(t *test
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -1349,7 +1416,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_TextThenReasoning(t *testing
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -1389,7 +1456,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_SignatureOnlyChunk(t *testin
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -1454,7 +1521,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_SignatureDelta(t *testing.T)
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -1488,7 +1555,7 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ThinkingBlocks(t *testing.T)
 	state.buffer.WriteString(input)
 
 	var out []byte
-	err := state.processBuffer(&out, true)
+	_, err := state.processBuffer(&out, true)
 	require.NoError(t, err)
 
 	events := parseSSEEventsFromBytes(out)
@@ -1509,4 +1576,96 @@ func TestOpenAIStreamToAnthropicState_ProcessBuffer_ThinkingBlocks(t *testing.T)
 	assert.True(t, hasThinkingBlock, "expected a thinking content_block_start")
 	assert.True(t, hasThinkingDelta, "expected a thinking_delta event")
 	assert.True(t, hasSignatureDelta, "expected a signature_delta event")
+}
+
+// TestAppendAnthropicAssistantMessage_ToolUseArgumentsAreByteStable pins the
+// serialisation of a replayed tool_use block.
+//
+// A conversation replays every historical tool call on every turn. If the
+// arguments JSON is re-ordered between requests the rendered prompt diverges at
+// the first tool call and never re-converges, so the backend re-prefills the
+// whole conversation body instead of reusing its prefix cache.
+//
+// Assert on the raw string, not with JSONEq or Contains: both are order
+// insensitive and would pass over the exact bug this guards.
+func TestAppendAnthropicAssistantMessage_ToolUseArgumentsAreByteStable(t *testing.T) {
+	msg := anthropic.MessageParam{
+		Role: anthropic.MessageRoleAssistant,
+		Content: anthropic.MessageContent{
+			Array: []anthropic.ContentBlockParam{
+				{ToolUse: &anthropic.ToolUseBlockParam{
+					Type: "tool_use", ID: "tool-1", Name: "Write",
+					Input: map[string]any{
+						"file_path": "/tmp/a.txt",
+						"content":   "hello",
+						"offset":    float64(1),
+						"limit":     float64(2),
+						"replace":   true,
+					},
+				}},
+			},
+		},
+	}
+
+	const want = `{"content":"hello","file_path":"/tmp/a.txt","limit":2,"offset":1,"replace":true}`
+	// Map order is randomised per range, so a single call can match by luck.
+	// Repeat enough that a regression is caught with near certainty.
+	for i := 0; i < 200; i++ {
+		msgs := appendAnthropicAssistantMessage(nil, msg)
+		require.Len(t, msgs, 1)
+		require.NotNil(t, msgs[0].OfAssistant)
+		require.Len(t, msgs[0].OfAssistant.ToolCalls, 1)
+		//nolint:testifylint // JSONEq is order-insensitive; byte equality is the property under test.
+		require.Equal(t, want, msgs[0].OfAssistant.ToolCalls[0].Function.Arguments,
+			"tool call arguments must be byte-stable (iteration %d)", i)
+	}
+}
+
+// TestAnthropicToolsToOpenAI_PreservesGivenOrder makes "someone sorted the tools
+// array" a red build.
+//
+// Clients append newly loaded tools to the end, which is already optimal for
+// prefix caching: every previously sent tool keeps its byte position, so only
+// the tail is recomputed. Sorting would insert new tools into the middle and
+// collapse the common prefix to zero on every load event.
+func TestAnthropicToolsToOpenAI_PreservesGivenOrder(t *testing.T) {
+	in := []anthropic.ToolUnion{
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Write"}},
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Bash"}},
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Read"}},
+		{Tool: &anthropic.Tool{Type: "custom", Name: "Edit"}},
+	}
+
+	got := anthropicToolsToOpenAI(in)
+	require.Len(t, got, 4)
+	names := make([]string, 0, len(got))
+	for _, tool := range got {
+		names = append(names, tool.Function.Name)
+	}
+	assert.Equal(t, []string{"Write", "Bash", "Read", "Edit"}, names)
+}
+
+// TestAnthropicToolsToOpenAI_SchemaBytesVerbatim asserts the input schema reaches
+// the backend byte-for-byte.
+//
+// anthropic.Tool.InputSchema is a json.RawMessage aliased to sonic's
+// NoCopyRawMessage, so it is a sub-slice of the original request body and is
+// spliced back out unchanged. The existing "schema reaches the backend as sent"
+// case uses JSONEq, which is order insensitive and would still pass if the
+// schema were round-tripped through a map. This one would not.
+func TestAnthropicToolsToOpenAI_SchemaBytesVerbatim(t *testing.T) {
+	// Deliberately non-canonical: unsorted keys and interior whitespace.
+	const schema = `{"required":["b"],"type":"object","properties":{"b": {"type":"string"},"a":{"type":"number"}},"additionalProperties":false}`
+
+	var tool anthropic.ToolUnion
+	require.NoError(t, json.Unmarshal([]byte(`{"type":"custom","name":"t","input_schema":`+schema+`}`), &tool))
+	require.NotNil(t, tool.Tool)
+
+	got := anthropicToolsToOpenAI([]anthropic.ToolUnion{tool})
+	require.Len(t, got, 1)
+
+	encoded, err := json.Marshal(got[0].Function.Parameters)
+	require.NoError(t, err)
+	//nolint:testifylint // JSONEq is order-insensitive; byte equality is the property under test.
+	assert.Equal(t, schema, string(encoded))
 }
