@@ -21,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -28,6 +29,7 @@ import (
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gwapiv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
+	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	internaltesting "github.com/envoyproxy/ai-gateway/internal/testing"
 )
@@ -392,6 +394,184 @@ func Test_buildPriorityAnnotation(t *testing.T) {
 	}
 	annotation := buildPriorityAnnotation(rules)
 	require.Equal(t, "0:orange:0,0:apple:1,0:pineapple:2", annotation)
+}
+
+func newTestQuotaPolicy(name, namespace string, limit uint, targets ...string) *aigv1a1.QuotaPolicy {
+	refs := make([]gwapiv1a2.LocalPolicyTargetReference, 0, len(targets))
+	for _, target := range targets {
+		refs = append(refs, gwapiv1a2.LocalPolicyTargetReference{
+			Kind: "AIServiceBackend", Group: "aigateway.envoyproxy.io", Name: gwapiv1.ObjectName(target),
+		})
+	}
+	return &aigv1a1.QuotaPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: aigv1a1.QuotaPolicySpec{
+			TargetRefs:   refs,
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{Quota: aigv1a1.QuotaValue{Limit: limit, Duration: "1m"}},
+		},
+	}
+}
+
+func TestAIGatewayRouteController_buildQuotaPolicyHashAnnotation(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	c := &AIGatewayRouteController{client: fakeClient}
+	route := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns1"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{
+				{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}, {Name: "orange"}}},
+				{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "lemon", Namespace: ptr.To[gwapiv1.Namespace]("ns2")}}},
+			},
+		},
+	}
+	hash := func() string {
+		h, err := c.buildQuotaPolicyHashAnnotation(t.Context(), route)
+		require.NoError(t, err)
+		return h
+	}
+
+	require.Empty(t, hash(), "no QuotaPolicy targets the route's backends")
+
+	// A policy on a backend the route does not reference leaves the route alone.
+	require.NoError(t, fakeClient.Create(t.Context(), newTestQuotaPolicy("unrelated", "ns1", 10, "banana")))
+	require.Empty(t, hash())
+
+	// A policy on a backend of the same name in another namespace leaves the route alone.
+	require.NoError(t, fakeClient.Create(t.Context(), newTestQuotaPolicy("other-ns", "ns3", 10, "lemon")))
+	require.Empty(t, hash())
+
+	qp := newTestQuotaPolicy("apple-quota", "ns1", 100, "apple")
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+	withApple := hash()
+	require.NotEmpty(t, withApple)
+	require.Equal(t, withApple, hash(), "the hash is stable across calls")
+
+	// A policy targeting two of the route's backends counts once.
+	require.NoError(t, fakeClient.Create(t.Context(), newTestQuotaPolicy("shared", "ns1", 5, "apple", "orange")))
+	withShared := hash()
+	require.NotEqual(t, withApple, withShared)
+
+	// A policy on the cross-namespace backend counts, resolved in the backend's namespace.
+	require.NoError(t, fakeClient.Create(t.Context(), newTestQuotaPolicy("lemon-quota", "ns2", 7, "lemon")))
+	withLemon := hash()
+	require.NotEqual(t, withShared, withLemon)
+
+	// Backend order in the route does not change the hash.
+	route.Spec.Rules[0].BackendRefs[0], route.Spec.Rules[0].BackendRefs[1] = route.Spec.Rules[0].BackendRefs[1], route.Spec.Rules[0].BackendRefs[0]
+	require.Equal(t, withLemon, hash())
+
+	// A spec change on one policy changes the hash.
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(qp), qp))
+	qp.Spec.ServiceQuota.Quota.Limit = 200
+	require.NoError(t, fakeClient.Update(t.Context(), qp))
+	changed := hash()
+	require.NotEqual(t, withLemon, changed)
+
+	// A metadata-only change leaves the hash alone.
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(qp), qp))
+	qp.Labels = map[string]string{"touched": "true"}
+	require.NoError(t, fakeClient.Update(t.Context(), qp))
+	require.Equal(t, changed, hash())
+
+	// Deleting a policy changes the hash.
+	require.NoError(t, fakeClient.Delete(t.Context(), qp))
+	require.NotEqual(t, changed, hash())
+}
+
+// A QuotaPolicy change must change the generated HTTPRoute, otherwise Envoy Gateway
+// never re-translates and PostTranslateModify never sees the new policy.
+func TestAIGatewayRouterController_syncAIGatewayRoute_QuotaPolicyChange(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexes(t)
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	s := NewAIGatewayRouteController(fakeClient, fake2.NewClientset(), logr.Discard(), eventCh.Ch, "/")
+
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: "ns1"},
+		Spec:       aigv1b1.AIServiceBackendSpec{BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1"}},
+	}))
+	route := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns1"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}}}},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), route))
+
+	httpRouteAnnotations := func() map[string]string {
+		var httpRoute gwapiv1.HTTPRoute
+		require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKey{Name: "myroute", Namespace: "ns1"}, &httpRoute))
+		return httpRoute.Annotations
+	}
+
+	require.NoError(t, s.syncAIGatewayRoute(t.Context(), route))
+	require.NotContains(t, httpRouteAnnotations(), httpRouteQuotaPolicyHashAnnotationKey)
+
+	qp := newTestQuotaPolicy("apple-quota", "ns1", 100, "apple")
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+	require.NoError(t, s.syncAIGatewayRoute(t.Context(), route))
+	created := httpRouteAnnotations()[httpRouteQuotaPolicyHashAnnotationKey]
+	require.NotEmpty(t, created)
+
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(qp), qp))
+	qp.Spec.ServiceQuota.Quota.Limit = 200
+	require.NoError(t, fakeClient.Update(t.Context(), qp))
+	require.NoError(t, s.syncAIGatewayRoute(t.Context(), route))
+	updated := httpRouteAnnotations()[httpRouteQuotaPolicyHashAnnotationKey]
+	require.NotEmpty(t, updated)
+	require.NotEqual(t, created, updated)
+
+	require.NoError(t, fakeClient.Delete(t.Context(), qp))
+	require.NoError(t, s.syncAIGatewayRoute(t.Context(), route))
+	require.NotContains(t, httpRouteAnnotations(), httpRouteQuotaPolicyHashAnnotationKey)
+}
+
+// A failure to hash the QuotaPolicies is reported, but the HTTPRoute is still written
+// with the rest of the AIGatewayRoute, and keeps the hash it had.
+func TestAIGatewayRouterController_syncAIGatewayRoute_QuotaPolicyListError(t *testing.T) {
+	var failList bool
+	fakeClient := interceptor.NewClient(requireNewFakeClientWithIndexes(t).(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*aigv1a1.QuotaPolicyList); ok && failList {
+				return fmt.Errorf("list error")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	s := NewAIGatewayRouteController(fakeClient, fake2.NewClientset(), logr.Discard(), eventCh.Ch, "/")
+
+	require.NoError(t, fakeClient.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "apple", Namespace: "ns1"},
+		Spec:       aigv1b1.AIServiceBackendSpec{BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1"}},
+	}))
+	require.NoError(t, fakeClient.Create(t.Context(), newTestQuotaPolicy("apple-quota", "ns1", 100, "apple")))
+	require.NoError(t, fakeClient.Create(t.Context(), &gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns1"}}))
+	route := &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "myroute", Namespace: "ns1"},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			ParentRefs: []gwapiv1.ParentReference{{Name: "gw"}},
+			Rules:      []aigv1b1.AIGatewayRouteRule{{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "apple"}}}},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), route))
+	getHTTPRoute := func() *gwapiv1.HTTPRoute {
+		var httpRoute gwapiv1.HTTPRoute
+		require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKey{Name: "myroute", Namespace: "ns1"}, &httpRoute))
+		return &httpRoute
+	}
+
+	require.NoError(t, s.syncAIGatewayRoute(t.Context(), route))
+	hash := getHTTPRoute().Annotations[httpRouteQuotaPolicyHashAnnotationKey]
+	require.NotEmpty(t, hash)
+
+	failList = true
+	route.Spec.Hostnames = []gwapiv1.Hostname{"example.com"}
+	err := s.syncAIGatewayRoute(t.Context(), route)
+	require.ErrorContains(t, err, "failed to list QuotaPolicies for backend apple.ns1")
+	httpRoute := getHTTPRoute()
+	require.Equal(t, route.Spec.ParentRefs, httpRoute.Spec.ParentRefs)
+	require.Equal(t, route.Spec.Hostnames, httpRoute.Spec.Hostnames)
+	require.Equal(t, hash, httpRoute.Annotations[httpRouteQuotaPolicyHashAnnotationKey])
 }
 
 func TestAIGatewayRouteController_backend(t *testing.T) {

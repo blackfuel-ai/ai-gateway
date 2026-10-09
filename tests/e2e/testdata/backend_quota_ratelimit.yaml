@@ -111,6 +111,14 @@ spec:
       backendRefs:
         - name: envoy-ai-gateway-quota-ratelimit-testupstream
           modelNameOverride: quota-release-model
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: quota-late-reserve-model
+      backendRefs:
+        - name: envoy-ai-gateway-quota-ratelimit-testupstream
+          modelNameOverride: quota-late-reserve-model
   # The following metadata keys are used to store the costs from the LLM request.
   llmRequestCosts:
     - metadataKey: llm_input_token
@@ -240,6 +248,27 @@ spec:
           admissionReserve:
             usageEstimate: reserve_fresh_input_token
             percent: 100
+---
+# quota-late-reserve-model starts without an admission reserve; the test adds one
+# to the already-translated route and waits for it to reach the Envoy route config.
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: QuotaPolicy
+metadata:
+  name: envoy-ai-gateway-quota-ratelimit-late-reserve-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: envoy-ai-gateway-quota-ratelimit-testupstream
+  perModelQuotas:
+    - modelName: "quota-late-reserve-model"
+      quota:
+        mode: Shared
+        defaultBucket:
+          limit: 100000
+          duration: "1h"
+          costExpression: "input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)"
 ---
 apiVersion: apps/v1
 kind: Deployment
