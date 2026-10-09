@@ -124,36 +124,23 @@ func anthropicMessagesToOpenAI(body *anthropic.MessagesRequest) []openai.ChatCom
 // Otherwise, plain string content is used for backward compatibility.
 func appendAnthropicAssistantMessage(messages []openai.ChatCompletionMessageParamUnion, msg anthropic.MessageParam) []openai.ChatCompletionMessageParamUnion {
 	var toolCalls []openai.ChatCompletionMessageToolCallParam
-	var contentParts []openai.ChatCompletionAssistantMessageParamContent
-	hasThinking := false
+	var reasoning []string
 
 	for _, block := range msg.Content.Array {
 		switch {
+		// Thinking replays on the message-level reasoning field, never as a
+		// content part: vLLM renders only that field into the chat template's
+		// reasoning channel and flattens a {"type":"thinking"} content part into
+		// the visible answer, so a reasoning model would see its own past chain
+		// of thought as something it said, and keep writing it there.
+		// The Anthropic signature cannot round-trip through an OpenAI backend
+		// and is dropped.
 		case block.Thinking != nil:
-			// vLLM's CustomThinkCompletionContentParam requires the reasoning
-			// under a "thinking" key; the Anthropic signature cannot round-trip
-			// through an OpenAI backend and is dropped.
-			hasThinking = true
-			thinking := block.Thinking.Thinking
-			contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-				Type:     openai.ChatCompletionAssistantMessageParamContentTypeThinking,
-				Thinking: &thinking,
-			})
+			reasoning = append(reasoning, block.Thinking.Thinking)
 		case block.RedactedThinking != nil:
-			// Redacted thinking has no OpenAI equivalent; replay the opaque data
-			// through the same vLLM-native thinking shape so the part validates.
-			hasThinking = true
-			data := block.RedactedThinking.Data
-			contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-				Type:     openai.ChatCompletionAssistantMessageParamContentTypeThinking,
-				Thinking: &data,
-			})
-		case block.Text != nil:
-			text := block.Text.Text
-			contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContent{
-				Type: openai.ChatCompletionAssistantMessageParamContentTypeText,
-				Text: &text,
-			})
+			// Redacted thinking has no OpenAI equivalent; its opaque data
+			// replays on the same field.
+			reasoning = append(reasoning, block.RedactedThinking.Data)
 		case block.ToolUse != nil:
 			args, _ := json.Marshal(block.ToolUse.Input)
 			if args == nil {
@@ -172,18 +159,11 @@ func appendAnthropicAssistantMessage(messages []openai.ChatCompletionMessagePara
 	}
 
 	assistantMsg := &openai.ChatCompletionAssistantMessageParam{
-		Role: openai.ChatMessageRoleAssistant,
+		Role:      openai.ChatMessageRoleAssistant,
+		Reasoning: strings.Join(reasoning, "\n"),
 	}
-
-	if hasThinking {
-		// Use structured content array to preserve thinking blocks.
-		assistantMsg.Content = openai.StringOrAssistantRoleContentUnion{Value: contentParts}
-	} else {
-		// No thinking blocks — use plain string for backward compatibility.
-		text := anthropicContentToText(msg.Content)
-		if text != "" {
-			assistantMsg.Content = openai.StringOrAssistantRoleContentUnion{Value: text}
-		}
+	if text := anthropicContentToText(msg.Content); text != "" {
+		assistantMsg.Content = openai.StringOrAssistantRoleContentUnion{Value: text}
 	}
 
 	if len(toolCalls) > 0 {
