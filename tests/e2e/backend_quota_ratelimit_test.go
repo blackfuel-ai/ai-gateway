@@ -93,6 +93,31 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		makeRequest("quota-test-model", 5, http.StatusTooManyRequests)
 		requireQuotaUsage(t, "quota-test-model", 22)
 	})
+
+	// Test the per-request limit override for "quota-dynamic-model": the static
+	// fallback is 5 total tokens per hour, and the x-test-quota-limit header
+	// supplies the limit at request time. The override and the static fallback
+	// share the same Redis counter.
+	t.Run("dynamic limit override", func(t *testing.T) {
+		limitHeader := func(v string) http.Header { return http.Header{"x-test-quota-limit": []string{v}} }
+
+		// Exhaust the static fallback limit (5): first request passes, second is rejected.
+		makeRequest("quota-dynamic-model", 20, http.StatusOK)
+		requireQuotaUsage(t, "quota-dynamic-model", 21)
+		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests)
+		requireQuotaUsage(t, "quota-dynamic-model", 22)
+
+		// The header raises the limit past the current counter: allowed again,
+		// and the burndown lands on the same counter.
+		makeRequest("quota-dynamic-model", 5, http.StatusOK, limitHeader("1000"))
+		requireQuotaUsage(t, "quota-dynamic-model", 28)
+
+		// A zero override blocks the request outright.
+		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests, limitHeader("0"))
+
+		// A malformed override falls back to the static limit (5), which is exhausted.
+		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests, limitHeader("not-a-number"))
+	})
 }
 
 // redisExec runs a redis-cli command on the Redis pod and returns the output.

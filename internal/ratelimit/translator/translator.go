@@ -152,8 +152,8 @@ func buildBackendDescriptorKeyed(
 		allKeyed = append(allKeyed, keyed...)
 	}
 
-	if policy.Spec.ServiceQuota.Quota.Limit > 0 {
-		desc, err := buildServiceQuotaDescriptor(&policy.Spec.ServiceQuota)
+	if policy.Spec.ServiceQuota != nil && policy.Spec.ServiceQuota.Quota.Limit > 0 {
+		desc, err := buildServiceQuotaDescriptor(policy.Spec.ServiceQuota)
 		if err != nil {
 			return nil, nil, fmt.Errorf("service quota: %w", err)
 		}
@@ -220,7 +220,11 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 	}
 
 	if len(quota.BucketRules) == 0 {
-		policy, err := quotaValueToPolicy(&quota.DefaultBucket)
+		if quota.DefaultBucket == nil {
+			// No bucket rules and no default bucket: nothing to enforce.
+			return desc, nil, nil
+		}
+		policy, err := quotaValueToPolicy(quota.DefaultBucket)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -259,8 +263,8 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 		}
 	}
 
-	if quota.DefaultBucket.Limit > 0 {
-		defaultPolicy, err := quotaValueToPolicy(&quota.DefaultBucket)
+	if quota.DefaultBucket != nil && quota.DefaultBucket.Limit > 0 {
+		defaultPolicy, err := quotaValueToPolicy(quota.DefaultBucket)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -389,6 +393,10 @@ func flattenAndSortHeaders(selectors []egv1a1.RateLimitSelectCondition) []egv1a1
 	return headers
 }
 
+// quotaValueToPolicy converts a QuotaValue to the static rate limit policy in the
+// rate limit service config. When the QuotaValue has a dynamicOverride, the
+// per-request limit carried in the descriptor takes precedence in the rate limit
+// service; the static value here remains the fallback.
 func quotaValueToPolicy(qv *aigv1a1.QuotaValue) (*rlsconfv3.RateLimitPolicy, error) {
 	unit, err := parseDuration(qv.Duration)
 	if err != nil {

@@ -1,0 +1,37 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: QuotaPolicy
+metadata:
+  name: basic-dynamic-override
+  namespace: default
+spec:
+  serviceQuota:
+    quota:
+      limit: 100000
+      duration: 1h
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: backend
+  perModelQuotas:
+    - modelName: gpt-4
+      quota:
+        defaultBucket:
+          limit: 100
+          duration: 1h
+          dynamicOverride:
+            fromHeader: x-bf-quota-limit
+        bucketRules:
+          - clientSelectors:
+              - headers:
+                  - name: x-org-id
+                    type: Distinct
+            quota:
+              limit: 1000
+              duration: 1h
+              dynamicOverride:
+                fromHeader: x-bf-quota-limit
