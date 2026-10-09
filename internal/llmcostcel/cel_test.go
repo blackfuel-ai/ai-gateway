@@ -91,3 +91,28 @@ func TestEvaluateProgram(t *testing.T) {
 		}) // synctest.Test waits for all goroutines to complete.
 	})
 }
+
+// TestQuotaBucketExpressions locks in the cost expressions used by per-bucket
+// quota policies: input tokens excluding cached input (underflow-guarded) and
+// output tokens.
+func TestQuotaBucketExpressions(t *testing.T) {
+	t.Run("input tokens excluding cached, guarded", func(t *testing.T) {
+		prog, err := NewProgram("input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)")
+		require.NoError(t, err)
+		v, err := EvaluateProgram(prog, "m", "b", "r", 200, 150, 0, 10, 210, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(50), v)
+
+		// cached >= input never underflows thanks to the guard.
+		v, err = EvaluateProgram(prog, "m", "b", "r", 100, 100, 0, 10, 110, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(0), v)
+	})
+	t.Run("output tokens", func(t *testing.T) {
+		prog, err := NewProgram("output_tokens")
+		require.NoError(t, err)
+		v, err := EvaluateProgram(prog, "m", "b", "r", 200, 150, 0, 42, 242, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(42), v)
+	})
+}
