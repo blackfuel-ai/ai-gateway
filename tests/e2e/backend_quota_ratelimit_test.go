@@ -148,6 +148,60 @@ func Test_Examples_BackendQuotaRateLimit(t *testing.T) {
 		// A malformed override falls back to the static limit (5), which is exhausted.
 		makeRequest("quota-dynamic-model", 5, http.StatusTooManyRequests, limitHeader("not-a-number"))
 	})
+
+	// Per-org token burndown: the stream-done charge for a Distinct selector
+	// re-reads the selector header, so it lands on the same per-org descriptor
+	// as the request-time check. "quota-org-model" gives each distinct x-org-id
+	// a 100-token/1h bucket: a single 200-token response exhausts it, so the
+	// next request from the same org is rejected while a different org is
+	// unaffected.
+	t.Run("per-org token burndown", func(t *testing.T) {
+		orgHeader := http.Header{"x-org-id": []string{"org-burndown-a"}}
+
+		makeRequest("quota-org-model", 200, http.StatusOK, orgHeader)
+
+		// The stream-done charge lands asynchronously after the response.
+		require.Eventually(t, func() bool {
+			fwd := e2elib.RequireNewHTTPPortForwarder(t, e2elib.EnvoyGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+			defer fwd.Kill()
+			req := newChatRequest(t, fwd.Address(), "quota-org-model", 5, orgHeader)
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Logf("request failed, retrying: %v", err)
+				return false
+			}
+			defer func() { _ = resp.Body.Close() }()
+			return resp.StatusCode == http.StatusTooManyRequests
+		}, 30*time.Second, time.Second, "per-org bucket was not exhausted by the token charge")
+
+		// A different org's bucket is untouched.
+		makeRequest("quota-org-model", 5, http.StatusOK, http.Header{"x-org-id": []string{"org-burndown-b"}})
+	})
+}
+
+// newChatRequest builds one chat completion request against the test upstream
+// with the given total_tokens in the fake response.
+func newChatRequest(t *testing.T, addr, modelName string, totalTokens int, headers ...http.Header) *http.Request {
+	t.Helper()
+	requestBody := fmt.Sprintf(`{"messages":[{"role":"user","content":"Say this is a test"}],"model":"%s"}`, modelName)
+	fakeResponseBody := fmt.Sprintf(
+		`{"choices":[{"message":{"content":"This is a test.","role":"assistant"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":%d}}`,
+		totalTokens,
+	)
+	req, err := http.NewRequest(http.MethodPut, addr+"/v1/chat/completions", strings.NewReader(requestBody))
+	require.NoError(t, err)
+	req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(fakeResponseBody)))
+	req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+	req.Header.Set("Host", "openai.com")
+	for _, h := range headers {
+		for k, vals := range h {
+			for _, v := range vals {
+				req.Header.Set(k, v)
+			}
+		}
+	}
+	return req
 }
 
 // redisExec runs a redis-cli command on the Redis pod and returns the output.
