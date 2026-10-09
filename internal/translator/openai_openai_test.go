@@ -453,6 +453,17 @@ func TestExtractUsageFromBufferEvent(t *testing.T) {
 		require.Len(t, s.RespChunks, 1)
 	})
 
+	t.Run("usage on finish_reason chunk (non-empty choices)", func(t *testing.T) {
+		// OpenRouter/GLM-5.2 framing: usage rides on the final content chunk (non-empty
+		// choices + finish_reason), with no dedicated choices:[] usage chunk. The
+		// OpenAI-native extractor reads usage from any chunk, so this guards the path.
+		o := &openAIToOpenAITranslatorV1ChatCompletion{}
+		o.buffered = []byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n")
+		usedToken := o.extractUsageFromBufferEvent(false, nil)
+		require.Equal(t, tokenUsageFrom(10, -1, -1, 5, 15, -1), usedToken)
+		require.Empty(t, o.buffered)
+	})
+
 	t.Run("valid usage data after invalid", func(t *testing.T) {
 		o := &openAIToOpenAITranslatorV1ChatCompletion{}
 		o.buffered = []byte("data: invalid\ndata: {\"usage\": {\"total_tokens\": 42}}\n")
