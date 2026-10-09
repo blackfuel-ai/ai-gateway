@@ -84,6 +84,14 @@ func (a *anthropicToOpenAIV1ChatCompletionTranslator) RequestBody(_ []byte, body
 		}
 	}
 
+	// Only :path is rewritten. The x-ai-eg-original-path / x-envoy-original-path
+	// headers set by the router phase deliberately keep the client's original path:
+	// nothing selects a processor from them (the upstream filter derives its
+	// processor from the router processor of the request, see
+	// internal/extproc/server.go), and access logs read x-envoy-original-path to
+	// report what the client actually requested. A two-tier deployment's second
+	// gateway resolves its processor from :path and overwrites the original-path
+	// headers with its own values.
 	newHeaders = []internalapi.Header{
 		{pathHeaderName, a.path},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},

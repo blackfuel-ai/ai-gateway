@@ -80,7 +80,9 @@ func TestAnthropicToOpenAITranslator_RequestBody(t *testing.T) {
 			require.NotNil(t, headers)
 			require.NotNil(t, body)
 
-			// Verify the two headers: path and content-length.
+			// Verify the headers: only :path and content-length are rewritten. The
+			// original-path headers set by the router phase keep the client's
+			// original path (nothing selects a processor from them).
 			require.Len(t, headers, 2)
 			assert.Equal(t, pathHeaderName, headers[0].Key())
 			assert.Equal(t, "/v1/chat/completions", headers[0].Value())
