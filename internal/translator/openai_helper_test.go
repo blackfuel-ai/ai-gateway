@@ -492,7 +492,8 @@ func TestOpenAIResponseToAnthropic(t *testing.T) {
 			},
 		}
 		result := openAIResponseToAnthropic(resp, "test-model")
-		assert.Nil(t, result.Content)
+		require.NotNil(t, result.Content)
+		assert.Empty(t, result.Content)
 	})
 
 	t.Run("nil content not added to blocks", func(t *testing.T) {
@@ -505,7 +506,32 @@ func TestOpenAIResponseToAnthropic(t *testing.T) {
 			},
 		}
 		result := openAIResponseToAnthropic(resp, "test-model")
-		assert.Nil(t, result.Content)
+		require.NotNil(t, result.Content)
+		assert.Empty(t, result.Content)
+	})
+
+	t.Run("reasoning-only response serializes content as an empty array", func(t *testing.T) {
+		// A reasoning model that spends its whole max_tokens budget on reasoning returns
+		// no text and no tool calls. Anthropic clients iterate content unconditionally,
+		// so the body must carry "content":[] and never "content":null.
+		resp := &openai.ChatCompletionResponse{
+			ID:    "chatcmpl-reasoning-only",
+			Model: "z-ai/glm-5.3",
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					FinishReason: openai.ChatCompletionChoicesFinishReasonLength,
+					Message:      openai.ChatCompletionResponseChoiceMessage{Role: "assistant"},
+				},
+			},
+			Usage: openai.Usage{PromptTokens: 14, CompletionTokens: 64},
+		}
+		result := openAIResponseToAnthropic(resp, "z-ai/glm-5.3")
+		require.NotNil(t, result.StopReason)
+		assert.Equal(t, anthropic.StopReasonMaxTokens, *result.StopReason)
+		body, err := json.Marshal(result)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), `"content":[]`)
+		assert.NotContains(t, string(body), `"content":null`)
 	})
 
 	t.Run("tool call response", func(t *testing.T) {
@@ -586,14 +612,15 @@ func TestOpenAIResponseToAnthropic(t *testing.T) {
 		assert.Empty(t, result.Content[0].Tool.ID)
 	})
 
-	t.Run("no choices produces no content and no stop reason", func(t *testing.T) {
+	t.Run("no choices produces empty content and no stop reason", func(t *testing.T) {
 		resp := &openai.ChatCompletionResponse{
 			ID:    "chatcmpl-empty",
 			Model: "gpt-4o",
 			Usage: openai.Usage{PromptTokens: 5},
 		}
 		result := openAIResponseToAnthropic(resp, "gpt-4o")
-		assert.Nil(t, result.Content)
+		require.NotNil(t, result.Content)
+		assert.Empty(t, result.Content)
 		assert.Nil(t, result.StopReason)
 		assert.Equal(t, float64(5), result.Usage.InputTokens)
 	})
