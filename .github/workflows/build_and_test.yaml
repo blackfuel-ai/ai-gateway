@@ -56,6 +56,8 @@ jobs:
       ENVOY_VERSION: 1.39.2
     strategy:
       fail-fast: false
+      # macOS covers the aigw CLI and `make test` on developer laptops; every other job runs
+      # only on Linux, the one platform the gateway components are deployed on.
       matrix:
         os:
           - ubuntu-latest
@@ -91,13 +93,8 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     name: CRD CEL Validation Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+    # Gateway components deploy only on Linux, so a macOS run covers no shipped target.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v5
@@ -110,20 +107,15 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
             ~/go/bin
-          key: controller-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}-${{ matrix.os }}
+          key: controller-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}
       - run: make test-crdcel
 
   test_controller:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
     name: Controller Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+    # Gateway components deploy only on Linux, so a macOS run covers no shipped target.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v5
@@ -136,20 +128,15 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
             ~/go/bin
-          key: controller-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}-${{ matrix.os }}
+          key: controller-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}
       - run: make test-controller
 
   test_data_plane:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
-    name: Data Plane Test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-    runs-on: ${{ matrix.os }}
+    name: Data Plane Test
+    # Gateway components deploy only on Linux, so a macOS run covers no shipped target.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v5
@@ -180,14 +167,9 @@ jobs:
   test_data_plane_mcp:
     needs: changes
     if: ${{ needs.changes.outputs.code == 'true' }}
-    name: Data Plane MCP Test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-    runs-on: ${{ matrix.os }}
+    name: Data Plane MCP Test
+    # Gateway components deploy only on Linux, so a macOS run covers no shipped target.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v5
