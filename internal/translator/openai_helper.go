@@ -402,7 +402,10 @@ func anthropicToolChoiceToOpenAI(tc anthropic.ToolChoice, hasTools bool) *openai
 
 // openAIResponseToAnthropic converts an OpenAI ChatCompletionResponse to an Anthropic MessagesResponse.
 func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string) *anthropic.MessagesResponse {
-	var content []anthropic.MessagesContentBlock
+	// Anthropic Messages responses always carry content as an array, empty when the model
+	// produced neither text nor tool calls (e.g. a reasoning model that spent max_tokens
+	// reasoning). Clients iterate it unconditionally, so it must never serialize as null.
+	content := []anthropic.MessagesContentBlock{}
 	var stopReason *anthropic.StopReason
 
 	if len(resp.Choices) > 0 {

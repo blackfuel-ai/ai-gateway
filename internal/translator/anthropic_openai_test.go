@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -212,6 +213,45 @@ func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming(t *testing.T) {
 		assert.Equal(t, "Hello from OpenAI!", anthropicResp.Content[0].Text.Text)
 		require.NotNil(t, anthropicResp.StopReason)
 		assert.Equal(t, anthropic.StopReasonEndTurn, *anthropicResp.StopReason)
+	})
+
+	t.Run("length-truncated response with no text carries an empty content array", func(t *testing.T) {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		reqBody := &anthropic.MessagesRequest{
+			Model:     "z-ai/glm-5.3",
+			MaxTokens: 64,
+			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
+		}
+		_, _, err := translator.RequestBody(nil, reqBody, false)
+		require.NoError(t, err)
+
+		respBytes, err := json.Marshal(openai.ChatCompletionResponse{
+			ID:    "chatcmpl-length-no-text",
+			Model: "z-ai/glm-5.3",
+			Choices: []openai.ChatCompletionResponseChoice{
+				{
+					FinishReason: openai.ChatCompletionChoicesFinishReasonLength,
+					Message:      openai.ChatCompletionResponseChoiceMessage{Role: "assistant"},
+				},
+			},
+			Usage: openai.Usage{PromptTokens: 14, CompletionTokens: 64},
+		})
+		require.NoError(t, err)
+
+		headers, body, _, _, err := translator.ResponseBody(
+			map[string]string{"content-type": "application/json"},
+			bytes.NewReader(respBytes),
+			true,
+			nil,
+		)
+		require.NoError(t, err)
+
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(body, &fields))
+		assert.Equal(t, "[]", string(fields["content"]))
+		require.Len(t, headers, 1)
+		assert.Equal(t, contentLengthHeaderName, headers[0].Key())
+		assert.Equal(t, strconv.Itoa(len(body)), headers[0].Value())
 	})
 
 	t.Run("model falls back to request model when absent in response", func(t *testing.T) {
