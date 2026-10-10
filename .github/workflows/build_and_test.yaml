@@ -107,7 +107,7 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
             ~/go/bin
-          key: controller-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}
+          key: crdcel-test-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}
       - run: make test-crdcel
 
   test_controller:
