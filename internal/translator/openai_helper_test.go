@@ -510,12 +510,12 @@ func TestOpenAIResponseToAnthropic(t *testing.T) {
 		assert.Empty(t, result.Content)
 	})
 
-	t.Run("reasoning-only response serializes content as an empty array", func(t *testing.T) {
-		// A reasoning model that spends its whole max_tokens budget on reasoning returns
-		// no text and no tool calls. Anthropic clients iterate content unconditionally,
-		// so the body must carry "content":[] and never "content":null.
+	t.Run("length-truncated response with no text serializes content as an empty array", func(t *testing.T) {
+		// A response cut off at max_tokens before any text or tool call (a reasoning model
+		// whose budget went to reasoning ends this way) carries no content blocks. Anthropic
+		// clients iterate content unconditionally, so it must serialize as [], never null.
 		resp := &openai.ChatCompletionResponse{
-			ID:    "chatcmpl-reasoning-only",
+			ID:    "chatcmpl-length-no-text",
 			Model: "z-ai/glm-5.3",
 			Choices: []openai.ChatCompletionResponseChoice{
 				{
@@ -530,8 +530,9 @@ func TestOpenAIResponseToAnthropic(t *testing.T) {
 		assert.Equal(t, anthropic.StopReasonMaxTokens, *result.StopReason)
 		body, err := json.Marshal(result)
 		require.NoError(t, err)
-		assert.Contains(t, string(body), `"content":[]`)
-		assert.NotContains(t, string(body), `"content":null`)
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(body, &fields))
+		assert.Equal(t, "[]", string(fields["content"]))
 	})
 
 	t.Run("tool call response", func(t *testing.T) {
