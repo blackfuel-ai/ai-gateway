@@ -334,6 +334,36 @@ func TestAnthropicToAWSBedrockTranslator_ResponseBody_NonStreaming(t *testing.T)
 	assert.Equal(t, float64(20), anthropicResp.Usage.OutputTokens)
 }
 
+// TestAnthropicToAWSBedrockTranslator_ResponseBody_NonStreamingNoOutput pins that a Converse
+// response without an output message still serializes content as an empty array: Anthropic
+// clients iterate content unconditionally, so the body must never carry "content":null.
+func TestAnthropicToAWSBedrockTranslator_ResponseBody_NonStreamingNoOutput(t *testing.T) {
+	translator := NewAnthropicToAWSBedrockTranslator("")
+	req := &anthropicschema.MessagesRequest{
+		Model:     "anthropic.claude-3-sonnet-20240229-v1:0",
+		MaxTokens: 1024,
+		Messages: []anthropicschema.MessageParam{
+			{Role: anthropicschema.MessageRoleUser, Content: anthropicschema.MessageContent{Text: "Hello"}},
+		},
+	}
+	rawBody, _ := json.Marshal(req)
+	_, _, _ = translator.RequestBody(rawBody, req, false)
+
+	stopReason := "max_tokens"
+	respBody, err := json.Marshal(awsbedrock.ConverseResponse{
+		StopReason: &stopReason,
+		Usage:      &awsbedrock.TokenUsage{InputTokens: 10, OutputTokens: 1024, TotalTokens: 1034},
+	})
+	require.NoError(t, err)
+
+	_, body, _, _, err := translator.ResponseBody(nil, bytes.NewReader(respBody), false, nil)
+	require.NoError(t, err)
+
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &fields))
+	assert.Equal(t, "[]", string(fields["content"]))
+}
+
 func TestAnthropicToAWSBedrockTranslator_ResponseBody_Streaming(t *testing.T) {
 	translator := NewAnthropicToAWSBedrockTranslator("")
 	// Set up streaming mode.
