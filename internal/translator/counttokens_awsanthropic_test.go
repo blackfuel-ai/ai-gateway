@@ -136,7 +136,7 @@ func TestCountTokensToAWSAnthropic_ResponseError(t *testing.T) {
 	translator := NewCountTokensToAWSAnthropicTranslator("bedrock-2023-05-31", "")
 	require.NotNil(t, translator)
 
-	hdrs, body, err := translator.ResponseError(nil, nil)
+	hdrs, body, _, err := translator.ResponseError(nil, nil)
 	require.NoError(t, err)
 	require.Nil(t, hdrs)
 	require.Nil(t, body)

@@ -9,11 +9,14 @@ on:
       #
       # See RELEASES.md for more details.
       - "release/**"
+      # Blackfuel fork maintenance branches (e.g. bf/v0.6).
+      - "bf/**"
 
   push:
     branches:
       - "main"
       - "release/**"
+      - "bf/**"
 
 concurrency:
   # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#example-using-concurrency-to-cancel-any-in-progress-job-or-run
@@ -73,7 +76,9 @@ jobs:
           key: unittest-${{ hashFiles('**/go.mod', '**/go.sum', '**/Makefile') }}-${{ matrix.os }}
       - run: make test-coverage GO_TEST_ARGS='-race'
       - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest'
+        # Only upstream is configured in Codecov; skip on the Blackfuel fork (bf/** branches)
+        # where the OIDC/token upload would otherwise hard-fail via fail_ci_if_error.
+        if: matrix.os == 'ubuntu-latest' && github.repository == 'envoyproxy/ai-gateway'
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
         with:
           fail_ci_if_error: true
@@ -381,6 +386,9 @@ jobs:
 
   compute_version:
     # Runs on PRs too, so GitVersion's output shows up in checks before it can affect main; docker_push/helm_push below stay push-only, so nothing publishes here.
+    # Only feeds the upstream DockerHub docker_push/helm_push jobs, and exits 1 on PRs when GitVersion yields
+    # nothing; skip on the Blackfuel fork (a skipped job does not fail ci-required).
+    if: github.repository == 'envoyproxy/ai-gateway'
     name: Compute dev version
     runs-on: ubuntu-latest
     outputs:
@@ -425,7 +433,9 @@ jobs:
 
   docker_push:
     # Docker builds are verified in test_e2e job, so we only need to push the images when the event is a push event.
-    if: github.event_name == 'push'
+    # Pushes to DockerHub with upstream credentials; skip on the Blackfuel fork, which publishes to GHCR
+    # via build_push_branch.yaml instead.
+    if: github.event_name == 'push' && github.repository == 'envoyproxy/ai-gateway'
     name: Push Docker Images
     needs: [ci-required, compute_version]
     uses: ./.github/workflows/docker_build_job.yaml
@@ -436,7 +446,8 @@ jobs:
   helm_push:
     name: Push Helm chart
     # Only push the Helm chart to the GHR when merged into the main branch.
-    if: github.event_name == 'push'
+    # Uses upstream DockerHub credentials; skip on the Blackfuel fork (publishes via build_push_branch.yaml).
+    if: github.event_name == 'push' && github.repository == 'envoyproxy/ai-gateway'
     needs: [docker_push, compute_version]
     runs-on: ubuntu-latest
     steps:

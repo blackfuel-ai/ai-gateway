@@ -98,36 +98,41 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) RequestBody(original []byte, 
 // ResponseError implements [OpenAIChatCompletionTranslator.ResponseError]
 // For OpenAI based backend we return the OpenAI error type as is.
 // If connection fails the error body is translated to OpenAI error type for events such as HTTP 503 or 504.
-func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, error) {
+func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) ([]internalapi.Header, []byte, LLMErrorInfo, error) {
 	return convertErrorOpenAIToOpenAIError(respHeaders, body)
 }
 
 // convertErrorOpenAIToOpenAIError implements ResponseError conversion logic for OpenAI to OpenAI translation.
-func convertErrorOpenAIToOpenAIError(respHeaders map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, err error) {
-	if !strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
-		var openaiError openai.Error
-		buf, err := io.ReadAll(body)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
-		}
-		statusCode := respHeaders[statusHeaderName]
-		openaiError = openai.Error{
-			Type: "error",
-			Error: openai.ErrorType{
-				Type:    openAIBackendError,
-				Message: string(buf),
-				Code:    &statusCode,
-			},
-		}
-		newBody, err = json.Marshal(openaiError)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
-		}
-		newHeaders = append(newHeaders,
-			internalapi.Header{contentTypeHeaderName, jsonContentType},
-			internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))},
-		)
+func convertErrorOpenAIToOpenAIError(respHeaders map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error) {
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 	}
+	if strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
+		// OpenAI-style JSON error: pass the upstream body through unchanged (nil
+		// newBody), but best-effort extract the classification for error metadata.
+		return nil, nil, extractOpenAIErrorInfo(buf), nil
+	}
+	// Non-JSON error (e.g. HTTP 503/504 from the connection layer): synthesize an
+	// OpenAI error envelope.
+	statusCode := respHeaders[statusHeaderName]
+	openaiError := openai.Error{
+		Type: "error",
+		Error: openai.ErrorType{
+			Type:    openAIBackendError,
+			Message: string(buf),
+			Code:    &statusCode,
+		},
+	}
+	newBody, err = json.Marshal(openaiError)
+	if err != nil {
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
+	}
+	newHeaders = append(newHeaders,
+		internalapi.Header{contentTypeHeaderName, jsonContentType},
+		internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))},
+	)
+	errInfo = LLMErrorInfo{Type: openAIBackendError}
 	return
 }
 
@@ -140,7 +145,7 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseHeaders(map[string]st
 // OpenAI supports model virtualization through automatic routing and resolution,
 // so we return the actual model from the response body which may differ from the requested model
 // (e.g., request "gpt-4o" → response "gpt-4o-2024-08-06").
-func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]string, body io.Reader, _ bool, span tracingapi.ChatCompletionSpan) (
+func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]string, body io.Reader, endOfStream bool, span tracingapi.ChatCompletionSpan) (
 	newHeaders []internalapi.Header, newBody []byte, tokenUsage metrics.TokenUsage, responseModel string, err error,
 ) {
 	if o.stream {
@@ -150,7 +155,7 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]str
 			return nil, nil, tokenUsage, o.requestModel, fmt.Errorf("failed to read body: %w", err)
 		}
 		o.buffered = append(o.buffered, buf...)
-		tokenUsage = o.extractUsageFromBufferEvent(span)
+		tokenUsage = o.extractUsageFromBufferEvent(endOfStream, span)
 		// Use stored streaming response model, fallback to request model for non-compliant backends
 		responseModel = cmp.Or(o.streamingResponseModel, o.requestModel)
 		return
@@ -195,15 +200,21 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) ResponseBody(_ map[string]str
 }
 
 // extractUsageFromBufferEvent extracts the token usage from the buffered event.
-// It scans complete lines and returns the latest usage found in this batch.
-func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(span tracingapi.ChatCompletionSpan) (tokenUsage metrics.TokenUsage) {
+// It scans complete lines and returns the latest usage found in this batch. At
+// endOfStream the final line is flushed even without a trailing newline, because a
+// provider may close the stream immediately after the usage chunk.
+func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(endOfStream bool, span tracingapi.ChatCompletionSpan) (tokenUsage metrics.TokenUsage) {
 	for {
-		i := bytes.IndexByte(o.buffered, '\n')
-		if i == -1 {
+		var line []byte
+		if i := bytes.IndexByte(o.buffered, '\n'); i >= 0 {
+			line = o.buffered[:i]
+			o.buffered = o.buffered[i+1:]
+		} else if endOfStream && len(o.buffered) > 0 {
+			line = o.buffered
+			o.buffered = nil
+		} else {
 			return
 		}
-		line := o.buffered[:i]
-		o.buffered = o.buffered[i+1:]
 		data, ok := cutSSEDataPrefix(line)
 		if !ok {
 			continue
@@ -219,19 +230,9 @@ func (o *openAIToOpenAITranslatorV1ChatCompletion) extractUsageFromBufferEvent(s
 			// Store the response model for future batches
 			o.streamingResponseModel = event.Model
 		}
-		if usage := event.Usage; usage != nil {
-			tokenUsage.SetInputTokens(uint32(usage.PromptTokens))      //nolint:gosec
-			tokenUsage.SetOutputTokens(uint32(usage.CompletionTokens)) //nolint:gosec
-			tokenUsage.SetTotalTokens(uint32(usage.TotalTokens))       //nolint:gosec
-			if usage.PromptTokensDetails != nil {
-				tokenUsage.SetCachedInputTokens(uint32(usage.PromptTokensDetails.CachedTokens))                   //nolint:gosec
-				tokenUsage.SetCacheCreationInputTokens(uint32(usage.PromptTokensDetails.CacheWriteTokensValue())) //nolint:gosec
-			}
-			if usage.CompletionTokensDetails != nil {
-				tokenUsage.SetReasoningTokens(uint32(usage.CompletionTokensDetails.ReasoningTokens)) //nolint:gosec
-			}
-			// Do not mark buffering done; keep scanning to return the latest usage in this batch.
-		}
+		// Capture usage from any chunk that carries it; keep scanning so the latest
+		// usage in this batch wins (do not mark buffering done).
+		setOpenAIStreamUsage(&tokenUsage, event.Usage)
 	}
 }
 

@@ -14,6 +14,8 @@ import (
 	"io"
 	"log/slog"
 	"mime/multipart"
+	"strconv"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -39,6 +41,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/testing/testotel"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
+	"github.com/envoyproxy/ai-gateway/internal/translator"
 )
 
 func TestNewFactory(t *testing.T) {
@@ -452,6 +455,43 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		require.Equal(t, "some_model", md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields["response_model"].GetStringValue())
 	})
 
+	// Mirror (shadow) backends must not emit LLMRequestCost dynamic metadata.
+	// The primary leg has already emitted it; the mirror leg emitting again would
+	// double-count tokens in the downstream access-log / billing pipeline.
+	t.Run("mirror_backend_skips_cost_metadata", func(t *testing.T) {
+		inBody := &extprocv3.HttpBody{Body: []byte("some-body"), EndOfStream: true}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{
+			t: t, expResponseBody: inBody,
+			retHeaderMutation: []internalapi.Header{{"foo", "bar"}},
+			retResponseModel:  internalapi.ResponseModel("some_model"),
+		}
+		mt.retUsedToken.SetOutputTokens(123)
+		mt.retUsedToken.SetInputTokens(1)
+
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator: mt,
+			metrics:    mm,
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{
+					RequestCosts: []filterapi.RuntimeRequestCost{
+						{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "some_route", Type: filterapi.LLMRequestCostTypeOutputToken, MetadataKey: "output_token_usage"}},
+					},
+				},
+			},
+			requestHeaders:    map[string]string{internalapi.ModelNameHeaderKeyDefault: "ai_gateway_llm"},
+			responseHeaders:   map[string]string{":status": "200"},
+			backendName:       "some_mirror_backend",
+			routeName:         "some_route",
+			modelNameOverride: "ai_gateway_llm",
+			isMirror:          true,
+		}
+		res, err := p.ProcessResponseBody(t.Context(), inBody)
+		require.NoError(t, err)
+		require.Nil(t, res.DynamicMetadata,
+			"mirror backends must not emit DynamicMetadata to avoid double-counting LLMRequestCost")
+	})
+
 	// Verify we record failure for non-2xx responses and do it exactly once (defer suppressed).
 	t.Run("non-2xx status failure once", func(t *testing.T) {
 		inBody := &extprocv3.HttpBody{Body: []byte("error-body"), EndOfStream: true}
@@ -475,6 +515,68 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		require.Len(t, commonRes.HeaderMutation.SetHeaders, 1)
 		require.Equal(t, "foo", commonRes.HeaderMutation.SetHeaders[0].Header.Key)
 		require.Equal(t, []byte("bar"), commonRes.HeaderMutation.SetHeaders[0].Header.RawValue)
+		// With no config (and thus EmitErrorMetadata disabled), error responses carry no dynamic metadata.
+		require.Nil(t, res.DynamicMetadata)
+		mm.RequireRequestFailure(t)
+	})
+
+	// Verify error metadata is emitted for non-2xx responses when EmitErrorMetadata is enabled.
+	t.Run("non-2xx status with error metadata", func(t *testing.T) {
+		inBody := &extprocv3.HttpBody{Body: []byte("error-body"), EndOfStream: true}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{
+			t:               t,
+			expResponseBody: inBody,
+			retLLMErrorInfo: translator.LLMErrorInfo{Type: "rate_limit_error", Code: "context_length_exceeded"},
+		}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "429"},
+			requestHeaders:  map[string]string{internalapi.ModelNameHeaderKeyDefault: "ai_gateway_llm"},
+			backendName:     "some_backend",
+			routeName:       "some_route",
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{EmitErrorMetadata: true},
+			},
+		}
+		res, err := p.ProcessResponseBody(t.Context(), inBody)
+		require.NoError(t, err)
+		require.NotNil(t, res.DynamicMetadata)
+		fields := res.DynamicMetadata.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
+		require.Equal(t, "rate_limit_error", fields["llm_error_type"].GetStringValue())
+		require.Equal(t, "context_length_exceeded", fields["llm_error_code"].GetStringValue())
+		require.Equal(t, "ai_gateway_llm", fields["model_name_override"].GetStringValue())
+		require.Equal(t, "some_backend", fields["backend_name"].GetStringValue())
+		require.Equal(t, "some_route", fields["route_name"].GetStringValue())
+		mm.RequireRequestFailure(t)
+	})
+
+	// Verify error metadata falls back to a generic type and the HTTP status code when the
+	// translator reports no structured error info.
+	t.Run("non-2xx status with error metadata fallback", func(t *testing.T) {
+		inBody := &extprocv3.HttpBody{Body: []byte("error-body"), EndOfStream: true}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t, expResponseBody: inBody}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "500"},
+			requestHeaders:  map[string]string{internalapi.ModelNameHeaderKeyDefault: "ai_gateway_llm"},
+			parent: &chatCompletionProcessorRouterFilter{
+				config: &filterapi.RuntimeConfig{EmitErrorMetadata: true},
+			},
+		}
+		res, err := p.ProcessResponseBody(t.Context(), inBody)
+		require.NoError(t, err)
+		require.NotNil(t, res.DynamicMetadata)
+		fields := res.DynamicMetadata.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
+		require.Equal(t, "upstream_error", fields["llm_error_type"].GetStringValue())
+		require.Equal(t, "500", fields["llm_error_code"].GetStringValue())
+		// backend_name/route_name are omitted when empty; model_name_override is always set.
+		require.Equal(t, "ai_gateway_llm", fields["model_name_override"].GetStringValue())
+		require.NotContains(t, fields, "backend_name")
+		require.NotContains(t, fields, "route_name")
 		mm.RequireRequestFailure(t)
 	})
 
@@ -551,6 +653,109 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseBody(t *testing.T
 		require.Equal(t, 138, mm.streamingOutputTokens) // accumulated output tokens from stream
 		require.Equal(t, 3, mm.cachedInputTokenCount)
 		require.Equal(t, 21, mm.cacheCreationInputTokenCount)
+		// Token usage should be recorded exactly once for the whole stream.
+		require.Equal(t, 1, mm.recordTokenUsageCallCount)
+	})
+
+	// Reproducer for the streaming OTEL token-usage drop bug
+	// (envoyproxy/ai-gateway#2115).
+	//
+	// In production we observed ~28% of long-running streaming Sonnet requests
+	// missing from gen_ai_client_token_usage_sum even though the access log
+	// (also gated on EndOfStream) captured 100% of them. The suspected cause is
+	// the request context being cancelled by the downstream client between the
+	// last data delivery and the EndOfStream chunk, which causes the OTEL
+	// Histogram.Record observation to be silently dropped by some readers.
+	//
+	// The fix detaches the request context with context.WithoutCancel before
+	// recording, so a cancelled downstream stream cannot drop the observation.
+	t.Run("streaming records usage with cancelled ctx at EndOfStream (H2)", func(t *testing.T) {
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "200"},
+			parent: &chatCompletionProcessorRouterFilter{
+				stream: true,
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+		// Mid-stream chunk parses message_start usage but is not EndOfStream.
+		mid := &extprocv3.HttpBody{Body: []byte("chunk-mid"), EndOfStream: false}
+		mt.expResponseBody = mid
+		mt.retUsedToken = metrics.TokenUsage{}
+		mt.retUsedToken.SetInputTokens(59241)
+		mt.retUsedToken.SetCachedInputTokens(0)
+		mt.retUsedToken.SetCacheCreationInputTokens(59238)
+		mt.retUsedToken.SetOutputTokens(1)
+		_, err := p.ProcessResponseBody(t.Context(), mid)
+		require.NoError(t, err)
+		require.Zero(t, mm.recordTokenUsageCallCount)
+
+		// Final chunk arrives with the request context already cancelled.
+		// This simulates a long-running stream where the downstream client has
+		// torn down its half of the HTTP/2 connection before the upstream
+		// finishes.
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		final := &extprocv3.HttpBody{Body: []byte("chunk-final"), EndOfStream: true}
+		mt.expResponseBody = final
+		// Translator returns the cumulative usage including final output.
+		mt.retUsedToken = metrics.TokenUsage{}
+		mt.retUsedToken.SetInputTokens(59241)
+		mt.retUsedToken.SetCachedInputTokens(0)
+		mt.retUsedToken.SetCacheCreationInputTokens(59238)
+		mt.retUsedToken.SetOutputTokens(341)
+		mt.retUsedToken.SetTotalTokens(59582)
+
+		_, err = p.ProcessResponseBody(ctx, final)
+		require.NoError(t, err)
+		// Token usage MUST be recorded exactly once at EndOfStream.
+		require.Equal(t, 1, mm.recordTokenUsageCallCount,
+			"RecordTokenUsage must be called exactly once at EndOfStream even when ctx is cancelled")
+		// And the ctx passed to RecordTokenUsage MUST not be cancelled (must be
+		// detached from the request ctx) so the OTEL meter cannot drop the
+		// observation due to ctx cancellation.
+		require.Len(t, mm.recordTokenUsageCtxErrs, 1)
+		require.NoErrorf(t, mm.recordTokenUsageCtxErrs[0],
+			"ctx passed to RecordTokenUsage must be detached from cancellation; got: %v", mm.recordTokenUsageCtxErrs[0])
+		// Final accumulated values must be emitted.
+		require.Equal(t, 59241, mm.inputTokenCount)
+		require.Equal(t, 0, mm.cachedInputTokenCount)
+		require.Equal(t, 59238, mm.cacheCreationInputTokenCount)
+		require.Equal(t, 341, mm.outputTokenCount)
+	})
+
+	// Non-streaming responses must continue to record token usage exactly once
+	// and (now) with a detached context.
+	t.Run("non-streaming records usage once with detached ctx", func(t *testing.T) {
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:      mt,
+			metrics:         mm,
+			responseHeaders: map[string]string{":status": "200"},
+			parent: &chatCompletionProcessorRouterFilter{
+				stream: false,
+				config: &filterapi.RuntimeConfig{},
+			},
+		}
+		body := &extprocv3.HttpBody{Body: []byte("body"), EndOfStream: true}
+		mt.expResponseBody = body
+		mt.retUsedToken = metrics.TokenUsage{}
+		mt.retUsedToken.SetInputTokens(10)
+		mt.retUsedToken.SetOutputTokens(20)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel before invoking, to validate ctx detachment.
+		_, err := p.ProcessResponseBody(ctx, body)
+		require.NoError(t, err)
+		require.Equal(t, 1, mm.recordTokenUsageCallCount)
+		require.Len(t, mm.recordTokenUsageCtxErrs, 1)
+		require.NoError(t, mm.recordTokenUsageCtxErrs[0],
+			"ctx passed to RecordTokenUsage must be detached from cancellation")
 	})
 
 	// Verify dynamic metadata (used for the access log) is populated as soon as a chunk carries
@@ -648,6 +853,23 @@ func Test_chatCompletionProcessorUpstreamFilter_SetBackend(t *testing.T) {
 	require.Equal(t, 422, span.errorStatusCode)
 }
 
+// Test_chatCompletionProcessorUpstreamFilter_SetBackend_routerTypeMismatch pins that a router
+// processor of another type is reported as an error for that request only, never as a process-wide
+// panic (the extproc sidecar going down fails every request on the pod).
+func Test_chatCompletionProcessorUpstreamFilter_SetBackend_routerTypeMismatch(t *testing.T) {
+	mm := &mockMetrics{}
+	p := &chatCompletionProcessorUpstreamFilter{requestHeaders: map[string]string{":path": "/foo"}, metrics: mm}
+	r := &messagesProcessorRouterFilter{}
+	var err error
+	require.NotPanics(t, func() {
+		err = p.SetBackend(t.Context(), &filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "some-backend"}}, "test-route", r)
+	})
+	require.ErrorContains(t, err, "BUG: expected routeProcessor to be of type")
+	mm.RequireRequestFailure(t)
+	// The failure sample must carry the provider label even on this early exit.
+	mm.RequireSelectedBackend(t, "some-backend")
+}
+
 // Test_chatCompletionProcessorUpstreamFilter_SetBackend_recordsBackend pins that
 // the resolved backend reaches the span, and that recording it is optional: the
 // backend is only known after routing, and only some semantic conventions record
@@ -686,6 +908,87 @@ func Test_chatCompletionProcessorUpstreamFilter_SetBackend_recordsBackend(t *tes
 	t.Run("no span at all", func(t *testing.T) {
 		setBackend(t, nil)
 	})
+}
+
+// Test_chatCompletionProcessorUpstreamFilter_SetBackend_mirrorDoesNotOwnResponsePath
+// verifies that a mirror (shadow) upstream leg never claims rp.upstreamFilter and
+// never counts as an upstream leg, regardless of the order in which the primary and
+// mirror legs call SetBackend on the shared router processor. If the mirror won the
+// rp.upstreamFilter race, the primary (client-facing) response would be processed by
+// the mirror's processor whose isMirror guard suppresses LLMRequestCost emission,
+// silently dropping token/cost metadata for the entire request.
+func Test_chatCompletionProcessorUpstreamFilter_SetBackend_mirrorDoesNotOwnResponsePath(t *testing.T) {
+	openaiSchema := filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}
+	newLeg := func() *chatCompletionProcessorUpstreamFilter {
+		return &chatCompletionProcessorUpstreamFilter{
+			requestHeaders: map[string]string{":path": "/v1/chat/completions"},
+			metrics:        &mockMetrics{},
+		}
+	}
+	primaryBackend := &filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "primary", Schema: openaiSchema}}
+	mirrorBackend := &filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "mirror", Schema: openaiSchema, IsMirror: true}}
+
+	t.Run("mirror SetBackend runs last", func(t *testing.T) {
+		rp := &chatCompletionProcessorRouterFilter{requestHeaders: map[string]string{":path": "/v1/chat/completions"}}
+		primary, mirror := newLeg(), newLeg()
+		require.NoError(t, primary.SetBackend(t.Context(), primaryBackend, "route", rp))
+		require.NoError(t, mirror.SetBackend(t.Context(), mirrorBackend, "route", rp))
+
+		require.Same(t, primary, rp.upstreamFilter, "primary must own the response path")
+		require.Equal(t, 1, rp.upstreamFilterCount, "mirror leg must not count as an upstream leg")
+		require.False(t, primary.onRetry(), "primary must not be misclassified as a retry")
+	})
+
+	t.Run("mirror SetBackend runs first", func(t *testing.T) {
+		rp := &chatCompletionProcessorRouterFilter{requestHeaders: map[string]string{":path": "/v1/chat/completions"}}
+		primary, mirror := newLeg(), newLeg()
+		require.NoError(t, mirror.SetBackend(t.Context(), mirrorBackend, "route", rp))
+		require.NoError(t, primary.SetBackend(t.Context(), primaryBackend, "route", rp))
+
+		require.Same(t, primary, rp.upstreamFilter, "primary must own the response path")
+		require.Equal(t, 1, rp.upstreamFilterCount, "mirror leg must not count as an upstream leg")
+		require.False(t, primary.onRetry(), "primary must not be misclassified as a retry")
+	})
+}
+
+// Test_chatCompletionProcessorRouterFilter_mirrorPresent_emitsCostMetadata is the
+// end-to-end regression for missing genai_tokens_* (LLMRequestCost) metadata at a
+// gateway tier whose route has a mirror backend. With the mirror's SetBackend running
+// last, the router must still delegate the client-facing response to the primary leg
+// and emit cost metadata.
+func Test_chatCompletionProcessorRouterFilter_mirrorPresent_emitsCostMetadata(t *testing.T) {
+	openaiSchema := filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI}
+	rp := &chatCompletionProcessorRouterFilter{
+		requestHeaders: map[string]string{":path": "/v1/chat/completions"},
+		config: &filterapi.RuntimeConfig{
+			RequestCosts: []filterapi.RuntimeRequestCost{
+				{LLMRequestCost: &filterapi.LLMRequestCost{RouteName: "route", Type: filterapi.LLMRequestCostTypeOutputToken, MetadataKey: "output_token_usage"}},
+			},
+		},
+	}
+	primary := &chatCompletionProcessorUpstreamFilter{requestHeaders: map[string]string{":path": "/v1/chat/completions"}, metrics: &mockMetrics{}}
+	mirror := &chatCompletionProcessorUpstreamFilter{requestHeaders: map[string]string{":path": "/v1/chat/completions"}, metrics: &mockMetrics{}}
+
+	require.NoError(t, primary.SetBackend(t.Context(),
+		&filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "primary", Schema: openaiSchema}}, "route", rp))
+	require.NoError(t, mirror.SetBackend(t.Context(),
+		&filterapi.RuntimeBackend{Backend: &filterapi.Backend{Name: "mirror", Schema: openaiSchema, IsMirror: true}}, "route", rp))
+	require.Same(t, primary, rp.upstreamFilter)
+
+	// Replace the real translator (installed by SetBackend) with a mock that yields
+	// deterministic token usage, then drive the response through the router.
+	inBody := &extprocv3.HttpBody{Body: []byte("some-body"), EndOfStream: true}
+	mt := &mockTranslator{t: t, expResponseBody: inBody, retResponseModel: internalapi.ResponseModel("some_model")}
+	mt.retUsedToken.SetOutputTokens(123)
+	primary.translator = mt
+	primary.responseHeaders = map[string]string{":status": "200"}
+
+	res, err := rp.ProcessResponseBody(t.Context(), inBody)
+	require.NoError(t, err)
+	require.NotNil(t, res.DynamicMetadata,
+		"primary leg must emit cost metadata even when a mirror is configured on the rule")
+	require.Equal(t, float64(123), res.DynamicMetadata.Fields[internalapi.AIGatewayFilterMetadataNamespace].
+		GetStructValue().Fields["output_token_usage"].GetNumberValue())
 }
 
 // Test_chatCompletionProcessorUpstreamFilter_SetBackend_unsupportedSchema_noResponsePanic
@@ -1970,11 +2273,67 @@ func TestChatCompletionProcessorUpstreamFilter_ProcessRequestHeaders_WithBodyMut
 }
 
 func Test_buildDynamicMetadata(t *testing.T) {
+	t.Run("cost on an admission reserve is charged the remainder", func(t *testing.T) {
+		costs := &metrics.TokenUsage{}
+		costs.SetInputTokens(100)
+		costs.SetTotalTokens(100)
+		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
+		newCost := func(key, reserveKey string) filterapi.RuntimeRequestCost {
+			return filterapi.RuntimeRequestCost{LLMRequestCost: &filterapi.LLMRequestCost{
+				MetadataKey: key, RouteName: "ns/route", Type: filterapi.LLMRequestCostTypeInputToken, AdmissionReserveMetadataKey: reserveKey,
+			}}
+		}
+		requestCosts := []filterapi.RuntimeRequestCost{
+			newCost("partly_reserved", "reserve_a"),
+			newCost("over_reserved", "reserve_b"),
+			newCost("not_reserved", ""),
+		}
+		md, err := buildDynamicMetadata(nil, requestCosts, costs, headers, "", "ns/route", "",
+			map[string]uint64{"reserve_a": 30, "reserve_b": 150})
+		require.NoError(t, err)
+		inner := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.Equal(t, 70.0, inner.Fields["partly_reserved"].GetNumberValue())
+		require.Equal(t, 0.0, inner.Fields["over_reserved"].GetNumberValue())
+		require.Equal(t, 100.0, inner.Fields["not_reserved"].GetNumberValue())
+	})
+
+	t.Run("cost on an admission reserve settles the part the reserve covers", func(t *testing.T) {
+		costs := &metrics.TokenUsage{}
+		costs.SetInputTokens(100)
+		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
+		newCost := func(key, reserveKey, settleKey string) filterapi.RuntimeRequestCost {
+			return filterapi.RuntimeRequestCost{LLMRequestCost: &filterapi.LLMRequestCost{
+				MetadataKey: key, RouteName: "ns/route", Type: filterapi.LLMRequestCostTypeInputToken,
+				AdmissionReserveMetadataKey: reserveKey, AdmissionSettleMetadataKey: settleKey,
+			}}
+		}
+		requestCosts := []filterapi.RuntimeRequestCost{
+			newCost("partly_reserved", "reserve_a", "settle_a"),
+			newCost("over_reserved", "reserve_b", "settle_b"),
+			newCost("not_reserved", "", ""),
+		}
+		md, err := buildDynamicMetadata(nil, requestCosts, costs, headers, "", "ns/route", "",
+			map[string]uint64{"reserve_a": 30, "reserve_b": 150})
+		require.NoError(t, err)
+		inner := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.Equal(t, 30.0, inner.Fields["settle_a"].GetNumberValue())
+		require.Equal(t, 100.0, inner.Fields["settle_b"].GetNumberValue())
+
+		// A request that reserved nothing at admission, such as one to a
+		// token-counting endpoint, has nothing to settle.
+		md, err = buildDynamicMetadata(nil, requestCosts, costs, headers, "", "ns/route", "", nil)
+		require.NoError(t, err)
+		inner = md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.Equal(t, 100.0, inner.Fields["partly_reserved"].GetNumberValue())
+		require.NotContains(t, inner.Fields, "settle_a")
+		require.NotContains(t, inner.Fields, "settle_b")
+	})
+
 	t.Run("sets model_name_override from request headers", func(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -1987,7 +2346,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		// After backend override, the header contains the backend-specific model name.
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "us.anthropic.claude-sonnet-4.5-v2"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "default/my-backend", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "default/my-backend", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -1999,7 +2358,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "ns/backend-a", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "ns/backend-a", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2012,7 +2371,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "gpt-4"}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2032,7 +2391,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs.SetInputTokens(50)
 		headers := map[string]string{internalapi.ModelNameHeaderKeyDefault: "claude-sonnet"}
 
-		md, err := buildDynamicMetadata(nil, config.RequestCosts, costs, headers, "default/backend", "", "")
+		md, err := buildDynamicMetadata(nil, config.RequestCosts, costs, headers, "default/backend", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2047,7 +2406,7 @@ func Test_buildDynamicMetadata(t *testing.T) {
 		costs := &metrics.TokenUsage{}
 		headers := map[string]string{}
 
-		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "")
+		md, err := buildDynamicMetadata(nil, []filterapi.RuntimeRequestCost{}, costs, headers, "", "", "", nil)
 		require.NoError(t, err)
 		require.NotNil(t, md)
 
@@ -2256,6 +2615,65 @@ func Test_transcriptionProcessorUpstreamFilter_SetBackend_ContentTypeSetter(t *t
 	require.NotNil(t, r.upstreamFilter)
 }
 
+func TestBuildErrorDynamicMetadata(t *testing.T) {
+	hdr := map[string]string{internalapi.ModelNameHeaderKeyDefault: "m"}
+
+	tests := []struct {
+		name        string
+		errInfo     translator.LLMErrorInfo
+		statusCode  int
+		backendName string
+		routeName   string
+		wantType    string
+		wantCode    string
+		wantAbsent  []string
+		wantPresent map[string]string
+	}{
+		{
+			name:        "structured type and code",
+			errInfo:     translator.LLMErrorInfo{Type: "rate_limit_error", Code: "context_length_exceeded"},
+			statusCode:  429,
+			backendName: "be",
+			routeName:   "ns/route",
+			wantType:    "rate_limit_error",
+			wantCode:    "context_length_exceeded",
+			wantPresent: map[string]string{"backend_name": "be", "route_name": "ns/route", "model_name_override": "m"},
+		},
+		{
+			name:       "fallback type and code",
+			errInfo:    translator.LLMErrorInfo{},
+			statusCode: 500,
+			wantType:   "upstream_error",
+			wantCode:   "500",
+			wantAbsent: []string{"backend_name", "route_name"},
+		},
+		{
+			name:       "type present code falls back to status",
+			errInfo:    translator.LLMErrorInfo{Type: "ThrottlingException"},
+			statusCode: 503,
+			wantType:   "ThrottlingException",
+			wantCode:   "503",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			md := buildErrorDynamicMetadata(tt.errInfo, tt.statusCode, hdr, tt.backendName, tt.routeName)
+			require.NotNil(t, md)
+			ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
+			require.Equal(t, tt.wantType, ns["llm_error_type"].GetStringValue())
+			require.Equal(t, tt.wantCode, ns["llm_error_code"].GetStringValue())
+			for k, want := range tt.wantPresent {
+				require.Equal(t, want, ns[k].GetStringValue(), "key %q", k)
+			}
+			for _, k := range tt.wantAbsent {
+				_, exists := ns[k]
+				require.False(t, exists, "key %q should be absent", k)
+			}
+		})
+	}
+}
+
 func TestBuildDynamicMetadata_routeScoped(t *testing.T) {
 	hdr := map[string]string{internalapi.ModelNameHeaderKeyDefault: "m"}
 
@@ -2326,7 +2744,7 @@ func TestBuildDynamicMetadata_routeScoped(t *testing.T) {
 			tu.SetInputTokens(tt.inputTokens)
 			tu.SetTotalTokens(tt.totalTokens)
 
-			md, err := buildDynamicMetadata(nil, tt.requestCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "")
+			md, err := buildDynamicMetadata(nil, tt.requestCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "", nil)
 			require.NoError(t, err)
 
 			ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
@@ -2495,7 +2913,7 @@ func TestBuildDynamicMetadata_GlobalAndRouteScoped(t *testing.T) {
 			tu.SetOutputTokens(tt.outputTokens)
 			tu.SetTotalTokens(tt.totalTokens)
 
-			md, err := buildDynamicMetadata(tt.globalCosts, tt.routeCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "")
+			md, err := buildDynamicMetadata(tt.globalCosts, tt.routeCosts, &tu, tt.requestHeaders, tt.backendName, tt.routeName, "", nil)
 			require.NoError(t, err)
 
 			ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().Fields
@@ -2516,4 +2934,114 @@ func mustCompileCEL(t *testing.T, expr string) cel.Program {
 	prog, err := llmcostcel.NewProgram(expr)
 	require.NoError(t, err)
 	return prog
+}
+
+// The content_length metadata must be a string: the header_mutation filter renders it
+// verbatim into the content-length header, and Envoy renders NumberValue doubles in
+// shortest form (100000 -> "1e+05"), an invalid Content-Length that strict HTTP/2
+// peers reject with http2.invalid.header.field.
+func TestBuildContentLengthDynamicMetadataOnRequest_rendersDigits(t *testing.T) {
+	for _, contentLength := range []int{0, 99999, 100000, 1000000, 123456789} {
+		md := buildContentLengthDynamicMetadataOnRequest(contentLength)
+		ns := md.Fields[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue()
+		require.NotNil(t, ns)
+		v := ns.Fields["content_length"]
+		require.NotNil(t, v)
+		require.Equal(t, strconv.Itoa(contentLength), v.GetStringValue())
+	}
+}
+
+// Test_messagesProcessor_ToolsDigestDynamicMetadata walks the whole path the
+// diagnostic takes: the router filter fingerprints the tools while parsing the
+// body, and the upstream filter emits that fingerprint as dynamic metadata for
+// the access log.
+func Test_messagesProcessor_ToolsDigestDynamicMetadata(t *testing.T) {
+	toolsFields := func(t *testing.T, rawBody []byte) map[string]*structpb.Value {
+		t.Helper()
+		headers := map[string]string{
+			":path":                               "/v1/messages",
+			internalapi.ModelNameHeaderKeyDefault: "claude-3",
+		}
+		r := &messagesProcessorRouterFilter{
+			eh:             endpointspec.MessagesEndpointSpec{},
+			config:         &filterapi.RuntimeConfig{},
+			requestHeaders: headers,
+			logger:         slog.Default(),
+			tracer: tracingapi.NoopTracer[anthropicschema.MessagesRequest,
+				anthropicschema.MessagesResponse, anthropicschema.MessagesStreamChunk]{},
+		}
+		_, err := r.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: rawBody})
+		require.NoError(t, err)
+
+		p := &messagesProcessorUpstreamFilter{requestHeaders: headers, metrics: &mockMetrics{}}
+		require.NoError(t, p.SetBackend(t.Context(), &filterapi.RuntimeBackend{
+			Backend: &filterapi.Backend{
+				Name:   "vllm",
+				Schema: filterapi.VersionedAPISchema{Name: filterapi.APISchemaOpenAI},
+			},
+		}, "test-route", r))
+
+		resp, err := p.ProcessRequestHeaders(t.Context(), nil)
+		require.NoError(t, err)
+		return resp.DynamicMetadata.
+			GetFields()[internalapi.AIGatewayFilterMetadataNamespace].GetStructValue().GetFields()
+	}
+
+	const tool = `{"type":"custom","name":%q,"description":"d",` +
+		`"input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}`
+	requestWith := func(names ...string) []byte {
+		tools := make([]string, 0, len(names))
+		for _, n := range names {
+			tools = append(tools, fmt.Sprintf(tool, n))
+		}
+		return []byte(`{"model":"claude-3","max_tokens":10,` +
+			`"messages":[{"role":"user","content":"hi"}],` +
+			`"tools":[` + strings.Join(tools, ",") + `]}`)
+	}
+
+	t.Run("emitted alongside the existing metadata", func(t *testing.T) {
+		fields := toolsFields(t, requestWith("Write", "Read"))
+		require.Equal(t, "2", fields["tools_count"].GetStringValue())
+		require.Equal(t, "0", fields["tools_dropped"].GetStringValue())
+		require.Len(t, fields["tools_fp"].GetStringValue(), contentHashLen)
+		// The pre-existing backend metadata must survive the merge.
+		require.Equal(t, "vllm", fields["backend_name"].GetStringValue())
+	})
+
+	t.Run("appending a tool leaves the prefix identifiable", func(t *testing.T) {
+		before := toolsFields(t, requestWith("Write", "Read"))
+		after := toolsFields(t, requestWith("Write", "Read", "Bash"))
+
+		require.Equal(t, "3", after["tools_count"].GetStringValue())
+		require.NotEqual(t, before["tools_fp"].GetStringValue(), after["tools_fp"].GetStringValue())
+		// This equality is what tells an operator "the client appended, nothing
+		// else moved" rather than "something rewrote the tool set".
+		require.Equal(t, before["tools_fp"].GetStringValue(), after["tools_prefix_fp"].GetStringValue())
+	})
+
+	t.Run("a request without tools reports zero, not absent", func(t *testing.T) {
+		fields := toolsFields(t, []byte(`{"model":"claude-3","max_tokens":10,`+
+			`"messages":[{"role":"user","content":"hi"}]}`))
+		require.Equal(t, "0", fields["tools_count"].GetStringValue())
+		require.NotContains(t, fields, "tools_fp")
+	})
+}
+
+// Test_chatCompletionProcessor_NoToolsDigestDynamicMetadata pins that the digest
+// is a no-op for endpoints it does not apply to: the type assertion in the router
+// filter must not fire, and no tools_* fields may appear.
+func Test_chatCompletionProcessor_NoToolsDigestDynamicMetadata(t *testing.T) {
+	headers := map[string]string{":path": "/v1/chat/completions", internalapi.ModelNameHeaderKeyDefault: "some-model"}
+	r := &chatCompletionProcessorRouterFilter{
+		config:         &filterapi.RuntimeConfig{},
+		requestHeaders: headers,
+		logger:         slog.Default(),
+		tracer: tracingapi.NoopTracer[openai.ChatCompletionRequest,
+			openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+	}
+	_, err := r.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, "some-model", false, nil)})
+	require.NoError(t, err)
+
+	require.False(t, r.toolsDigest.present)
+	require.Nil(t, buildToolsDigestDynamicMetadata(r.toolsDigest))
 }

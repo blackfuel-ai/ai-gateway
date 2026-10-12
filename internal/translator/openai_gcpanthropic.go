@@ -102,7 +102,7 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) RequestBody(_ []byte, o
 
 // ResponseError implements [OpenAIChatCompletionTranslator.ResponseError].
 func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
 	var openaiError openai.Error
@@ -113,7 +113,7 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseError(respHeade
 		var gcpError anthropic.ErrorResponse
 		if decodeErr = json.NewDecoder(body).Decode(&gcpError); decodeErr != nil {
 			// If we expect JSON but fail to decode, it's an internal translator error.
-			return nil, nil, fmt.Errorf("failed to unmarshal JSON error body: %w", decodeErr)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to unmarshal JSON error body: %w", decodeErr)
 		}
 		openaiError = openai.Error{
 			Type: "error",
@@ -128,7 +128,7 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseError(respHeade
 		var buf []byte
 		buf, decodeErr = io.ReadAll(body)
 		if decodeErr != nil {
-			return nil, nil, fmt.Errorf("failed to read raw error body: %w", decodeErr)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read raw error body: %w", decodeErr)
 		}
 		openaiError = openai.Error{
 			Type: "error",
@@ -144,12 +144,13 @@ func (o *openAIToGCPAnthropicTranslatorV1ChatCompletion) ResponseError(respHeade
 	newBody, err = json.Marshal(openaiError)
 	if err != nil {
 		// This is an internal failure to create the response.
-		return nil, nil, fmt.Errorf("failed to marshal OpenAI error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal OpenAI error body: %w", err)
 	}
 	newHeaders = []internalapi.Header{
 		{contentTypeHeaderName, jsonContentType},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
 	}
+	errInfo = LLMErrorInfo{Type: openaiError.Error.Type}
 	return
 }
 

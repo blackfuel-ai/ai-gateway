@@ -95,8 +95,8 @@ func (t *countTokensToGCPAnthropicTranslator) ResponseBody(_ map[string]string, 
 
 // ResponseError implements [AnthropicCountTokensTranslator.ResponseError].
 func (t *countTokensToGCPAnthropicTranslator) ResponseError(_ map[string]string, _ io.Reader) (
-	newHeaders []internalapi.Header, mutatedBody []byte, err error,
+	newHeaders []internalapi.Header, mutatedBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	// GCP Vertex AI returns errors in Anthropic format when proxying to Anthropic models.
-	return nil, nil, nil
+	return nil, nil, LLMErrorInfo{}, nil
 }

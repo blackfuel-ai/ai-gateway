@@ -343,7 +343,7 @@ func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) bedrockToolUseToOpenAICal
 // The error type is stored in the "x-amzn-errortype" HTTP header for AWS error responses.
 // If AWS Bedrock connection fails the error body is translated to OpenAI error type for events such as HTTP 503 or 504.
 func (o *openAIToAWSBedrockTranslatorV1ChatCompletion) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	return bedrockResponseError(respHeaders, body)
 }

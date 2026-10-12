@@ -346,7 +346,7 @@ func TestOpenAIToOpenAITranslatorV1CompletionResponseError(t *testing.T) {
 		}
 		errorBody := `{"error": {"message": "Invalid prompt", "type": "InvalidRequestError", "param": "prompt", "code": null}}`
 
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.Nil(t, bodyMutation)
 		require.Nil(t, headerMutation)
@@ -359,7 +359,7 @@ func TestOpenAIToOpenAITranslatorV1CompletionResponseError(t *testing.T) {
 		}
 		errorBody := "Service Unavailable"
 
-		headerMutation, bodyMutation, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
+		headerMutation, bodyMutation, _, err := translator.ResponseError(respHeaders, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.Nil(t, headerMutation)
 		require.Nil(t, bodyMutation)

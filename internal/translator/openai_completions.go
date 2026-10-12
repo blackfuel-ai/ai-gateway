@@ -11,6 +11,7 @@ import (
 	"io"
 	"path"
 	"strconv"
+	"strings"
 
 	"github.com/tidwall/sjson"
 
@@ -196,8 +197,17 @@ func (o *openAIToOpenAITranslatorV1Completion) extractUsageFromBufferEvent(span 
 }
 
 // ResponseError implements [OpenAICompletionTranslator.ResponseError].
-func (o *openAIToOpenAITranslatorV1Completion) ResponseError(map[string]string, io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+// The error body is passed through unchanged; we only best-effort extract the
+// OpenAI error classification for error metadata.
+func (o *openAIToOpenAITranslatorV1Completion) ResponseError(respHeaders map[string]string, body io.Reader) (
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
+	if strings.Contains(respHeaders[contentTypeHeaderName], jsonContentType) {
+		buf, readErr := io.ReadAll(body)
+		if readErr != nil {
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", readErr)
+		}
+		errInfo = extractOpenAIErrorInfo(buf)
+	}
 	return
 }

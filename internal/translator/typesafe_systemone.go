@@ -120,27 +120,35 @@ func systemOneErrorType(status string) string {
 // JSON error bodies are passed through untouched so the TypeSafe SDK error
 // classes keep working. A non-JSON body is wrapped into the TypeSafe error shape.
 func (t *typeSafeToTypeSafeTranslatorSystemOne) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
+	}
 	if v, ok := respHeaders[contentTypeHeaderName]; ok && !strings.Contains(v, jsonContentType) {
-		buf, err := io.ReadAll(body)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
-		}
+		errorType := systemOneErrorType(respHeaders[statusHeaderName])
 		typesafeErr := typesafeschema.SystemOneError{
 			Detail: typesafeschema.SystemOneErrorDetail{
-				ErrorType: systemOneErrorType(respHeaders[statusHeaderName]),
+				ErrorType: errorType,
 				Message:   string(buf),
 			},
 		}
 		newBody, err = json.Marshal(typesafeErr)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 		}
 		newHeaders = append(newHeaders,
 			internalapi.Header{contentTypeHeaderName, jsonContentType},
 			internalapi.Header{contentLengthHeaderName, strconv.Itoa(len(newBody))},
 		)
+		return newHeaders, newBody, LLMErrorInfo{Type: errorType}, nil
 	}
-	return
+	// JSON error: pass the upstream body through unchanged (nil newBody), but
+	// best-effort extract the classification for error metadata.
+	var typesafeErr typesafeschema.SystemOneError
+	if json.Unmarshal(buf, &typesafeErr) == nil {
+		errInfo.Type = typesafeErr.Detail.ErrorType
+	}
+	return nil, nil, errInfo, nil
 }

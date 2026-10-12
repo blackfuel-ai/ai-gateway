@@ -93,6 +93,10 @@ controller:
   quotaRateLimitTimeout: 5
   # If true, requests are denied when the quota rate limit service is unavailable.
   quotaRateLimitFailureModeDeny: false
+  # If true, QuotaPolicy admission reserves are released at stream end, as negative
+  # hits, and the serving counter is charged the whole cost. The quota rate limit
+  # service must apply negative hits (envoyproxy/ratelimit is_negative_hits support).
+  quotaReleaseAdmissionReserves: false
 
   # Comma-separated key-value pairs for mapping HTTP request headers to Otel attributes shared across metrics, spans, and access logs.
   # Format: "header1:attribute1,header2:attribute2"

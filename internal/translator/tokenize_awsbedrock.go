@@ -179,7 +179,7 @@ func (o *ToAWSBedrockV1Tokenize) RequestBody(_ []byte, tokenizeReq *tokenize.Req
 // ResponseError implements [TokenizeTranslator.ResponseError] for AWS Bedrock.
 // Translate AWS Bedrock exceptions to OpenAI error type.
 func (o *ToAWSBedrockV1Tokenize) ResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	return bedrockResponseError(respHeaders, body)
 }

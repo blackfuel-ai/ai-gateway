@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -40,6 +41,10 @@ func failIf5xx(t *testing.T, resp *http.Response, was5xx *bool) {
 	}
 }
 
+// dataPlaneUsageEstimatePeriod is the usage estimate period of the data plane tests,
+// the shortest the GatewayConfig accepts, to keep the wait for a period to complete short.
+const dataPlaneUsageEstimatePeriod = 5 * time.Second
+
 // TestWithTestUpstream tests the end-to-end flow of the external processor with Envoy and the test upstream.
 //
 // This does not require any environment variables to be set as it relies on the test upstream.
@@ -53,10 +58,18 @@ func TestWithTestUpstream(t *testing.T) {
 
 	config := &filterapi.Config{
 		Version: version.Parse(),
+		// Emit error dynamic metadata for non-2xx upstream responses.
+		EmitErrorMetadata: true,
 		// Dataplane Envoy does not set per-route xDS route_name metadata; use gateway defaults so costs still emit.
 		GlobalLLMRequestCosts: []filterapi.GlobalLLMRequestCost{
 			{MetadataKey: "used_token", Type: filterapi.LLMRequestCostTypeInputToken},
 		},
+		UsageEstimates: []filterapi.UsageEstimate{
+			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-usage-estimate-key"},
+			{MetadataKey: "estimated_input_token_input_tokens_per_byte", CEL: "input_tokens_per_byte", ByHeader: "x-usage-estimate-key"},
+			{MetadataKey: "estimated_input_token_cache_rate", CEL: "cache_rate", ByHeader: "x-usage-estimate-key"},
+		},
+		UsageEstimatePeriod: dataPlaneUsageEstimatePeriod,
 		Backends: []filterapi.Backend{
 			alwaysFailingBackend,
 			testUpstreamOpenAIBackend,
@@ -353,6 +366,28 @@ func TestWithTestUpstream(t *testing.T) {
 			responseBody:    `{"choices":[{"message":{"content":"This is a test."}}]}`,
 			expStatus:       http.StatusOK,
 			expResponseBody: `{"choices":[{"message":{"content":"This is a test."}}]}`,
+		},
+		{
+			// BLA-2364/BLA-3677: an Anthropic /v1/messages request to an OpenAI backend is
+			// translated to /v1/chat/completions on :path only. The x-ai-eg-original-path
+			// header keeps the client's original path: processor selection never reads it
+			// (the upstream processor is derived from the router entry, see
+			// internal/extproc/server.go), and access logs rely on it to report what the
+			// client actually requested.
+			name:        "anthropic /anthropic/v1/messages to openai backend preserves original path",
+			backend:     "openai",
+			path:        "/anthropic/v1/messages",
+			method:      http.MethodPost,
+			requestBody: `{"model":"something","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}`,
+			expPath:     "/v1/chat/completions",
+			expRequestHeaders: map[string]string{
+				"x-ai-eg-original-path": "/anthropic/v1/messages",
+			},
+			responseBody: `{"id":"chatcmpl-x","object":"chat.completion","created":123,"model":"something","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hi there"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			expStatus:    http.StatusOK,
+			expResponseBodyFunc: func(t require.TestingT, body []byte) {
+				require.Contains(t, string(body), "Hi there")
+			},
 		},
 		{
 			name:            "openai - /v1/chat/completions - gzip",
@@ -1618,6 +1653,80 @@ data: {"type":"message_stop"}`,
 			}
 		})
 	}
+
+	// The error subtests above (e.g. the aws-bedrock 429) should have caused the filter to emit
+	// llm_error_type/llm_error_code dynamic metadata, which envoy.yaml logs in the access log.
+	t.Run("check-error-metadata-access-log", func(t *testing.T) {
+		require.Eventually(t, func() bool {
+			accessLog := env.EnvoyStdout()
+			type lineFormat struct {
+				LLMErrorType string `json:"llm_error_type,omitempty"`
+				LLMErrorCode string `json:"llm_error_code,omitempty"`
+			}
+			for _, line := range strings.Split(accessLog, "\n") {
+				if line == "" {
+					continue
+				}
+				var l lineFormat
+				if err := json.Unmarshal([]byte(line), &l); err != nil {
+					continue
+				}
+				if l.LLMErrorType == "ThrottledException" && l.LLMErrorCode == "429" {
+					return true
+				}
+			}
+			return false
+		}, eventuallyTimeout, eventuallyInterval)
+	})
+
+	// A request is estimated from the responses of the same x-usage-estimate-key and model
+	// completed in the previous period, and the estimate is logged from the
+	// dynamic metadata.
+	t.Run("usage-estimate-access-log", func(t *testing.T) {
+		const requestBody = `{"model":"something","messages":[{"role":"user","content":"usage estimate"}]}`
+		const responseBody = `{"choices":[{"message":{"content":"This is a test."}}],"usage":{"prompt_tokens":40,"completion_tokens":5,"total_tokens":45,"prompt_tokens_details":{"cached_tokens":10}}}`
+		send := func() {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+				fmt.Sprintf("http://localhost:%d/v1/chat/completions", listenerPort), strings.NewReader(requestBody))
+			require.NoError(t, err)
+			req.Header.Set("x-test-backend", "openai")
+			req.Header.Set("x-usage-estimate-key", "data-plane-estimate")
+			req.Header.Set(testupstreamlib.ResponseBodyHeaderKey, base64.StdEncoding.EncodeToString([]byte(responseBody)))
+			req.Header.Set(testupstreamlib.ExpectedPathHeaderKey, base64.StdEncoding.EncodeToString([]byte("/v1/chat/completions")))
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+			_, err = io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+		send()
+		// The first response is exposed once its period is over.
+		time.Sleep(time.Until(time.Now().Truncate(dataPlaneUsageEstimatePeriod).Add(dataPlaneUsageEstimatePeriod)))
+		send()
+
+		require.Eventually(t, func() bool {
+			type lineFormat struct {
+				Estimate      *float64 `json:"estimated_input_token"`
+				TokensPerByte *float64 `json:"estimated_input_token_input_tokens_per_byte"`
+				CacheRate     *float64 `json:"estimated_input_token_cache_rate"`
+			}
+			for _, line := range strings.Split(env.EnvoyStdout(), "\n") {
+				var l lineFormat
+				if json.Unmarshal([]byte(line), &l) != nil || l.Estimate == nil || l.TokensPerByte == nil || l.CacheRate == nil {
+					continue
+				}
+				// Same body, so the estimate is the input tokens of the first response,
+				// and the measured ratios are those of that response: 40 input tokens
+				// over the body size, 10 of them cached.
+				if *l.Estimate == 40 &&
+					math.Abs(*l.TokensPerByte-40/float64(len(requestBody))) < 1e-9 && math.Abs(*l.CacheRate-0.25) < 1e-9 {
+					return true
+				}
+			}
+			return false
+		}, eventuallyTimeout, eventuallyInterval)
+	})
 
 	t.Run("stream non blocking", func(t *testing.T) {
 		if was5xx {

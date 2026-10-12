@@ -46,7 +46,7 @@ type QuotaPolicySpec struct {
 	// TODO: Add changes in the extension server to support ServiceQuota enforcement.
 	//
 	// +optional
-	ServiceQuota ServiceQuotaDefinition `json:"serviceQuota,omitempty"`
+	ServiceQuota *ServiceQuotaDefinition `json:"serviceQuota,omitempty"`
 	// PerModelQuotas specifies quota for different models served by the AIServiceBackend(s) where this
 	// policy is attached.
 	//
@@ -59,6 +59,8 @@ type QuotaPolicySpec struct {
 	PerModelQuotas []PerModelQuota `json:"perModelQuotas,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.quota.dynamicOverride)",message="serviceQuota does not support dynamicOverride"
+// +kubebuilder:validation:XValidation:rule="!has(self.quota.admissionReserve)",message="serviceQuota does not support admissionReserve"
 type ServiceQuotaDefinition struct {
 	// CostExpression specifies a CEL expression for computing the quota burndown of the LLM-related request.
 	// If no expression is specified the "total_tokens" value is used.
@@ -111,7 +113,7 @@ type QuotaDefinition struct {
 	// using the "BucketRules" configuration.
 	//
 	// +optional
-	DefaultBucket QuotaValue `json:"defaultBucket"`
+	DefaultBucket *QuotaValue `json:"defaultBucket,omitempty"`
 	// BucketRules are a list of client selectors and quotas. If a request
 	// matches multiple rules, each of their associated quotas get applied, so a
 	// single request might burn down the quota for multiple rules.
@@ -133,6 +135,8 @@ const (
 	QuotaBucketModeShared QuotaBucketMode = "Shared"
 )
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.dynamicOverride))",message="dynamicOverride cannot be combined with shadowMode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.shadowMode) && self.shadowMode && has(self.quota.admissionReserve))",message="admissionReserve cannot be combined with shadowMode"
 type QuotaRule struct {
 	// ClientSelectors holds the list of conditions to select
 	// specific clients using attributes from the traffic flow.
@@ -162,6 +166,9 @@ type QuotaRule struct {
 }
 
 // QuotaValue defines the quota limits using sliding window.
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.costExpression) && has(self.costMetric) && self.costMetric == 'Requests')",message="costExpression cannot be combined with costMetric=Requests"
+// +kubebuilder:validation:XValidation:rule="!(has(self.admissionReserve) && has(self.costMetric) && self.costMetric == 'Requests')",message="admissionReserve cannot be combined with costMetric=Requests"
 type QuotaValue struct {
 	// The limit alloted for a specified time window.
 	Limit uint `json:"limit"`
@@ -169,6 +176,107 @@ type QuotaValue struct {
 	//
 	// +kubebuilder:validation:Enum="1s";"1m";"1h";"1d"
 	Duration string `json:"duration"`
+	// DynamicOverride supplies the limit at request time, falling back to Limit
+	// when the source is absent or malformed. The time window is always Duration.
+	//
+	// +optional
+	DynamicOverride *QuotaLimitOverride `json:"dynamicOverride,omitempty"`
+	// CostMetric selects what this bucket counts. "Tokens" (the default) burns
+	// the bucket down at stream-done by CostExpression (or the model-level
+	// fallback). "Requests" burns the bucket down by exactly 1 per request at
+	// request time and adds no stream-done token charge.
+	//
+	// +optional
+	// +kubebuilder:default=Tokens
+	CostMetric QuotaCostMetric `json:"costMetric,omitempty"`
+	// CostExpression is a per-bucket CEL expression for computing this bucket's
+	// quota burndown. When unset, the model-level CostExpression applies, then
+	// "total_tokens". Ignored when CostMetric is "Requests".
+	//
+	// +optional
+	CostExpression *string `json:"costExpression,omitempty"`
+	// AdmissionReserve charges an estimate of the request's cost to the bucket
+	// when the request is admitted, so requests in flight count against the
+	// limit. Without it the whole cost is charged at stream completion.
+	//
+	// +optional
+	AdmissionReserve *QuotaAdmissionReserve `json:"admissionReserve,omitempty"`
+}
+
+// QuotaAdmissionReserve configures the charge a token bucket takes when a
+// request is admitted.
+//
+// The reserve is Percent of a usage estimate the gateway computes at admission:
+// the GatewayConfig usageEstimates item whose metadataKey is UsageEstimate,
+// rounded to the nearest integer. A request with no estimate (no usage estimate
+// header, or no successful response in the estimate's last completed period)
+// reserves nothing.
+//
+// When the request is admitted, the reserve is charged to the bucket of every
+// backend and model the policy targets on the route, in the current time
+// window. When the controller runs with quotaReleaseAdmissionReserves, the
+// reserve is released from each of these buckets when the request's stream
+// ends, whatever its outcome, and a successful response charges its actual cost
+// to the bucket of the backend and model that served it, as soon as the
+// response reports usage: a request that fails before reporting usage keeps no
+// token charge, and a stream aborted after reporting usage keeps the charge of
+// the usage reported so far. The release is applied in the time
+// window the stream ends in, floored at 0, so over consecutive windows a bucket
+// is charged the actual cost, with a request's reserve counted in the window it
+// was admitted in. The release is sent as negative hits, which the quota rate
+// limit service must apply.
+//
+// Without quotaReleaseAdmissionReserves, a reserve is never released: a
+// successful response charges the bucket of the backend and model that served
+// it the actual cost minus the reserve, or nothing when the reserve covers it,
+// and a request that fails keeps the reserve it was charged.
+//
+// The usage estimate's CEL expression must compute the same quantity as the
+// bucket's cost expression, for example "input_tokens - cached_input_tokens" on
+// both, so that the reserve and the cost are in the same unit.
+type QuotaAdmissionReserve struct {
+	// UsageEstimate is the metadataKey of the GatewayConfig usageEstimates item
+	// the reserve is computed from. The GatewayConfig of every Gateway serving
+	// the targeted backends must declare it; otherwise the controller stops
+	// updating that gateway's filter configuration, which keeps serving the last
+	// valid one, until it does.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	UsageEstimate string `json:"usageEstimate"`
+	// Percent of the usage estimate charged at admission. Below the actual
+	// cost, requests in flight are partly uncounted; above it, the difference
+	// is held until the reserve is released, or stays charged when reserves
+	// are not released.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	Percent uint32 `json:"percent"`
+}
+
+// QuotaCostMetric selects whether a bucket counts tokens (stream-done charge)
+// or requests (request-time +1 only).
+//
+// +kubebuilder:validation:Enum=Tokens;Requests
+type QuotaCostMetric string
+
+const (
+	QuotaCostMetricTokens   QuotaCostMetric = "Tokens"
+	QuotaCostMetricRequests QuotaCostMetric = "Requests"
+)
+
+// QuotaLimitOverride specifies a per-request source for the quota limit value.
+type QuotaLimitOverride struct {
+	// FromHeader names a request header whose value is a non-negative integer limit
+	// for the current time window. A value of 0 blocks all matching requests.
+	// The header must be set or overwritten by a trusted component
+	// (e.g. an external authorization service) and never accepted from clients.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	FromHeader string `json:"fromHeader"`
 }
 
 // QuotaPolicyList contains a list of QuotaPolicy

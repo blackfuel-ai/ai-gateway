@@ -613,14 +613,18 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [MCPToolFilter](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcptoolfilter)
 - [PerModelQuota](#github-com-envoyproxy-ai-gateway-api-v1alpha1-permodelquota)
 - [ProtectedResourceMetadata](#github-com-envoyproxy-ai-gateway-api-v1alpha1-protectedresourcemetadata)
+- [QuotaAdmissionReserve](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotaadmissionreserve)
 - [QuotaBucketMode](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotabucketmode)
+- [QuotaCostMetric](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric)
 - [QuotaDefinition](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotadefinition)
+- [QuotaLimitOverride](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride)
 - [QuotaPolicySpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotapolicyspec)
 - [QuotaPolicyStatus](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotapolicystatus)
 - [QuotaRule](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotarule)
 - [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
 - [ServiceQuotaDefinition](#github-com-envoyproxy-ai-gateway-api-v1alpha1-servicequotadefinition)
 - [ToolCall](#github-com-envoyproxy-ai-gateway-api-v1alpha1-toolcall)
+- [UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate)
 - [VersionedAPISchema](#github-com-envoyproxy-ai-gateway-api-v1alpha1-versionedapischema)
 
 ### Type Definitions
@@ -1566,6 +1570,21 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   type="[GatewayConfigForwardProxy](#github-com-envoyproxy-ai-gateway-api-v1alpha1-gatewayconfigforwardproxy)"
   required="false"
   description="ForwardProxy routes all upstream AI/LLM traffic from Gateways referencing this<br />GatewayConfig through an HTTP CONNECT forward proxy. This is intended for data planes<br />in locked-down networks where direct egress to providers is not permitted and all<br />outbound traffic must traverse a proxy."
+/><ApiField
+  name="emitErrorMetadata"
+  type="boolean"
+  required="false"
+  description="EmitErrorMetadata enables emission of Envoy dynamic metadata describing upstream<br />LLM error responses (non-2xx). When enabled, the AI Gateway filter sets<br />`llm_error_type` and `llm_error_code` (falling back to the HTTP status code when the<br />provider reports no code), along with `backend_name`, `route_name`, and<br />`model_name_override`, under the `io.envoy.ai_gateway` metadata namespace.<br />These can be referenced in access logs via<br />%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.<br />This applies only to errors returned by the upstream LLM provider. Errors generated<br />before backend selection (e.g. an unknown model) do not carry this metadata.<br />Defaults to false."
+/><ApiField
+  name="usageEstimates"
+  type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate) array"
+  required="false"
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace, and as a request header sent upstream for an<br />item with EmitHeader.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
+/><ApiField
+  name="usageEstimatePeriod"
+  type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
+  required="false"
+  description="UsageEstimatePeriod is the length of the periods UsageEstimates accumulates<br />completed requests over. Periods are aligned on the clock, and a request is<br />estimated from the last completed one. A longer period gathers more responses<br />per estimate and leaves fewer clients without one, but follows a change in a<br />client's requests more slowly. Changing it starts every estimate over.<br />Defaults to 60s."
 />
 
 
@@ -1640,6 +1659,11 @@ HTTPBodyMutation defines the mutation of HTTP request body JSON fields that will
   type="string array"
   required="false"
   description="Remove the given JSON field(s) from the HTTP request body before sending to the backend.<br />The value of Remove is a list of top-level field names to remove.<br />Input:<br />  \{<br />    `model`: `gpt-4`,<br />    `service_tier`: `default`,<br />    `internal_flag`: true<br />  \}<br />Config:<br />  remove: [`service_tier`, `internal_flag`]<br />Output:<br />  \{<br />    `model`: `gpt-4`<br />  \}"
+/><ApiField
+  name="setDefault"
+  type="[HTTPBodyField](#github-com-envoyproxy-ai-gateway-api-v1alpha1-httpbodyfield) array"
+  required="false"
+  description="SetDefault sets the given JSON field (name, value) only when the field is<br />not already defined in the request body. Only top-level fields are<br />currently supported. The presence check is path-existence: an explicit<br />null from the client is considered `defined` and suppresses the default.<br />When the same path is targeted by both Set and SetDefault, Set wins —<br />SetDefault is applied after Set/Remove and only fills paths that are<br />still absent at that point. Route-level SetDefault entries override<br />backend-level entries for the same path.<br />Input:<br />  \{<br />    `model`: `gpt-4`<br />  \}<br />Config:<br />  setDefault:<br />  - path: `reasoning_effort`<br />    value: `\`none\``<br />Output:<br />  \{<br />    `model`: `gpt-4`,<br />    `reasoning_effort`: `none`<br />  \}"
 />
 
 
@@ -2416,6 +2440,62 @@ References:
 />
 
 
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotaadmissionreserve">QuotaAdmissionReserve</a>
+
+
+
+**Appears in:**
+- [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
+
+QuotaAdmissionReserve configures the charge a token bucket takes when a
+request is admitted.
+
+The reserve is Percent of a usage estimate the gateway computes at admission:
+the GatewayConfig usageEstimates item whose metadataKey is UsageEstimate,
+rounded to the nearest integer. A request with no estimate (no usage estimate
+header, or no successful response in the estimate's last completed period)
+reserves nothing.
+
+When the request is admitted, the reserve is charged to the bucket of every
+backend and model the policy targets on the route, in the current time
+window. When the controller runs with quotaReleaseAdmissionReserves, the
+reserve is released from each of these buckets when the request's stream
+ends, whatever its outcome, and a successful response charges its actual cost
+to the bucket of the backend and model that served it, as soon as the
+response reports usage: a request that fails before reporting usage keeps no
+token charge, and a stream aborted after reporting usage keeps the charge of
+the usage reported so far. The release is applied in the time
+window the stream ends in, floored at 0, so over consecutive windows a bucket
+is charged the actual cost, with a request's reserve counted in the window it
+was admitted in. The release is sent as negative hits, which the quota rate
+limit service must apply.
+
+Without quotaReleaseAdmissionReserves, a reserve is never released: a
+successful response charges the bucket of the backend and model that served
+it the actual cost minus the reserve, or nothing when the reserve covers it,
+and a request that fails keeps the reserve it was charged.
+
+The usage estimate's CEL expression must compute the same quantity as the
+bucket's cost expression, for example "input_tokens - cached_input_tokens" on
+both, so that the reserve and the cost are in the same unit.
+
+##### Fields
+
+
+
+<ApiField
+  name="usageEstimate"
+  type="string"
+  required="true"
+  description="UsageEstimate is the metadataKey of the GatewayConfig usageEstimates item<br />the reserve is computed from. The GatewayConfig of every Gateway serving<br />the targeted backends must declare it; otherwise the controller stops<br />updating that gateway's filter configuration, which keeps serving the last<br />valid one, until it does."
+/><ApiField
+  name="percent"
+  type="integer"
+  required="true"
+  description="Percent of the usage estimate charged at admission. Below the actual<br />cost, requests in flight are partly uncounted; above it, the difference<br />is held until the reserve is released, or stays charged when reserves<br />are not released."
+/>
+
+
 #### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotabucketmode">QuotaBucketMode</a>
 
 **Underlying type:** string
@@ -2432,6 +2512,31 @@ QuotaBucketMode specifies whether the default and per request buckets values are
 
 <ApiField
   name="Shared"
+  type="enum"
+  required="false"
+  description=""
+/>
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric">QuotaCostMetric</a>
+
+**Underlying type:** string
+
+**Appears in:**
+- [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
+
+QuotaCostMetric selects whether a bucket counts tokens (stream-done charge)
+or requests (request-time +1 only).
+
+
+
+##### Possible Values
+
+<ApiField
+  name="Tokens"
+  type="enum"
+  required="false"
+  description=""
+/><ApiField
+  name="Requests"
   type="enum"
   required="false"
   description=""
@@ -2470,6 +2575,27 @@ QuotaDefinition specified expression for computing request cost and rules for ma
   type="[QuotaRule](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotarule) array"
   required="false"
   description="BucketRules are a list of client selectors and quotas. If a request<br />matches multiple rules, each of their associated quotas get applied, so a<br />single request might burn down the quota for multiple rules.<br />Client selectors that match under the same model / service backend will be<br />combined with the first limit taking precedence."
+/>
+
+
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride">QuotaLimitOverride</a>
+
+
+
+**Appears in:**
+- [QuotaValue](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotavalue)
+
+QuotaLimitOverride specifies a per-request source for the quota limit value.
+
+##### Fields
+
+
+
+<ApiField
+  name="fromHeader"
+  type="string"
+  required="true"
+  description="FromHeader names a request header whose value is a non-negative integer limit<br />for the current time window. A value of 0 blocks all matching requests.<br />The header must be set or overwritten by a trusted component<br />(e.g. an external authorization service) and never accepted from clients."
 />
 
 
@@ -2581,6 +2707,27 @@ QuotaValue defines the quota limits using sliding window.
   type="string"
   required="true"
   description="Time window. Must be exactly one of: `1s` (1 second), `1m` (1 minute), `1h` (1 hour), or `1d` (1 day)."
+/><ApiField
+  name="dynamicOverride"
+  type="[QuotaLimitOverride](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotalimitoverride)"
+  required="false"
+  description="DynamicOverride supplies the limit at request time, falling back to Limit<br />when the source is absent or malformed. The time window is always Duration."
+/><ApiField
+  name="costMetric"
+  type="[QuotaCostMetric](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotacostmetric)"
+  required="false"
+  defaultValue="Tokens"
+  description="CostMetric selects what this bucket counts. `Tokens` (the default) burns<br />the bucket down at stream-done by CostExpression (or the model-level<br />fallback). `Requests` burns the bucket down by exactly 1 per request at<br />request time and adds no stream-done token charge."
+/><ApiField
+  name="costExpression"
+  type="string"
+  required="false"
+  description="CostExpression is a per-bucket CEL expression for computing this bucket's<br />quota burndown. When unset, the model-level CostExpression applies, then<br />`total_tokens`. Ignored when CostMetric is `Requests`."
+/><ApiField
+  name="admissionReserve"
+  type="[QuotaAdmissionReserve](#github-com-envoyproxy-ai-gateway-api-v1alpha1-quotaadmissionreserve)"
+  required="false"
+  description="AdmissionReserve charges an estimate of the request's cost to the bucket<br />when the request is admitted, so requests in flight count against the<br />limit. Without it the whole cost is charged at stream completion."
 />
 
 
@@ -2633,6 +2780,66 @@ ToolCall represents a tool call in the MCP authorization target.
   type="string"
   required="true"
   description="Tool is the name of the tool."
+/>
+
+
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-usageestimate">UsageEstimate</a>
+
+
+
+**Appears in:**
+- [GatewayConfigSpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-gatewayconfigspec)
+
+UsageEstimate estimates one value of a request's token usage when the request
+is admitted, before any upstream has answered.
+
+Completed requests are accumulated per ByHeader value and model over fixed
+periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+request is estimated from the successful responses of the last completed
+period:
+
+  - input tokens: the request body size times the input tokens per body byte
+    observed in those responses;
+  - cached input tokens: those input tokens times the cache rate of those
+    responses, the mean of the share of each response's input tokens that
+    were cached.
+
+The CEL expression is evaluated on that estimated usage and on the measured
+ratios of that period, and its result is stored under MetadataKey and, with
+EmitHeader, sent upstream in a request header. Nothing is emitted when the
+last completed period holds no successful response.
+
+Each gateway replica estimates from the responses it served itself.
+
+##### Fields
+
+
+
+<ApiField
+  name="metadataKey"
+  type="string"
+  required="true"
+  description="MetadataKey is the key of the dynamic metadata storing the estimate."
+/><ApiField
+  name="cel"
+  type="string"
+  required="true"
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
+/><ApiField
+  name="byHeader"
+  type="string"
+  required="true"
+  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value with a<br />successful response is kept in memory while it has successful responses,<br />and for one to two periods, plus up to 30 seconds, after its last one."
+/><ApiField
+  name="emitMetric"
+  type="boolean"
+  required="false"
+  description="EmitMetric also records the estimate in metrics: a counter of the requests<br />that got an estimate or none, and a histogram of the estimate divided by<br />the same CEL expression evaluated on the actual usage of the response. The<br />actual value keeps the model, backend and route_name of the estimate, so the<br />ratio measures the usage estimation alone. The header value is never a<br />metric attribute.<br />Defaults to false."
+/><ApiField
+  name="emitHeader"
+  type="boolean"
+  required="false"
+  description="EmitHeader also sends the estimate upstream as a request header named<br />`x-ai-eg-usage-estimate-` followed by MetadataKey with each underscore<br />replaced by a hyphen: the estimate stored under estimated_input_token is<br />sent as x-ai-eg-usage-estimate-estimated-input-token. Its value is the<br />estimate in decimal notation, for example 1200 or 0.4.<br />The header carries only the gateway's estimate: a client-sent value is<br />replaced by the estimate, and removed when the request gets no estimate.<br />MetadataKey must then contain only lower-case letters, digits and<br />underscores, so that each estimate has its own header name.<br />Defaults to false."
 />
 
 
@@ -3141,6 +3348,7 @@ MCPRouteList contains a list of MCPRoute.
 - [AIGatewayRouteRule](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterule)
 - [AIGatewayRouteRuleBackendRef](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulebackendref)
 - [AIGatewayRouteRuleMatch](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulematch)
+- [AIGatewayRouteRuleMirror](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulemirror)
 - [AIGatewayRouteSpec](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayroutespec)
 - [AIGatewayRouteStatus](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayroutestatus)
 - [AIServiceBackendSpec](#github-com-envoyproxy-ai-gateway-api-v1beta1-aiservicebackendspec)
@@ -3201,6 +3409,7 @@ MCPRouteList contains a list of MCPRoute.
 - [MCPToolFilter](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcptoolfilter)
 - [ProtectedResourceMetadata](#github-com-envoyproxy-ai-gateway-api-v1beta1-protectedresourcemetadata)
 - [ToolCall](#github-com-envoyproxy-ai-gateway-api-v1beta1-toolcall)
+- [UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate)
 - [VersionedAPISchema](#github-com-envoyproxy-ai-gateway-api-v1beta1-versionedapischema)
 
 ### Type Definitions
@@ -3258,6 +3467,11 @@ AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayR
   type="boolean"
   required="false"
   description="ExcludeFromModelsEndpoint prevents models matched by this rule from being returned by the<br />OpenAI-compatible `/models` endpoint. Requests still match this rule and apply its<br />configured transformations, including model name overrides.<br />This is useful for internal or backwards-compatible aliases, as well as duplicate model<br />definitions with different schemas."
+/><ApiField
+  name="mirrors"
+  type="[AIGatewayRouteRuleMirror](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulemirror) array"
+  required="false"
+  description="Mirrors specifies backends that receive a mirrored copy of every matched request.<br />Responses from mirror backends are always discarded; only the primary backendRefs<br />respond to the client. Mirror traffic is cloned via the Gateway API HTTPRequestMirror<br />filter, but each mirror's BackendRef supports the same AI-specific transformations<br />(ModelNameOverride, HeaderMutation, BodyMutation) as primary backendRefs, so the<br />shadow backend can be addressed with a different model name or modified request body.<br />Each entry corresponds to one shadow backend; use Percent or Fraction to sample."
 />
 
 
@@ -3267,6 +3481,7 @@ AIGatewayRouteRule is a rule that defines the routing behavior of the AIGatewayR
 
 **Appears in:**
 - [AIGatewayRouteRule](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterule)
+- [AIGatewayRouteRuleMirror](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulemirror)
 
 AIGatewayRouteRuleBackendRef is a reference to a backend with a weight.
 It can reference either an AIServiceBackend or an InferencePool resource.
@@ -3343,6 +3558,41 @@ It can reference either an AIServiceBackend or an InferencePool resource.
   type="[HTTPHeaderMatch](https://gateway-api.sigs.k8s.io/reference/spec/?h=httproutetimeouts#httpheadermatch) array"
   required="false"
   description="Headers specifies HTTP request header matchers. See HeaderMatch in the Gateway API for the details:<br />https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.HTTPHeaderMatch"
+/>
+
+
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulemirror">AIGatewayRouteRuleMirror</a>
+
+
+
+**Appears in:**
+- [AIGatewayRouteRule](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterule)
+
+AIGatewayRouteRuleMirror specifies a shadow backend that receives a copy of every
+matched request. Mirror requests run through the same AI Gateway processing pipeline
+as primary requests, so per-backend AI transformations (ModelNameOverride,
+HeaderMutation, BodyMutation) defined on the embedded BackendRef are honored.
+Responses from mirror backends are always discarded.
+
+##### Fields
+
+
+
+<ApiField
+  name="backendRef"
+  type="[AIGatewayRouteRuleBackendRef](#github-com-envoyproxy-ai-gateway-api-v1beta1-aigatewayrouterulebackendref)"
+  required="true"
+  description="BackendRef is the shadow destination. Reuses AIGatewayRouteRuleBackendRef so it<br />carries the same AI-specific fields (ModelNameOverride, HeaderMutation,<br />BodyMutation) as primary backendRefs. Weight and Priority are ignored for<br />mirror backends — each mirror entry is a single fire-and-forget destination."
+/><ApiField
+  name="percent"
+  type="integer"
+  required="false"
+  description="Percent is the percentage of requests to mirror (0-100). Maps to the<br />Gateway API HTTPRequestMirrorFilter Percent field. If both Percent and<br />Fraction are unset, every matched request is mirrored."
+/><ApiField
+  name="fraction"
+  type="[Fraction](#sigs-k8s-io-gateway-api-apis-v1-fraction)"
+  required="false"
+  description="Fraction is the fractional percentage of requests to mirror. Maps to the<br />Gateway API HTTPRequestMirrorFilter Fraction field. Takes precedence over<br />Percent if both are set."
 />
 
 
@@ -4254,6 +4504,21 @@ GatewayConfigSpec defines the configuration for the AI Gateway.
   type="[GatewayConfigForwardProxy](#github-com-envoyproxy-ai-gateway-api-v1beta1-gatewayconfigforwardproxy)"
   required="false"
   description="ForwardProxy routes all upstream AI/LLM traffic from Gateways referencing this<br />GatewayConfig through an HTTP CONNECT forward proxy. This is intended for data planes<br />in locked-down networks where direct egress to providers is not permitted and all<br />outbound traffic must traverse a proxy."
+/><ApiField
+  name="emitErrorMetadata"
+  type="boolean"
+  required="false"
+  description="EmitErrorMetadata enables emission of Envoy dynamic metadata describing upstream<br />LLM error responses (non-2xx). When enabled, the AI Gateway filter sets<br />`llm_error_type` and `llm_error_code` (falling back to the HTTP status code when the<br />provider reports no code), along with `backend_name`, `route_name`, and<br />`model_name_override`, under the `io.envoy.ai_gateway` metadata namespace.<br />These can be referenced in access logs via<br />%DYNAMIC_METADATA(io.envoy.ai_gateway:llm_error_type)%.<br />This applies only to errors returned by the upstream LLM provider. Errors generated<br />before backend selection (e.g. an unknown model) do not carry this metadata.<br />Defaults to false."
+/><ApiField
+  name="usageEstimates"
+  type="[UsageEstimate](#github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate) array"
+  required="false"
+  description="UsageEstimates estimates the token usage of each request when it is admitted,<br />from the responses completed during the last completed period (see<br />UsageEstimatePeriod) for requests carrying the same value of a request header<br />(for example the API key identity stamped by an external authorization service)<br />and the same model, and emits each estimate as Envoy dynamic metadata under the<br />`io.envoy.ai_gateway` namespace, and as a request header sent upstream for an<br />item with EmitHeader.<br />Estimates change no routing, cost or quota decision. They can be referenced in<br />access logs, for example %DYNAMIC_METADATA(io.envoy.ai_gateway:estimated_input_token)%.<br />To learn from streamed responses, a streaming OpenAI-compatible request gets<br />stream_options.include_usage set, as with LLMRequestCosts, so its client receives<br />the final usage chunk.<br />A metadataKey must not equal an LLMRequestCost metadataKey, global, per route<br />or added by a QuotaPolicy. On such a collision the controller stops updating<br />the gateway's filter configuration, which keeps serving the last valid one,<br />until the collision is removed."
+/><ApiField
+  name="usageEstimatePeriod"
+  type="[Duration](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Duration)"
+  required="false"
+  description="UsageEstimatePeriod is the length of the periods UsageEstimates accumulates<br />completed requests over. Periods are aligned on the clock, and a request is<br />estimated from the last completed one. A longer period gathers more responses<br />per estimate and leaves fewer clients without one, but follows a change in a<br />client's requests more slowly. Changing it starts every estimate over.<br />Defaults to 60s."
 />
 
 
@@ -4328,6 +4593,11 @@ HTTPBodyMutation defines the mutation of HTTP request body JSON fields that will
   type="string array"
   required="false"
   description="Remove the given JSON field(s) from the HTTP request body before sending to the backend.<br />The value of Remove is a list of top-level field names to remove.<br />Input:<br />  \{<br />    `model`: `gpt-4`,<br />    `service_tier`: `default`,<br />    `internal_flag`: true<br />  \}<br />Config:<br />  remove: [`service_tier`, `internal_flag`]<br />Output:<br />  \{<br />    `model`: `gpt-4`<br />  \}"
+/><ApiField
+  name="setDefault"
+  type="[HTTPBodyField](#github-com-envoyproxy-ai-gateway-api-v1beta1-httpbodyfield) array"
+  required="false"
+  description="SetDefault sets the given JSON field (name, value) only when the field is<br />not already defined in the request body. Only top-level fields are<br />currently supported. The presence check is path-existence: an explicit<br />null from the client is considered `defined` and suppresses the default.<br />When the same path is targeted by both Set and SetDefault, Set wins —<br />SetDefault is applied after Set/Remove and only fills paths that are<br />still absent at that point. Route-level SetDefault entries override<br />backend-level entries for the same path.<br />Input:<br />  \{<br />    `model`: `gpt-4`<br />  \}<br />Config:<br />  setDefault:<br />  - path: `reasoning_effort`<br />    value: `\`none\``<br />Output:<br />  \{<br />    `model`: `gpt-4`,<br />    `reasoning_effort`: `none`<br />  \}"
 />
 
 
@@ -5281,6 +5551,66 @@ ToolCall represents a tool call in the MCP authorization target.
   type="string"
   required="true"
   description="Tool is the name of the tool."
+/>
+
+
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1beta1-usageestimate">UsageEstimate</a>
+
+
+
+**Appears in:**
+- [GatewayConfigSpec](#github-com-envoyproxy-ai-gateway-api-v1beta1-gatewayconfigspec)
+
+UsageEstimate estimates one value of a request's token usage when the request
+is admitted, before any upstream has answered.
+
+Completed requests are accumulated per ByHeader value and model over fixed
+periods of GatewayConfigSpec.UsageEstimatePeriod, aligned on the clock. A
+request is estimated from the successful responses of the last completed
+period:
+
+  - input tokens: the request body size times the input tokens per body byte
+    observed in those responses;
+  - cached input tokens: those input tokens times the cache rate of those
+    responses, the mean of the share of each response's input tokens that
+    were cached.
+
+The CEL expression is evaluated on that estimated usage and on the measured
+ratios of that period, and its result is stored under MetadataKey and, with
+EmitHeader, sent upstream in a request header. Nothing is emitted when the
+last completed period holds no successful response.
+
+Each gateway replica estimates from the responses it served itself.
+
+##### Fields
+
+
+
+<ApiField
+  name="metadataKey"
+  type="string"
+  required="true"
+  description="MetadataKey is the key of the dynamic metadata storing the estimate."
+/><ApiField
+  name="cel"
+  type="string"
+  required="true"
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
+/><ApiField
+  name="byHeader"
+  type="string"
+  required="true"
+  description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value with a<br />successful response is kept in memory while it has successful responses,<br />and for one to two periods, plus up to 30 seconds, after its last one."
+/><ApiField
+  name="emitMetric"
+  type="boolean"
+  required="false"
+  description="EmitMetric also records the estimate in metrics: a counter of the requests<br />that got an estimate or none, and a histogram of the estimate divided by<br />the same CEL expression evaluated on the actual usage of the response. The<br />actual value keeps the model, backend and route_name of the estimate, so the<br />ratio measures the usage estimation alone. The header value is never a<br />metric attribute.<br />Defaults to false."
+/><ApiField
+  name="emitHeader"
+  type="boolean"
+  required="false"
+  description="EmitHeader also sends the estimate upstream as a request header named<br />`x-ai-eg-usage-estimate-` followed by MetadataKey with each underscore<br />replaced by a hyphen: the estimate stored under estimated_input_token is<br />sent as x-ai-eg-usage-estimate-estimated-input-token. Its value is the<br />estimate in decimal notation, for example 1200 or 0.4.<br />The header carries only the gateway's estimate: a client-sent value is<br />replaced by the estimate, and removed when the request gets no estimate.<br />MetadataKey must then contain only lower-case letters, digits and<br />underscores, so that each estimate has its own header name.<br />Defaults to false."
 />
 
 

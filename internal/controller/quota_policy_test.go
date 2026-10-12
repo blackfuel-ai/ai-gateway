@@ -42,6 +42,18 @@ func requireNewFakeClientWithIndexesForQuotaPolicy(t *testing.T) client.Client {
 	return builder.Build()
 }
 
+// electedCh returns a closed channel, making a controller behave as the leader.
+func electedCh() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+// notElectedCh returns an open channel, making a controller behave as a non-leader.
+func notElectedCh() <-chan struct{} {
+	return make(chan struct{})
+}
+
 // newTestRunner creates a Runner with an initialized cache for use in tests.
 // The runner is started in a background goroutine and stopped when the test completes.
 func newTestRunner(t *testing.T) *runner.Runner {
@@ -60,7 +72,7 @@ func newTestRunner(t *testing.T) *runner.Runner {
 func TestQuotaPolicyController_Reconcile(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	// Create an AIServiceBackend.
@@ -86,7 +98,7 @@ func TestQuotaPolicyController_Reconcile(t *testing.T) {
 					Name:  gwapiv1.ObjectName("mybackend"),
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 			},
 		},
@@ -112,7 +124,7 @@ func TestQuotaPolicyController_Reconcile(t *testing.T) {
 func TestQuotaPolicyController_Reconcile_NotFound(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 
 	// Reconcile a non-existent QuotaPolicy - this triggers the deletion path
 	// (rebuilds all configs, which should succeed with no policies).
@@ -127,7 +139,7 @@ func TestQuotaPolicyController_Reconcile_SyncError(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	// Use a runner whose cache is not initialized to trigger UpdateConfigs error.
 	uninitializedRunner := runner.New(ctrl.Log, 0)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, uninitializedRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, uninitializedRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	// Create an AIServiceBackend.
@@ -153,7 +165,7 @@ func TestQuotaPolicyController_Reconcile_SyncError(t *testing.T) {
 					Name:  gwapiv1.ObjectName(backend.Name),
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 			},
 		},
@@ -176,7 +188,7 @@ func TestQuotaPolicyController_Reconcile_SyncError(t *testing.T) {
 func TestQuotaPolicyController_Reconcile_InvalidDuration(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	// Create an AIServiceBackend.
@@ -202,7 +214,7 @@ func TestQuotaPolicyController_Reconcile_InvalidDuration(t *testing.T) {
 					Name:  gwapiv1.ObjectName(backend.Name),
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "invalid"},
 			},
 		},
@@ -226,7 +238,7 @@ func TestQuotaPolicyController_Reconcile_InvalidDuration(t *testing.T) {
 func TestQuotaPolicyController_Reconcile_Deletion(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	// Create an AIServiceBackend.
@@ -252,7 +264,7 @@ func TestQuotaPolicyController_Reconcile_Deletion(t *testing.T) {
 					Name:  gwapiv1.ObjectName(backend.Name),
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 			},
 		},
@@ -282,10 +294,132 @@ func TestQuotaPolicyController_Reconcile_Deletion(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestQuotaPolicyController_Reconcile_NonLeader(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
+	rateLimitRunner := newTestRunner(t)
+	// Unbuffered channel: a send on it would block, proving the non-leader
+	// never notifies AIGatewayRoutes (whose consumer only runs on the leader).
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent), notElectedCh())
+	namespace := "default"
+
+	backend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "backend-nonleader", Namespace: namespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{
+				Name: "some-service",
+				Port: ptrTo[gwapiv1.PortNumber](8080),
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), backend))
+
+	qp := &aigv1a1.QuotaPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "qp-nonleader", Namespace: namespace},
+		Spec: aigv1a1.QuotaPolicySpec{
+			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
+				{
+					Kind:  "AIServiceBackend",
+					Group: "aigateway.envoyproxy.io",
+					Name:  gwapiv1.ObjectName(backend.Name),
+				},
+			},
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
+				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+
+	_, err := c.Reconcile(t.Context(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: namespace, Name: "qp-nonleader"},
+	})
+	require.NoError(t, err)
+
+	// The local snapshot cache is populated even without leadership.
+	c.mu.RLock()
+	_, cached := c.configCache[namespace+"/qp-nonleader"]
+	c.mu.RUnlock()
+	require.True(t, cached, "non-leader must populate its local rate limit config cache")
+
+	// No mutating writes: neither status nor finalizer.
+	var updatedQP aigv1a1.QuotaPolicy
+	require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: "qp-nonleader"}, &updatedQP))
+	require.Empty(t, updatedQP.Status.Conditions, "non-leader must not write status")
+	require.NotContains(t, updatedQP.Finalizers, aiGatewayControllerFinalizer, "non-leader must not add the finalizer")
+}
+
+func TestQuotaPolicyController_Reconcile_NonLeaderDeletion(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
+	rateLimitRunner := newTestRunner(t)
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent), notElectedCh())
+	namespace := "default"
+
+	backend := &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "backend-nonleader-del", Namespace: namespace},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			BackendRef: gwapiv1.BackendObjectReference{
+				Name: "some-service",
+				Port: ptrTo[gwapiv1.PortNumber](8080),
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), backend))
+
+	// The finalizer is pre-set as the leader would have written it, so Delete
+	// only stamps deletionTimestamp instead of removing the object.
+	qp := &aigv1a1.QuotaPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "qp-nonleader-del",
+			Namespace:  namespace,
+			Finalizers: []string{aiGatewayControllerFinalizer},
+		},
+		Spec: aigv1a1.QuotaPolicySpec{
+			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
+				{
+					Kind:  "AIServiceBackend",
+					Group: "aigateway.envoyproxy.io",
+					Name:  gwapiv1.ObjectName(backend.Name),
+				},
+			},
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
+				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+			},
+		},
+	}
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+
+	_, err := c.Reconcile(t.Context(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: namespace, Name: "qp-nonleader-del"},
+	})
+	require.NoError(t, err)
+	c.mu.RLock()
+	_, cached := c.configCache[namespace+"/qp-nonleader-del"]
+	c.mu.RUnlock()
+	require.True(t, cached)
+
+	require.NoError(t, fakeClient.Delete(t.Context(), &aigv1a1.QuotaPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "qp-nonleader-del", Namespace: namespace},
+	}))
+
+	_, err = c.Reconcile(t.Context(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: namespace, Name: "qp-nonleader-del"},
+	})
+	require.NoError(t, err)
+
+	// The local cache entry is purged, but the finalizer is left to the leader.
+	c.mu.RLock()
+	_, cached = c.configCache[namespace+"/qp-nonleader-del"]
+	c.mu.RUnlock()
+	require.False(t, cached, "non-leader must purge its local cache on deletion")
+	var deletingQP aigv1a1.QuotaPolicy
+	require.NoError(t, fakeClient.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: "qp-nonleader-del"}, &deletingQP))
+	require.Contains(t, deletingQP.Finalizers, aiGatewayControllerFinalizer, "non-leader must not remove the finalizer")
+}
+
 func TestQuotaPolicyController_Reconcile_MultipleBackends(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	// Create two AIServiceBackends.
@@ -318,7 +452,7 @@ func TestQuotaPolicyController_Reconcile_MultipleBackends(t *testing.T) {
 					Name:  "backend-2",
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 500, Duration: "1h"},
 			},
 		},
@@ -340,7 +474,7 @@ func TestQuotaPolicyController_Reconcile_MultipleBackends(t *testing.T) {
 func TestQuotaPolicyController_Reconcile_PerModelQuotas(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	backend := &aigv1b1.AIServiceBackend{
@@ -370,7 +504,7 @@ func TestQuotaPolicyController_Reconcile_PerModelQuotas(t *testing.T) {
 					ModelName: &modelName,
 					Quota: aigv1a1.QuotaDefinition{
 						Mode:          aigv1a1.QuotaBucketModeShared,
-						DefaultBucket: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
+						DefaultBucket: &aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 					},
 				},
 			},
@@ -393,7 +527,7 @@ func TestQuotaPolicyController_Reconcile_PerModelQuotas(t *testing.T) {
 func TestQuotaPolicyController_BackendToQuotaPolicy(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	// Create QuotaPolicies targeting different backends.
@@ -407,7 +541,7 @@ func TestQuotaPolicyController_BackendToQuotaPolicy(t *testing.T) {
 					Name:  "backend-a",
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 			},
 		},
@@ -422,7 +556,7 @@ func TestQuotaPolicyController_BackendToQuotaPolicy(t *testing.T) {
 					Name:  "backend-a",
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 200, Duration: "1h"},
 			},
 		},
@@ -437,7 +571,7 @@ func TestQuotaPolicyController_BackendToQuotaPolicy(t *testing.T) {
 					Name:  "backend-b",
 				},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 300, Duration: "1m"},
 			},
 		},
@@ -482,7 +616,7 @@ func TestQuotaPolicyController_BackendToQuotaPolicy(t *testing.T) {
 func TestQuotaPolicyController_Reconcile_MultiplePolicies(t *testing.T) {
 	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
 	rateLimitRunner := newTestRunner(t)
-	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100))
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, rateLimitRunner, make(chan event.GenericEvent, 100), electedCh())
 	namespace := "default"
 
 	// Create backends.
@@ -506,7 +640,7 @@ func TestQuotaPolicyController_Reconcile_MultiplePolicies(t *testing.T) {
 			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
 				{Kind: "AIServiceBackend", Group: "aigateway.envoyproxy.io", Name: "be-1"},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 			},
 		},
@@ -517,7 +651,7 @@ func TestQuotaPolicyController_Reconcile_MultiplePolicies(t *testing.T) {
 			TargetRefs: []gwapiv1a2.LocalPolicyTargetReference{
 				{Kind: "AIServiceBackend", Group: "aigateway.envoyproxy.io", Name: "be-2"},
 			},
-			ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+			ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 				Quota: aigv1a1.QuotaValue{Limit: 200, Duration: "1h"},
 			},
 		},
@@ -577,4 +711,97 @@ func Test_quotaPolicyTargetRefsIndexFunc(t *testing.T) {
 
 func ptrTo[T any](v T) *T {
 	return &v
+}
+
+// drainRouteEvents returns the namespace/name of every AIGatewayRoute event queued on ch.
+func drainRouteEvents(ch chan event.GenericEvent) []string {
+	var routes []string
+	for {
+		select {
+		case ev := <-ch:
+			routes = append(routes, ev.Object.GetNamespace()+"/"+ev.Object.GetName())
+		default:
+			return routes
+		}
+	}
+}
+
+func requireCreateRouteForBackend(t *testing.T, c client.Client, name, namespace, backend, backendNamespace string) {
+	t.Helper()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIGatewayRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: aigv1b1.AIGatewayRouteSpec{
+			Rules: []aigv1b1.AIGatewayRouteRule{{BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{
+				{Name: backend, Namespace: ptrTo(gwapiv1.Namespace(backendNamespace))},
+			}}},
+		},
+	}))
+}
+
+func requireCreateBackend(t *testing.T, c client.Client, name, namespace string) {
+	t.Helper()
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: aigv1b1.AIServiceBackendSpec{BackendRef: gwapiv1.BackendObjectReference{
+			Name: "some-service", Port: ptrTo[gwapiv1.PortNumber](8080),
+		}},
+	}))
+}
+
+// A policy moved off a backend must notify that backend's routes too: their
+// HTTPRoute still hashes the policy and their route xDS still carries its entries.
+func TestQuotaPolicyController_Reconcile_TargetRefsChangeNotifiesPreviousTargets(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
+	routeCh := make(chan event.GenericEvent, 100)
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, newTestRunner(t), routeCh, electedCh())
+
+	requireCreateBackend(t, fakeClient, "apple", "default")
+	requireCreateBackend(t, fakeClient, "orange", "default")
+	requireCreateRouteForBackend(t, fakeClient, "apple-route", "default", "apple", "default")
+	requireCreateRouteForBackend(t, fakeClient, "orange-route", "other", "orange", "default")
+
+	qp := newTestQuotaPolicy("moving", "default", 100, "apple")
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(qp)}
+	_, err := c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"default/apple-route"}, drainRouteEvents(routeCh))
+
+	require.NoError(t, fakeClient.Get(t.Context(), req.NamespacedName, qp))
+	qp.Spec.TargetRefs[0].Name = "orange"
+	require.NoError(t, fakeClient.Update(t.Context(), qp))
+	_, err = c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"default/apple-route", "other/orange-route"}, drainRouteEvents(routeCh))
+
+	// Once the previous target has been notified, it is no longer one.
+	_, err = c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"other/orange-route"}, drainRouteEvents(routeCh))
+}
+
+// Deleting a policy must notify every route referencing its backends,
+// including routes in other namespaces than the policy's.
+func TestQuotaPolicyController_Reconcile_DeletionNotifiesCrossNamespaceRoutes(t *testing.T) {
+	fakeClient := requireNewFakeClientWithIndexesForQuotaPolicy(t)
+	routeCh := make(chan event.GenericEvent, 100)
+	c := NewQuotaPolicyController(fakeClient, fake2.NewClientset(), ctrl.Log, newTestRunner(t), routeCh, electedCh())
+
+	requireCreateBackend(t, fakeClient, "lemon", "ns2")
+	requireCreateRouteForBackend(t, fakeClient, "lemon-route", "ns1", "lemon", "ns2")
+	requireCreateRouteForBackend(t, fakeClient, "unrelated-route", "ns1", "lime", "ns1")
+
+	qp := newTestQuotaPolicy("lemon-quota", "ns2", 100, "lemon")
+	require.NoError(t, fakeClient.Create(t.Context(), qp))
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(qp)}
+	_, err := c.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"ns1/lemon-route"}, drainRouteEvents(routeCh))
+
+	require.NoError(t, fakeClient.Delete(t.Context(), qp))
+	_, err = c.Reconcile(t.Context(), req) // Removes the finalizer.
+	require.NoError(t, err)
+	_, err = c.Reconcile(t.Context(), req) // The policy is gone.
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"ns1/lemon-route"}, drainRouteEvents(routeCh))
 }

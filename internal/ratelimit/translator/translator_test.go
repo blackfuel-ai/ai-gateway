@@ -157,7 +157,7 @@ func TestBuildServiceQuotaDescriptor(t *testing.T) {
 func TestBuildPerModelDescriptor(t *testing.T) {
 	t.Run("no bucket rules applies default directly", func(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 		}
 		desc, err := buildPerModelDescriptor("gpt-4", quota)
 		require.NoError(t, err)
@@ -173,7 +173,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 			BucketRules: []aigv1a1.QuotaRule{
 				{Quota: aigv1a1.QuotaValue{Limit: 200, Duration: "1m"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 		}
 		desc, err := buildPerModelDescriptor("gpt-4", quota)
 		require.NoError(t, err)
@@ -187,7 +187,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 			BucketRules: []aigv1a1.QuotaRule{
 				{Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 0}, // zero limit = no default
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 0}, // zero limit = no default
 		}
 		desc, err := buildPerModelDescriptor("gpt-4", quota)
 		require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 				{Quota: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"}},
 				{Quota: aigv1a1.QuotaValue{Limit: 10, Duration: "1s"}},
 			},
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 5, Duration: "1s"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 5, Duration: "1s"},
 		}
 		desc, err := buildPerModelDescriptor("model-x", quota)
 		require.NoError(t, err)
@@ -214,7 +214,7 @@ func TestBuildPerModelDescriptor(t *testing.T) {
 
 	t.Run("invalid duration in default bucket", func(t *testing.T) {
 		quota := &aigv1a1.QuotaDefinition{
-			DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "invalid"},
+			DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "invalid"},
 		}
 		_, err := buildPerModelDescriptor("gpt-4", quota)
 		require.Error(t, err)
@@ -488,7 +488,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: nil,
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -510,7 +510,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -533,7 +533,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 	t.Run("service quota adds catch-all descriptor", func(t *testing.T) {
 		policy := &aigv1a1.QuotaPolicy{
 			Spec: aigv1a1.QuotaPolicySpec{
-				ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+				ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 					Quota: aigv1a1.QuotaValue{Limit: 5000, Duration: "1h"},
 				},
 			},
@@ -557,17 +557,17 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 					{
 						ModelName: ptr.To("claude"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 200, Duration: "1m"},
 						},
 					},
 				},
-				ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+				ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 					Quota: aigv1a1.QuotaValue{Limit: 10000, Duration: "1h"},
 				},
 			},
@@ -589,7 +589,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 	t.Run("service quota with zero limit is not added", func(t *testing.T) {
 		policy := &aigv1a1.QuotaPolicy{
 			Spec: aigv1a1.QuotaPolicySpec{
-				ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+				ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 					Quota: aigv1a1.QuotaValue{Limit: 0, Duration: "1h"},
 				},
 			},
@@ -610,7 +610,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 					{
 						ModelName: ptr.To("bad-model"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "xyz"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "xyz"},
 						},
 					},
 				},
@@ -628,7 +628,7 @@ func TestBuildBackendDescriptor(t *testing.T) {
 	t.Run("invalid service quota duration returns wrapped error", func(t *testing.T) {
 		policy := &aigv1a1.QuotaPolicy{
 			Spec: aigv1a1.QuotaPolicySpec{
-				ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+				ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 					Quota: aigv1a1.QuotaValue{Limit: 100, Duration: "xyz"},
 				},
 			},
@@ -678,7 +678,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -705,7 +705,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "1m"},
 						},
 					},
 				},
@@ -733,7 +733,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 					{
 						ModelName: ptr.To("gpt-4"),
 						Quota: aigv1a1.QuotaDefinition{
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 100, Duration: "bad"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 100, Duration: "bad"},
 						},
 					},
 				},
@@ -764,11 +764,11 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 									Quota: aigv1a1.QuotaValue{Limit: 50, Duration: "1m"},
 								},
 							},
-							DefaultBucket: aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
+							DefaultBucket: &aigv1a1.QuotaValue{Limit: 10, Duration: "1m"},
 						},
 					},
 				},
-				ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+				ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 					Quota: aigv1a1.QuotaValue{Limit: 10000, Duration: "1h"},
 				},
 			},
@@ -825,7 +825,7 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 	t.Run("only service quota", func(t *testing.T) {
 		policy := &aigv1a1.QuotaPolicy{
 			Spec: aigv1a1.QuotaPolicySpec{
-				ServiceQuota: aigv1a1.ServiceQuotaDefinition{
+				ServiceQuota: &aigv1a1.ServiceQuotaDefinition{
 					Quota: aigv1a1.QuotaValue{Limit: 5000, Duration: "1h"},
 				},
 			},
@@ -846,4 +846,31 @@ func TestBuildRateLimitConfigs(t *testing.T) {
 		require.Equal(t, uint32(5000), backendDesc.Descriptors[0].RateLimit.RequestsPerUnit)
 		require.Equal(t, rlsconfv3.RateLimitUnit_HOUR, backendDesc.Descriptors[0].RateLimit.Unit)
 	})
+}
+
+func TestQuotaCostMetadataKeyHelpers(t *testing.T) {
+	require.Equal(t, "rule-0", QuotaCostRuleBucketKey(0))
+	require.Equal(t, "rule-7", QuotaCostRuleBucketKey(7))
+	require.Equal(t, "default", QuotaCostDefaultBucketKey())
+	require.Equal(t, "quota_cost_rule-3", QuotaCostMetadataKey(QuotaCostRuleBucketKey(3)))
+	require.Equal(t, "quota_cost_default", QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
+	require.NotEqual(t, QuotaCostMetadataKey(QuotaCostRuleBucketKey(0)), QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
+}
+
+func TestQuotaReserveMetadataKey(t *testing.T) {
+	require.Equal(t, "quota_reserve_fresh_input_90", QuotaReserveMetadataKey("fresh_input", 90))
+	require.NotEqual(t, QuotaReserveMetadataKey("fresh_input", 90), QuotaReserveMetadataKey("fresh_input", 100))
+	require.NotEqual(t, QuotaReserveMetadataKey("fresh_input", 90), QuotaReserveMetadataKey("input", 90))
+}
+
+func TestQuotaReleaseMetadataKey(t *testing.T) {
+	require.Equal(t, "quota_release_fresh_input_90", QuotaReleaseMetadataKey("fresh_input", 90))
+	require.NotEqual(t, QuotaReleaseMetadataKey("fresh_input", 90), QuotaReleaseMetadataKey("fresh_input", 100))
+	require.NotEqual(t, QuotaReleaseMetadataKey("fresh_input", 90), QuotaReserveMetadataKey("fresh_input", 90))
+}
+
+func TestQuotaSettleMetadataKey(t *testing.T) {
+	require.Equal(t, "quota_settle_rule-3", QuotaSettleMetadataKey(QuotaCostRuleBucketKey(3)))
+	require.Equal(t, "quota_settle_default", QuotaSettleMetadataKey(QuotaCostDefaultBucketKey()))
+	require.NotEqual(t, QuotaSettleMetadataKey(QuotaCostDefaultBucketKey()), QuotaCostMetadataKey(QuotaCostDefaultBucketKey()))
 }

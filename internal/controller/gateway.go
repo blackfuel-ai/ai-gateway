@@ -30,6 +30,8 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
@@ -39,6 +41,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
+	"github.com/envoyproxy/ai-gateway/internal/ratelimit/translator"
 	"github.com/envoyproxy/ai-gateway/internal/version"
 )
 
@@ -87,6 +90,38 @@ type GatewayController struct {
 	// referenceGrantValidator authorizes cross-namespace AIServiceBackend/InferencePool
 	// references (and their BackendSecurityPolicy credentials) via Gateway API ReferenceGrant.
 	referenceGrantValidator *referenceGrantValidator
+}
+
+// gatewayReconcilePredicate enqueues a Gateway reconcile on spec/generation
+// changes (like predicate.GenerationChangedPredicate) AND on changes to the
+// gateway-config annotation.
+//
+// The annotation lives in metadata and does not bump metadata.generation, so a
+// plain GenerationChangedPredicate drops the Update event when the annotation is
+// added, changed, or removed on an already-existing Gateway. That would leave the
+// per-gateway filter-config Secret (e.g. EmitErrorMetadata) stale until some
+// unrelated event forced a reconcile. Keying narrowly on GatewayConfigAnnotationKey
+// avoids reconcile storms from unrelated metadata churn.
+//
+// This predicate is scoped to the Gateway For source (via builder.WithPredicates);
+// the gatewayEventChan raw source is registered with WatchesRawSource, which does
+// not run For-source predicates, so channel-driven reconciles are unaffected.
+// CreateFunc/DeleteFunc/GenericFunc are intentionally left unset so they default
+// to true, matching GenerationChangedPredicate (Gateway create/delete still
+// reconcile).
+func gatewayReconcilePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+			if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+				return true
+			}
+			return e.ObjectOld.GetAnnotations()[GatewayConfigAnnotationKey] !=
+				e.ObjectNew.GetAnnotations()[GatewayConfigAnnotationKey]
+		},
+	}
 }
 
 // Reconcile implements the reconcile.Reconciler for gwapiv1.Gateway.
@@ -138,8 +173,16 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	var defaultLLMCosts []aigv1b1.LLMRequestCost
+	var emitErrorMetadata bool
+	var usageEstimates []aigv1b1.UsageEstimate
+	var usageEstimatePeriod time.Duration
 	if gwConfig != nil {
 		defaultLLMCosts = gwConfig.Spec.GlobalLLMRequestCosts
+		emitErrorMetadata = gwConfig.Spec.EmitErrorMetadata
+		usageEstimates = gwConfig.Spec.UsageEstimates
+		if usageEstimatePeriod, err = gwConfig.Spec.GetUsageEstimatePeriod(); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Envoy Gateway watches Gateways, not GatewayConfigs, so a config edit reaches the data plane
@@ -155,7 +198,7 @@ func (c *GatewayController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if gwConfig != nil && gwConfig.Spec.ExtProc != nil {
 		declaredMetadataNamespaces = gwConfig.Spec.ExtProc.MetadataForwardingNamespaces
 	}
-	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, declaredMetadataNamespaces)
+	hasEffectiveRoutes, err = c.reconcileFilterConfigSecret(ctx, gw.Name, gw.Namespace, namespace, aiRoutes.Items, mcpRoutes.Items, uid, defaultLLMCosts, declaredMetadataNamespaces, emitErrorMetadata, usageEstimates, usageEstimatePeriod)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -236,6 +279,9 @@ func bodyMutationToFilterAPI(m *aigv1b1.HTTPBodyMutation) *filterapi.HTTPBodyMut
 	for _, field := range m.Set {
 		ret.Set = append(ret.Set, filterapi.HTTPBodyField{Path: field.Path, Value: field.Value})
 	}
+	for _, field := range m.SetDefault {
+		ret.SetDefault = append(ret.SetDefault, filterapi.HTTPBodyField{Path: field.Path, Value: field.Value})
+	}
 	return ret
 }
 
@@ -266,6 +312,59 @@ func aigwGlobalLLMRequestCostToFilterAPI(cost aigv1b1.LLMRequestCost) (filterapi
 		out.CEL = celExpr
 	}
 	return out, nil
+}
+
+// aigwUsageEstimateToFilterAPI converts an API UsageEstimate to filter API form.
+func aigwUsageEstimateToFilterAPI(e *aigv1b1.UsageEstimate) (filterapi.UsageEstimate, error) {
+	if _, err := llmcostcel.NewEstimateProgram(e.CEL); err != nil {
+		return filterapi.UsageEstimate{}, fmt.Errorf("invalid CEL expression: %w", err)
+	}
+	return filterapi.UsageEstimate{
+		MetadataKey: e.MetadataKey,
+		CEL:         e.CEL,
+		// Header names are lower-cased in the request headers the filter sees.
+		ByHeader:   strings.ToLower(e.ByHeader),
+		EmitMetric: e.EmitMetric,
+		EmitHeader: e.EmitHeader,
+	}, nil
+}
+
+// checkAdmissionReserveUsageEstimates rejects an admission reserve whose usage
+// estimate the GatewayConfig does not declare: no request would get an estimate, so
+// the bucket would silently reserve nothing.
+func checkAdmissionReserveUsageEstimates(ec *filterapi.Config) error {
+	for i := range ec.AdmissionReserves {
+		r := &ec.AdmissionReserves[i]
+		if !slices.ContainsFunc(ec.UsageEstimates, func(e filterapi.UsageEstimate) bool { return e.MetadataKey == r.UsageEstimate }) {
+			return fmt.Errorf("admission reserve %q references usage estimate %q, which the GatewayConfig does not declare",
+				r.MetadataKey, r.UsageEstimate)
+		}
+	}
+	return nil
+}
+
+// checkUsageEstimateMetadataKeys rejects a usage estimate whose dynamic metadata
+// key is also an LLMRequestCost metadata key:
+// the cost written at completion would overwrite the value written at admission.
+// Collisions between usage estimates are rejected by the CRD.
+func checkUsageEstimateMetadataKeys(ec *filterapi.Config) error {
+	if len(ec.UsageEstimates) == 0 {
+		return nil
+	}
+	costKeys := make(map[string]struct{}, len(ec.GlobalLLMRequestCosts)+len(ec.LLMRequestCosts))
+	for i := range ec.GlobalLLMRequestCosts {
+		costKeys[ec.GlobalLLMRequestCosts[i].MetadataKey] = struct{}{}
+	}
+	for i := range ec.LLMRequestCosts {
+		costKeys[ec.LLMRequestCosts[i].MetadataKey] = struct{}{}
+	}
+	for i := range ec.UsageEstimates {
+		e := &ec.UsageEstimates[i]
+		if _, ok := costKeys[e.MetadataKey]; ok {
+			return fmt.Errorf("usage estimate metadataKey %q collides with an LLMRequestCost metadataKey", e.MetadataKey)
+		}
+	}
+	return nil
 }
 
 func aigwLLMRequestCostToFilterAPI(cost aigv1b1.LLMRequestCost, routeName string) (filterapi.LLMRequestCost, error) {
@@ -326,6 +425,20 @@ func mergeBodyMutations(routeLevel, backendLevel *aigv1b1.HTTPBodyMutation) *aig
 
 	for f := range removeMap {
 		result.Remove = append(result.Remove, f)
+	}
+
+	// Merge SetDefault operations (route-level wins conflicts)
+	defaultMap := make(map[string]aigv1b1.HTTPBodyField)
+
+	for _, f := range backendLevel.SetDefault {
+		defaultMap[f.Path] = f
+	}
+	for _, f := range routeLevel.SetDefault {
+		defaultMap[f.Path] = f
+	}
+
+	for _, f := range defaultMap {
+		result.SetDefault = append(result.SetDefault, f)
 	}
 
 	return result
@@ -402,9 +515,12 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 	uuid string,
 	defaultLLMCosts []aigv1b1.LLMRequestCost,
 	declaredMetadataNamespaces []string,
+	emitErrorMetadata bool,
+	usageEstimates []aigv1b1.UsageEstimate,
+	usageEstimatePeriod time.Duration,
 ) (hasEffectiveRoute bool, _ error) {
 	// Precondition: aiGatewayRoutes is not empty as we early return if it is empty.
-	ec := &filterapi.Config{UUID: uuid, Version: version.Parse()}
+	ec := &filterapi.Config{UUID: uuid, Version: version.Parse(), EmitErrorMetadata: emitErrorMetadata}
 	var err error
 
 	// Process global LLM request costs from GatewayConfig.
@@ -417,6 +533,18 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 			return false, fmt.Errorf("failed to convert global LLMRequestCosts: %w", convErr)
 		}
 		ec.GlobalLLMRequestCosts = append(ec.GlobalLLMRequestCosts, fc)
+	}
+
+	// Usage estimates from GatewayConfig. The CRD enforces metadataKey uniqueness.
+	for i := range usageEstimates {
+		fe, convErr := aigwUsageEstimateToFilterAPI(&usageEstimates[i])
+		if convErr != nil {
+			return false, fmt.Errorf("invalid usage estimate %q: %w", usageEstimates[i].MetadataKey, convErr)
+		}
+		ec.UsageEstimates = append(ec.UsageEstimates, fe)
+	}
+	if len(ec.UsageEstimates) > 0 {
+		ec.UsageEstimatePeriod = usageEstimatePeriod
 	}
 
 	// Models contributed by routes with no Spec.Hostnames. We only promote these to
@@ -575,6 +703,95 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 					routeBackendNames = append(routeBackendNames, b.Name)
 				}
 			}
+			// Emit a filterapi.Backend entry for each mirror destination so that
+			// extproc, running on the upstream HTTP filter chain of the mirror
+			// cluster, can resolve the shadow backend's ModelNameOverride and
+			// header/body mutations by cluster-metadata backend name lookup.
+			for mirrorIndex := range rule.Mirrors {
+				mirror := &rule.Mirrors[mirrorIndex]
+				mirrorBR := &mirror.BackendRef
+				b := filterapi.Backend{IsMirror: true}
+				b.Name = internalapi.PerRouteRuleMirrorBackendName(aiGatewayRoute.Namespace, mirrorBR.Name, aiGatewayRoute.Name, ruleIndex, mirrorIndex)
+				b.ModelNameOverride = mirrorBR.ModelNameOverride
+
+				backendNamespace := mirrorBR.GetNamespace(aiGatewayRoute.Namespace)
+				if mirrorBR.IsCrossNamespace(aiGatewayRoute.Namespace) {
+					var rgErr error
+					if mirrorBR.IsInferencePool() {
+						rgErr = c.referenceGrantValidator.validateInferencePoolReference(
+							ctx, aiGatewayRoute.Namespace, backendNamespace, mirrorBR.Name)
+					} else {
+						rgErr = c.referenceGrantValidator.validateAIServiceBackendReference(
+							ctx, aiGatewayRoute.Namespace, backendNamespace, mirrorBR.Name)
+					}
+					if rgErr != nil {
+						c.logger.Error(rgErr, "cross-namespace mirror backendRef rejected: no valid ReferenceGrant. Skipping this mirror.",
+							"backend_name", mirrorBR.Name, "aigatewayroute", aiGatewayRoute.Name,
+							"namespace", backendNamespace)
+						continue
+					}
+				}
+
+				if mirrorBR.IsInferencePool() {
+					// A pool mirror has no AIServiceBackend: like primary InferencePool
+					// backendRefs, it is assumed OpenAI-schema, carries only the route-level
+					// mutations, and has no BackendSecurityPolicy (the mirror pool's pods are
+					// in-cluster model servers).
+					b.Schema = filterapi.VersionedAPISchema{
+						Name: filterapi.APISchemaOpenAI,
+						// This is for backward compatibility. TODO: Remove the 'version' field usage after v0.5.0 release.
+						Version: "v1", Prefix: "v1",
+					}
+					b.HeaderMutation = headerMutationToFilterAPI(mirrorBR.HeaderMutation)
+					b.BodyMutation = bodyMutationToFilterAPI(mirrorBR.BodyMutation)
+					ec.Backends = append(ec.Backends, b)
+					if _, exists := routeBackendNamesSet[b.Name]; !exists {
+						routeBackendNamesSet[b.Name] = struct{}{}
+						routeBackendNames = append(routeBackendNames, b.Name)
+					}
+					continue
+				}
+
+				backendObj, bsp, mirrorErr := c.backendWithMaybeBSP(ctx, backendNamespace, mirrorBR.Name)
+				if mirrorErr != nil {
+					if isCtxErr(mirrorErr) {
+						return false, fmt.Errorf("reconcile interrupted while reading mirror backend %s: %w", mirrorBR.Name, mirrorErr)
+					}
+					c.logger.Error(mirrorErr, "failed to get mirror backend or backend security policy. Skipping this mirror.",
+						"backend_name", mirrorBR.Name, "aigatewayroute", aiGatewayRoute.Name,
+						"namespace", backendNamespace)
+					continue
+				}
+
+				mergedHeaderMutation := mergeHeaderMutations(mirrorBR.HeaderMutation, backendObj.Spec.HeaderMutation)
+				b.HeaderMutation = headerMutationToFilterAPI(mergedHeaderMutation)
+
+				mergedBodyMutation := mergeBodyMutations(mirrorBR.BodyMutation, backendObj.Spec.BodyMutation)
+				b.BodyMutation = bodyMutationToFilterAPI(mergedBodyMutation)
+
+				b.Schema = schemaToFilterAPI(backendObj.Spec.APISchema)
+				b.HeaderValueFilters = headerValueFiltersToFilterAPI(backendObj.Spec.HeaderValueFilters)
+
+				if bsp != nil {
+					b.Auth, err = c.bspToFilterAPIBackendAuth(ctx, bsp)
+					if err != nil {
+						if isCtxErr(err) {
+							return false, fmt.Errorf("reconcile interrupted while reading auth for backend security policy %s: %w", bsp.Name, err)
+						}
+						c.logger.Error(err, "failed to get backend auth from backend security policy. Skipping this mirror.",
+							"backend_name", mirrorBR.Name, "backend_security_policy", bsp.Name,
+							"aigatewayroute", aiGatewayRoute.Name, "namespace", aiGatewayRoute.Namespace)
+						continue
+					}
+					stripCredentialOverrideInputHeaders(&b)
+				}
+
+				ec.Backends = append(ec.Backends, b)
+				if _, exists := routeBackendNamesSet[b.Name]; !exists {
+					routeBackendNamesSet[b.Name] = struct{}{}
+					routeBackendNames = append(routeBackendNames, b.Name)
+				}
+			}
 		}
 		if len(routeBackendNames) > 0 {
 			// Dedup per (metadataKey, routeName): last definition wins.
@@ -591,10 +808,17 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 			// computes and stores them in metadata for the HitsAddend to read.
 			c.injectQuotaPolicyCostExpressions(ctx, aiGatewayRoute, ec, injectedQuotaCosts, routeName)
 
-			for _, fc := range dedup {
-				ec.LLMRequestCosts = append(ec.LLMRequestCosts, fc)
+			for key := range dedup {
+				ec.LLMRequestCosts = append(ec.LLMRequestCosts, dedup[key])
 			}
 		}
+	}
+
+	if err = checkUsageEstimateMetadataKeys(ec); err != nil {
+		return false, err
+	}
+	if err = checkAdmissionReserveUsageEstimates(ec); err != nil {
+		return false, err
 	}
 
 	// If at least one route is hostname-scoped, promote the unscoped models to ec.UnscopedModels
@@ -1097,43 +1321,95 @@ func (c *GatewayController) injectQuotaPolicyCostExpressions(
 			if len(routeModels) > 0 && !routeModels[*pmq.ModelName] {
 				continue
 			}
-			expr := "total_tokens"
-			if pmq.Quota.CostExpression != nil {
-				expr = *pmq.Quota.CostExpression
-			}
-			if _, err := llmcostcel.NewProgram(expr); err != nil {
-				c.logger.Error(err, "invalid QuotaPolicy cost expression, skipping",
-					"policy", qp.Name, "model", *pmq.ModelName, "expression", expr)
-				continue
-			}
-			// One LLMRequestCost per target backend with the Backend and Model filters.
-			// ext_proc only evaluates the entry matching the serving backend and model,
-			// storing the result under the shared metadata key.
-			for _, ref := range qp.Spec.TargetRefs {
-				backendKey := route.Namespace + "/" + string(ref.Name)
-				dedupeKey := QuotaCostMetadataKey + "\x00" + *pmq.ModelName + "\x00" + backendKey
-				if _, exists := injectedQuotaCosts[dedupeKey]; exists {
+			// One LLMRequestCost per (bucket, target backend) with the Backend and
+			// Model filters. ext_proc only evaluates entries matching the serving
+			// backend and model, storing each bucket's cost under its own key.
+			for _, bucket := range quotaCostBuckets(&pmq.Quota) {
+				if _, err := llmcostcel.NewProgram(bucket.expr); err != nil {
+					c.logger.Error(err, "invalid QuotaPolicy cost expression, skipping",
+						"policy", qp.Name, "model", *pmq.ModelName, "bucket", bucket.key, "expression", bucket.expr)
 					continue
 				}
-				ec.LLMRequestCosts = append(ec.LLMRequestCosts, filterapi.LLMRequestCost{
-					Type:        filterapi.LLMRequestCostTypeCEL,
-					MetadataKey: QuotaCostMetadataKey,
-					CEL:         expr,
-					Backend:     backendKey,
-					RouteName:   routeName,
-					Model:       *pmq.ModelName,
-				})
-				injectedQuotaCosts[dedupeKey] = struct{}{}
+				metadataKey := translator.QuotaCostMetadataKey(bucket.key)
+				var reserveKey, settleKey string
+				if bucket.reserve != nil {
+					reserveKey = bucket.reserve.MetadataKey
+					settleKey = translator.QuotaSettleMetadataKey(bucket.key)
+					if !slices.ContainsFunc(ec.AdmissionReserves, func(r filterapi.AdmissionReserve) bool { return r.MetadataKey == reserveKey }) {
+						ec.AdmissionReserves = append(ec.AdmissionReserves, *bucket.reserve)
+					}
+				}
+				for _, ref := range qp.Spec.TargetRefs {
+					backendKey := route.Namespace + "/" + string(ref.Name)
+					dedupeKey := metadataKey + "\x00" + *pmq.ModelName + "\x00" + backendKey
+					if _, exists := injectedQuotaCosts[dedupeKey]; exists {
+						continue
+					}
+					ec.LLMRequestCosts = append(ec.LLMRequestCosts, filterapi.LLMRequestCost{
+						Type:        filterapi.LLMRequestCostTypeCEL,
+						MetadataKey: metadataKey,
+						CEL:         bucket.expr,
+						Backend:     backendKey,
+						RouteName:   routeName,
+						Model:       *pmq.ModelName,
+
+						AdmissionReserveMetadataKey: reserveKey,
+						AdmissionSettleMetadataKey:  settleKey,
+					})
+					injectedQuotaCosts[dedupeKey] = struct{}{}
+				}
 			}
 		}
 	}
 }
 
-// QuotaCostMetadataKey is the dynamic metadata key used to store a
-// QuotaPolicy's computed cost. A single key suffices because only one model
-// is active per request, and ext_proc filters cost entries by Model before
-// writing to this key.
-const QuotaCostMetadataKey = "quota_cost"
+// quotaCostBucket pairs one bucket's cost-metadata bucket key with its
+// resolved CEL cost expression (bucket-level, falling back to the model-level
+// expression, then "total_tokens"), and its admission reserve, if any.
+type quotaCostBucket struct {
+	key     string
+	expr    string
+	reserve *filterapi.AdmissionReserve
+}
+
+// quotaCostBuckets returns the token-cost buckets of a model quota: the default
+// bucket plus each bucket rule, skipping Requests-metric buckets (those burn
+// down by the request-time +1 only and carry no stream-done token charge).
+func quotaCostBuckets(quota *aigv1a1.QuotaDefinition) []quotaCostBucket {
+	resolveExpr := func(v *aigv1a1.QuotaValue) string {
+		if v.CostExpression != nil {
+			return *v.CostExpression
+		}
+		if quota.CostExpression != nil {
+			return *quota.CostExpression
+		}
+		return "total_tokens"
+	}
+	resolveReserve := func(v *aigv1a1.QuotaValue) *filterapi.AdmissionReserve {
+		r := v.AdmissionReserve
+		if r == nil {
+			return nil
+		}
+		return &filterapi.AdmissionReserve{
+			MetadataKey:        translator.QuotaReserveMetadataKey(r.UsageEstimate, r.Percent),
+			ReleaseMetadataKey: translator.QuotaReleaseMetadataKey(r.UsageEstimate, r.Percent),
+			UsageEstimate:      r.UsageEstimate,
+			Percent:            r.Percent,
+		}
+	}
+	var buckets []quotaCostBucket
+	if v := quota.DefaultBucket; v != nil && v.CostMetric != aigv1a1.QuotaCostMetricRequests {
+		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostDefaultBucketKey(), expr: resolveExpr(v), reserve: resolveReserve(v)})
+	}
+	for i := range quota.BucketRules {
+		v := &quota.BucketRules[i].Quota
+		if v.CostMetric == aigv1a1.QuotaCostMetricRequests {
+			continue
+		}
+		buckets = append(buckets, quotaCostBucket{key: translator.QuotaCostRuleBucketKey(i), expr: resolveExpr(v), reserve: resolveReserve(v)})
+	}
+	return buckets
+}
 
 // backendWithMaybeBSP retrieves the AIServiceBackend and its associated BackendSecurityPolicy if it exists.
 func (c *GatewayController) backendWithMaybeBSP(ctx context.Context, namespace, name string) (backend *aigv1b1.AIServiceBackend, bsp *aigv1b1.BackendSecurityPolicy, err error) {

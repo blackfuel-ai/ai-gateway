@@ -63,6 +63,13 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.grpcServer = grpc.NewServer()
 	r.mu.Unlock()
 
+	// Publish an empty snapshot so the rate limit service receives its initial
+	// config event even when no QuotaPolicy exists; without it the service
+	// never starts its health endpoint and gets probe-killed in a loop.
+	if err := r.UpdateConfigs(ctx, nil); err != nil {
+		return fmt.Errorf("failed to set initial empty xDS snapshot: %w", err)
+	}
+
 	xdsServer := serverv3.NewServer(ctx, r.cache, serverv3.CallbackFuncs{})
 	discoveryv3.RegisterAggregatedDiscoveryServiceServer(r.grpcServer, xdsServer)
 

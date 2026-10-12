@@ -180,7 +180,8 @@ func run(ctx context.Context, c *cmdRun, o *runOpts, stdout, stderr io.Writer) e
 	quotaRateLimitServiceAddr := "envoy-ai-gateway-ratelimit.envoy-gateway-system"
 	const quotaRateLimitTimeout = 5
 	const quotaRateLimitFailureModeDeny = false
-	extSrv, err := extensionserver.New(fakeClient, ctrl.Log, o.extprocUDSPath, true, requestHeaderAttributes, logRequestHeaderAttributes, quotaRateLimitServiceAddr, quotaRateLimitTimeout, quotaRateLimitFailureModeDeny)
+	const quotaReleaseAdmissionReserves = false
+	extSrv, err := extensionserver.New(fakeClient, ctrl.Log, o.extprocUDSPath, true, requestHeaderAttributes, logRequestHeaderAttributes, quotaRateLimitServiceAddr, quotaRateLimitTimeout, quotaRateLimitFailureModeDeny, quotaReleaseAdmissionReserves)
 	if err != nil {
 		return err
 	}

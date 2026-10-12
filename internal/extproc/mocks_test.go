@@ -82,6 +82,7 @@ type mockTranslator struct {
 	retBodyMutation             []byte
 	retUsedToken                metrics.TokenUsage
 	retResponseModel            internalapi.ResponseModel
+	retLLMErrorInfo             translator.LLMErrorInfo
 	retErr                      error
 	expForceRequestBodyMutation bool
 }
@@ -100,13 +101,13 @@ func (m *mockTranslator) ResponseHeaders(headers map[string]string) (newHeaders 
 }
 
 // ResponseError implements [translator.OpenAIChatCompletionTranslator].
-func (m *mockTranslator) ResponseError(_ map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, err error) {
+func (m *mockTranslator) ResponseError(_ map[string]string, body io.Reader) (newHeaders []internalapi.Header, newBody []byte, errInfo translator.LLMErrorInfo, err error) {
 	if m.expResponseBody != nil {
 		buf, err := io.ReadAll(body)
 		require.NoError(m.t, err)
 		require.Equal(m.t, m.expResponseBody.Body, buf)
 	}
-	return m.retHeaderMutation, m.retBodyMutation, m.retErr
+	return m.retHeaderMutation, m.retBodyMutation, m.retLLMErrorInfo, m.retErr
 }
 
 // ResponseBody implements [translator.OpenAIChatCompletionTranslator].
@@ -182,6 +183,12 @@ type mockMetrics struct {
 	cachedInputTokenCount        int
 	cacheCreationInputTokenCount int
 	outputTokenCount             int
+	// recordTokenUsageCallCount tracks how many times RecordTokenUsage was invoked.
+	// Useful for asserting idempotent / single emission for streaming responses.
+	recordTokenUsageCallCount int
+	// recordTokenUsageCtxErrs captures ctx.Err() observed at each RecordTokenUsage
+	// invocation so tests can verify the context was detached from cancellation.
+	recordTokenUsageCtxErrs []error
 	// streamingOutputTokens tracks the cumulative output tokens recorded via RecordTokenLatency.
 	streamingOutputTokens int
 	timeToFirstToken      float64
@@ -212,7 +219,9 @@ func (m *mockMetrics) SetResponseModel(responseModel internalapi.ResponseModel) 
 func (m *mockMetrics) SetBackend(backend *filterapi.Backend) { m.backend = backend.Name }
 
 // RecordTokenUsage implements [metrics.Metrics].
-func (m *mockMetrics) RecordTokenUsage(_ context.Context, usage metrics.TokenUsage, _ map[string]string) {
+func (m *mockMetrics) RecordTokenUsage(ctx context.Context, usage metrics.TokenUsage, _ map[string]string) {
+	m.recordTokenUsageCallCount++
+	m.recordTokenUsageCtxErrs = append(m.recordTokenUsageCtxErrs, ctx.Err())
 	if input, ok := usage.InputTokens(); ok {
 		m.inputTokenCount += int(input)
 	}

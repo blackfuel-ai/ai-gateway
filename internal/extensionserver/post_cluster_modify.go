@@ -115,3 +115,23 @@ func (s *Server) handleInferencePoolCluster(cluster *clusterv3.Cluster, inferenc
 	buildEPPMetadataForCluster(cluster, inferencePool)
 	return nil
 }
+
+// handleInferencePoolMirrorCluster is handleInferencePoolCluster for a request-mirror leg's
+// cluster: same ORIGINAL_DST conversion, but keyed on the MIRROR endpoint-picker header so the
+// shadow clone's destination stays isolated from the primary pool's selection (the clone
+// inherits the finalized downstream headers, where the mirror pool's pick has been copied into
+// the mirror header). It also drops the placeholder LoadAssignment Envoy Gateway resolved from
+// the HTTPRoute's stand-in Service ref — ORIGINAL_DST clusters carry no static endpoints.
+func (s *Server) handleInferencePoolMirrorCluster(cluster *clusterv3.Cluster, inferencePool *gwaiev1.InferencePool) error {
+	if err := s.handleInferencePoolCluster(cluster, inferencePool); err != nil {
+		return err
+	}
+	cluster.LbConfig = &clusterv3.Cluster_OriginalDstLbConfig_{
+		OriginalDstLbConfig: &clusterv3.Cluster_OriginalDstLbConfig{
+			UseHttpHeader:  true,
+			HttpHeaderName: internalapi.MirrorEndpointPickerHeaderKey,
+		},
+	}
+	cluster.LoadAssignment = nil
+	return nil
+}

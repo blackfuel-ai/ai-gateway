@@ -395,7 +395,7 @@ func TestToAWSBedrockV1Tokenize_ResponseError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			headers, newBody, err := translator.ResponseError(tt.responseHeaders, strings.NewReader(tt.input))
+			headers, newBody, _, err := translator.ResponseError(tt.responseHeaders, strings.NewReader(tt.input))
 
 			require.NoError(t, err)
 			require.NotNil(t, headers)
@@ -421,7 +421,7 @@ func TestToAWSBedrockV1Tokenize_ResponseError(t *testing.T) {
 		pr, pw := io.Pipe()
 		_ = pw.CloseWithError(fmt.Errorf("simulated read error"))
 
-		_, _, err := translator.ResponseError(map[string]string{":status": "500"}, pr)
+		_, _, _, err := translator.ResponseError(map[string]string{":status": "500"}, pr)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "failed to read error body")
 	})
@@ -553,7 +553,7 @@ func TestToAWSBedrockV1Tokenize_IntegrationScenarios(t *testing.T) {
 			"message": "Invalid model ARN specified"
 		}`
 
-		_, respBody, err := translator.ResponseError(headers, strings.NewReader(errorBody))
+		_, respBody, _, err := translator.ResponseError(headers, strings.NewReader(errorBody))
 		require.NoError(t, err)
 		require.NotNil(t, respBody)
 

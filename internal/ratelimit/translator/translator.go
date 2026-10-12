@@ -88,6 +88,52 @@ func DefaultBucketDescriptorKey(numRules int) string {
 	return fmt.Sprintf("rule-%d-match--1", numRules)
 }
 
+// QuotaCostRuleBucketKey identifies a bucket rule's cost bucket by rule index.
+func QuotaCostRuleBucketKey(ruleIndex int) string {
+	return fmt.Sprintf("rule-%d", ruleIndex)
+}
+
+// QuotaCostDefaultBucketKey identifies a model's default cost bucket.
+func QuotaCostDefaultBucketKey() string {
+	return "default"
+}
+
+// QuotaCostMetadataKey derives the dynamic metadata key under which ext_proc
+// stores one bucket's computed cost. Keyed by bucket only (not model): a single
+// model is active per request and ext_proc filters cost entries by model before
+// writing, so buckets of different models can share a key without collision. A
+// stream-done entry whose key was not written (a rule index another model does
+// not have) resolves to nothing, and Envoy ignores that descriptor.
+func QuotaCostMetadataKey(bucketKey string) string {
+	return "quota_cost_" + bucketKey
+}
+
+// QuotaReserveMetadataKey derives the dynamic metadata key under which ext_proc
+// stores, at admission, the reserve of every bucket that reserves percent of the
+// usage estimate stored under usageEstimate. The reserve depends on the estimate
+// and the percent only, so buckets sharing both share the key; the controller, the
+// ext_proc and the extension server each derive it from the QuotaPolicy alone.
+func QuotaReserveMetadataKey(usageEstimate string, percent uint32) string {
+	return fmt.Sprintf("quota_reserve_%s_%d", usageEstimate, percent)
+}
+
+// QuotaReleaseMetadataKey derives the dynamic metadata key under which ext_proc
+// stores, at admission, the amount released at stream end from every counter a
+// reserve was charged to: the reserve stored under the QuotaReserveMetadataKey of
+// the same usage estimate and percent.
+func QuotaReleaseMetadataKey(usageEstimate string, percent uint32) string {
+	return fmt.Sprintf("quota_release_%s_%d", usageEstimate, percent)
+}
+
+// QuotaSettleMetadataKey derives the dynamic metadata key under which ext_proc
+// stores, with the cost, the part of one reserving bucket's cost its reserve
+// covers: the cost charged to the serving counter on top of the remainder stored
+// under QuotaCostMetadataKey, once the reserve is released. Keyed by bucket only,
+// like QuotaCostMetadataKey.
+func QuotaSettleMetadataKey(bucketKey string) string {
+	return "quota_settle_" + bucketKey
+}
+
 // BuildRateLimitConfigs translates a QuotaPolicy and its resolved target
 // AIServiceBackends into a single rate limit service configuration.
 // All backends share the same domain, distinguished by backend_name descriptors.
@@ -152,8 +198,8 @@ func buildBackendDescriptorKeyed(
 		allKeyed = append(allKeyed, keyed...)
 	}
 
-	if policy.Spec.ServiceQuota.Quota.Limit > 0 {
-		desc, err := buildServiceQuotaDescriptor(&policy.Spec.ServiceQuota)
+	if policy.Spec.ServiceQuota != nil && policy.Spec.ServiceQuota.Quota.Limit > 0 {
+		desc, err := buildServiceQuotaDescriptor(policy.Spec.ServiceQuota)
 		if err != nil {
 			return nil, nil, fmt.Errorf("service quota: %w", err)
 		}
@@ -220,7 +266,11 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 	}
 
 	if len(quota.BucketRules) == 0 {
-		policy, err := quotaValueToPolicy(&quota.DefaultBucket)
+		if quota.DefaultBucket == nil {
+			// No bucket rules and no default bucket: nothing to enforce.
+			return desc, nil, nil
+		}
+		policy, err := quotaValueToPolicy(quota.DefaultBucket)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -259,8 +309,8 @@ func buildPerModelDescriptorKeyed(descriptorModelName string, quota *aigv1a1.Quo
 		}
 	}
 
-	if quota.DefaultBucket.Limit > 0 {
-		defaultPolicy, err := quotaValueToPolicy(&quota.DefaultBucket)
+	if quota.DefaultBucket != nil && quota.DefaultBucket.Limit > 0 {
+		defaultPolicy, err := quotaValueToPolicy(quota.DefaultBucket)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -389,6 +439,10 @@ func flattenAndSortHeaders(selectors []egv1a1.RateLimitSelectCondition) []egv1a1
 	return headers
 }
 
+// quotaValueToPolicy converts a QuotaValue to the static rate limit policy in the
+// rate limit service config. When the QuotaValue has a dynamicOverride, the
+// per-request limit carried in the descriptor takes precedence in the rate limit
+// service; the static value here remains the fallback.
 func quotaValueToPolicy(qv *aigv1a1.QuotaValue) (*rlsconfv3.RateLimitPolicy, error) {
 	unit, err := parseDuration(qv.Duration)
 	if err != nil {

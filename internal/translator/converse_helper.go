@@ -360,14 +360,14 @@ func openAIMessageToBedrockMessageRoleTool(
 // bedrockResponseError translates an AWS Bedrock error response into an OpenAI error.
 // Shared by the chat completion and tokenize AWS Bedrock translators.
 func bedrockResponseError(respHeaders map[string]string, body io.Reader) (
-	newHeaders []internalapi.Header, newBody []byte, err error,
+	newHeaders []internalapi.Header, newBody []byte, errInfo LLMErrorInfo, err error,
 ) {
 	statusCode := respHeaders[statusHeaderName]
 	var openaiError openai.Error
 	if v, ok := respHeaders[contentTypeHeaderName]; ok && strings.Contains(v, jsonContentType) {
 		var bedrockError awsbedrock.BedrockException
 		if err = json.NewDecoder(body).Decode(&bedrockError); err != nil {
-			return nil, nil, fmt.Errorf("failed to unmarshal error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to unmarshal error body: %w", err)
 		}
 		openaiError = openai.Error{
 			Type: "error",
@@ -381,7 +381,7 @@ func bedrockResponseError(respHeaders map[string]string, body io.Reader) (
 		var buf []byte
 		buf, err = io.ReadAll(body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read error body: %w", err)
+			return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to read error body: %w", err)
 		}
 		openaiError = openai.Error{
 			Type: "error",
@@ -394,11 +394,12 @@ func bedrockResponseError(respHeaders map[string]string, body io.Reader) (
 	}
 	newBody, err = json.Marshal(openaiError)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal error body: %w", err)
+		return nil, nil, LLMErrorInfo{}, fmt.Errorf("failed to marshal error body: %w", err)
 	}
 	newHeaders = []internalapi.Header{
 		{contentTypeHeaderName, jsonContentType},
 		{contentLengthHeaderName, strconv.Itoa(len(newBody))},
 	}
+	errInfo = LLMErrorInfo{Type: openaiError.Error.Type}
 	return
 }

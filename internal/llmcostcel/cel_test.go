@@ -9,6 +9,7 @@ import (
 	"testing"
 	"testing/synctest"
 
+	"github.com/google/cel-go/cel"
 	"github.com/stretchr/testify/require"
 )
 
@@ -90,4 +91,135 @@ func TestEvaluateProgram(t *testing.T) {
 			}
 		}) // synctest.Test waits for all goroutines to complete.
 	})
+}
+
+// TestQuotaBucketExpressions locks in the cost expressions used by per-bucket
+// quota policies: input tokens excluding cached input (underflow-guarded) and
+// output tokens.
+func TestQuotaBucketExpressions(t *testing.T) {
+	t.Run("input tokens excluding cached, guarded", func(t *testing.T) {
+		prog, err := NewProgram("input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)")
+		require.NoError(t, err)
+		v, err := EvaluateProgram(prog, "m", "b", "r", 200, 150, 0, 10, 210, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(50), v)
+
+		// cached >= input never underflows thanks to the guard.
+		v, err = EvaluateProgram(prog, "m", "b", "r", 100, 100, 0, 10, 110, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(0), v)
+	})
+	t.Run("output tokens", func(t *testing.T) {
+		prog, err := NewProgram("output_tokens")
+		require.NoError(t, err)
+		v, err := EvaluateProgram(prog, "m", "b", "r", 200, 150, 0, 42, 242, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint64(42), v)
+	})
+}
+
+func TestNewEstimateProgram(t *testing.T) {
+	for _, expr := range []string{
+		"input_tokens",
+		"input_tokens > cached_input_tokens ? input_tokens - cached_input_tokens : uint(0)",
+		"cache_rate",
+		"input_tokens_per_byte",
+		"double(input_tokens) * cache_rate",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := NewEstimateProgram(expr)
+			require.NoError(t, err)
+		})
+	}
+	t.Run("invalid", func(t *testing.T) {
+		_, err := NewEstimateProgram("cache_rate +")
+		require.ErrorContains(t, err, "cannot compile CEL expression")
+	})
+	t.Run("unknown variable", func(t *testing.T) {
+		_, err := NewEstimateProgram("tokens_per_second")
+		require.ErrorContains(t, err, "cannot compile CEL expression")
+	})
+	t.Run("not a number", func(t *testing.T) {
+		_, err := NewEstimateProgram("model")
+		require.ErrorContains(t, err, "CEL expression must return an int, uint or double, got string")
+	})
+	t.Run("not finite at zero usage", func(t *testing.T) {
+		// Division by zero is valid until evaluated on actual values.
+		_, err := NewEstimateProgram("input_tokens_per_byte / cache_rate")
+		require.NoError(t, err)
+	})
+	t.Run("cost programs do not see the ratios", func(t *testing.T) {
+		_, err := NewProgram("cache_rate")
+		require.ErrorContains(t, err, "cannot compile CEL expression")
+	})
+}
+
+func TestEvaluateEstimateProgram(t *testing.T) {
+	in := EstimateInputs{
+		Model:              "cool_model",
+		InputTokens:        200,
+		CachedInputTokens:  50,
+		OutputTokens:       7,
+		TotalTokens:        207,
+		InputTokensPerByte: 0.25,
+		CacheRate:          0.4,
+	}
+	for _, tc := range []struct {
+		expr string
+		want float64
+	}{
+		{expr: "input_tokens", want: 200},
+		{expr: "int(input_tokens) - int(cached_input_tokens)", want: 150},
+		{expr: "model == 'cool_model' ? total_tokens + output_tokens : uint(0)", want: 214},
+		{expr: "cache_rate", want: 0.4},
+		{expr: "input_tokens_per_byte", want: 0.25},
+		{expr: "double(input_tokens) * cache_rate", want: 80},
+	} {
+		t.Run(tc.expr, func(t *testing.T) {
+			prog, err := NewEstimateProgram(tc.expr)
+			require.NoError(t, err)
+			v, err := EvaluateEstimateProgram(prog, in)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, v)
+		})
+	}
+	for _, tc := range []struct {
+		expr    string
+		wantErr string
+	}{
+		{expr: "int(cached_input_tokens) - int(input_tokens)", wantErr: "CEL expression result is negative (-150)"},
+		{expr: "cache_rate - 1.0", wantErr: "CEL expression result is negative (-0.6)"},
+		{expr: "cache_rate / 0.0", wantErr: "CEL expression result is not finite (+Inf)"},
+		{expr: "(cache_rate - 0.4) / 0.0", wantErr: "CEL expression result is not finite (NaN)"},
+		{expr: "model", wantErr: "CEL expression result is not a number, got string"},
+	} {
+		t.Run(tc.expr, func(t *testing.T) {
+			prog, err := estimateEnvProgram(t, tc.expr)
+			require.NoError(t, err)
+			_, err = EvaluateEstimateProgram(prog, in)
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+	t.Run("ensure concurrency safety", func(t *testing.T) {
+		prog, err := NewEstimateProgram("double(input_tokens) * cache_rate")
+		require.NoError(t, err)
+		synctest.Test(t, func(t *testing.T) {
+			for range 100 {
+				go func() {
+					v, err := EvaluateEstimateProgram(prog, in)
+					require.NoError(t, err)
+					require.Equal(t, float64(80), v)
+				}()
+			}
+		})
+	})
+}
+
+// estimateEnvProgram compiles expr in the estimate environment without the
+// sanity evaluation of NewEstimateProgram, which rejects some failing expressions.
+func estimateEnvProgram(t *testing.T, expr string) (cel.Program, error) {
+	t.Helper()
+	ast, issues := estimateEnv.Compile(expr)
+	require.NoError(t, issues.Err())
+	return estimateEnv.Program(ast)
 }

@@ -7,8 +7,11 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -23,10 +26,13 @@ import (
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	aigv1a1 "github.com/envoyproxy/ai-gateway/api/v1alpha1"
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
 const (
@@ -40,7 +46,12 @@ const (
 	// We use this annotation to ensure that Envoy Gateway reconciles the HTTPRoute when the backend refs change.
 	// This will result in metadata being added to the underling Envoy route
 	// @see https://gateway.envoyproxy.io/contributions/design/metadata/
-	httpRouteBackendRefPriorityAnnotationKey           = egAnnotationPrefix + "backend-ref-priority"
+	httpRouteBackendRefPriorityAnnotationKey = egAnnotationPrefix + "backend-ref-priority"
+	// httpRouteQuotaPolicyHashAnnotationKey carries a hash of the QuotaPolicies targeting the route's backends,
+	// so a QuotaPolicy change changes the HTTPRoute and Envoy Gateway re-translates it, calling the extension
+	// server's PostTranslateModify with the new policy. The egAnnotationPrefix is what carries the change into
+	// Envoy Gateway's IR; an annotation without it is dropped from the IR and no xDS update follows.
+	httpRouteQuotaPolicyHashAnnotationKey              = egAnnotationPrefix + "quota-policy-hash"
 	httpRouteAnnotationForAIGatewayGeneratedIndication = egAnnotationPrefix + internalapi.AIGatewayGeneratedHTTPRouteAnnotation
 	egOwningGatewayNameLabel                           = egAnnotationPrefix + "owning-gateway-name"
 	egOwningGatewayNamespaceLabel                      = egAnnotationPrefix + "owning-gateway-namespace"
@@ -337,11 +348,62 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 				Path:    &gwapiv1.HTTPPathMatch{Value: &c.rootPrefix},
 			})
 		}
+		// Envoy Gateway names each mirror cluster `<rule>-mirror-<filterIdx>` where filterIdx is the
+		// index across ALL of the rule's filters, and the extension server's mirror-cluster parse
+		// (post_translate_modify.go) maps that suffix back to rule.Mirrors[j] assuming exactly the one
+		// leading host-rewrite filter (suffix = j+1). Mirrors therefore stay the trailing filters of the
+		// rule and are emitted all-or-nothing per rule: skipping only the invalid ones would shift the
+		// indices of the remaining mirrors and make the extension server resolve the wrong backend.
+		var mirrorFilters []gwapiv1.HTTPRouteFilter
+		poolMirrors := 0
+		for j := range rule.Mirrors {
+			mirror := &rule.Mirrors[j]
+			mirrorBR := &mirror.BackendRef
+			var mirrorObjRef gwapiv1.BackendObjectReference
+			var err error
+			if mirrorBR.IsInferencePool() {
+				if poolMirrors++; poolMirrors > 1 {
+					err = fmt.Errorf("at most one InferencePool mirror per rule (rule %d, mirror %d): each pool mirror needs the mirror endpoint-picker header to itself", i, j)
+				} else {
+					mirrorObjRef, err = c.inferencePoolMirrorBackendRef(ctx, aiGatewayRoute, mirrorBR)
+				}
+			} else {
+				var mirrorBackend *aigv1b1.AIServiceBackend
+				if mirrorBackend, err = c.validateAndGetBackend(ctx, aiGatewayRoute, mirrorBR); err != nil {
+					err = fmt.Errorf("failed to get AIServiceBackend for mirror %s.%s: %w",
+						mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), err)
+				} else {
+					mirrorObjRef = mirrorBackend.Spec.BackendRef
+					if mirrorObjRef.Namespace == nil && mirrorBackend.Namespace != "" && mirrorBackend.Namespace != aiGatewayRoute.Namespace {
+						ns := gwapiv1.Namespace(mirrorBackend.Namespace)
+						mirrorObjRef.Namespace = &ns
+					}
+				}
+			}
+			if err != nil {
+				c.logger.Error(err, "skipping mirrors of rule with a mirror backendRef that failed validation",
+					"namespace", aiGatewayRoute.Namespace, "name", aiGatewayRoute.Name, "rule", i, "mirror", j)
+				errs = append(errs, err)
+				mirrorFilters = nil
+				break
+			}
+			mirrorFilters = append(mirrorFilters, gwapiv1.HTTPRouteFilter{
+				Type: gwapiv1.HTTPRouteFilterRequestMirror,
+				RequestMirror: &gwapiv1.HTTPRequestMirrorFilter{
+					BackendRef: mirrorObjRef,
+					Percent:    mirror.Percent,
+					Fraction:   mirror.Fraction,
+				},
+			})
+		}
+		filters := make([]gwapiv1.HTTPRouteFilter, 0, len(rewriteFilters)+len(mirrorFilters))
+		filters = append(filters, rewriteFilters...)
+		filters = append(filters, mirrorFilters...)
 		rules = append(rules, gwapiv1.HTTPRouteRule{
 			Name:        rule.Name,
 			BackendRefs: backendRefs,
 			Matches:     matches,
-			Filters:     rewriteFilters,
+			Filters:     filters,
 			Timeouts:    rule.GetTimeoutsOrDefault(),
 		})
 	}
@@ -382,6 +444,14 @@ func (c *AIGatewayRouteController) newHTTPRoute(ctx context.Context, dst *gwapiv
 	// HACK: We need to set an annotation so that Envoy Gateway reconciles the HTTPRoute when the backend refs change.
 	dst.Annotations[httpRouteBackendRefPriorityAnnotationKey] = buildPriorityAnnotation(aiGatewayRoute.Spec.Rules)
 	dst.Annotations[httpRouteAnnotationForAIGatewayGeneratedIndication] = "true"
+	// On error, the existing hash is kept: the HTTPRoute is still written, and the next reconcile updates it.
+	if quotaPolicyHash, err := c.buildQuotaPolicyHashAnnotation(ctx, aiGatewayRoute); err != nil {
+		errs = append(errs, err)
+	} else if quotaPolicyHash == "" {
+		delete(dst.Annotations, httpRouteQuotaPolicyHashAnnotationKey)
+	} else {
+		dst.Annotations[httpRouteQuotaPolicyHashAnnotationKey] = quotaPolicyHash
+	}
 
 	dst.Spec.ParentRefs = aiGatewayRoute.Spec.ParentRefs
 
@@ -428,6 +498,48 @@ func (c *AIGatewayRouteController) backend(ctx context.Context, namespace, name 
 		return nil, err
 	}
 	return backend, nil
+}
+
+// inferencePoolMirrorBackendRef returns the HTTPRoute RequestMirror backendRef for a mirror leg
+// targeting an InferencePool.
+//
+// A pool mirror's real target is decided per request by its endpoint picker: the extension server
+// rewrites the mirror cluster to ORIGINAL_DST keyed on the mirror endpoint-picker header and wires
+// the pool's EPP into the downstream chain. Envoy Gateway however refuses non-Service/Backend kinds
+// on a RequestMirror backendRef, so the HTTPRoute carries a placeholder Service ref — the pool's own
+// endpointPickerRef Service, which always exists alongside the pool. Its endpoints are irrelevant
+// once the cluster is ORIGINAL_DST.
+func (c *AIGatewayRouteController) inferencePoolMirrorBackendRef(
+	ctx context.Context,
+	aiGatewayRoute *aigv1b1.AIGatewayRoute,
+	mirrorBR *aigv1b1.AIGatewayRouteRuleBackendRef,
+) (gwapiv1.BackendObjectReference, error) {
+	// The placeholder Service ref lives in the pool's namespace, so a cross-namespace pool mirror
+	// would also need a Service ReferenceGrant at the Envoy Gateway level, whose absence fails the
+	// RequestMirror filter of the rule. Only same-namespace pool mirrors are supported.
+	if mirrorBR.IsCrossNamespace(aiGatewayRoute.Namespace) {
+		return gwapiv1.BackendObjectReference{}, fmt.Errorf("mirror InferencePool %s.%s must be in the AIGatewayRoute namespace %s",
+			mirrorBR.Name, mirrorBR.GetNamespace(aiGatewayRoute.Namespace), aiGatewayRoute.Namespace)
+	}
+	pool := &gwaiev1.InferencePool{}
+	if err := c.client.Get(ctx, client.ObjectKey{
+		Namespace: aiGatewayRoute.Namespace, Name: mirrorBR.Name,
+	}, pool); err != nil {
+		return gwapiv1.BackendObjectReference{}, fmt.Errorf("failed to get InferencePool for mirror %s.%s: %w",
+			mirrorBR.Name, aiGatewayRoute.Namespace, err)
+	}
+	if pool.Spec.EndpointPickerRef == nil {
+		return gwapiv1.BackendObjectReference{}, fmt.Errorf("mirror InferencePool %s.%s has no endpointPickerRef",
+			mirrorBR.Name, aiGatewayRoute.Namespace)
+	}
+	eppPort := gwapiv1.PortNumber(internalapi.DefaultEndpointPickerPort)
+	if p := pool.Spec.EndpointPickerRef.Port; p != nil {
+		eppPort = gwapiv1.PortNumber(p.Number)
+	}
+	return gwapiv1.BackendObjectReference{
+		Name: gwapiv1.ObjectName(pool.Spec.EndpointPickerRef.Name),
+		Port: ptr.To(eppPort),
+	}, nil
 }
 
 // validateAndGetBackend validates a backend reference (including cross-namespace ReferenceGrant check)
@@ -492,4 +604,46 @@ func buildPriorityAnnotation(rules []aigv1b1.AIGatewayRouteRule) string {
 		}
 	}
 	return strings.Join(priorities, ",")
+}
+
+// buildQuotaPolicyHashAnnotation hashes the specs of the QuotaPolicies that target the route's backends.
+// It returns "" when no QuotaPolicy targets them, so a route without quotas carries no annotation.
+func (c *AIGatewayRouteController) buildQuotaPolicyHashAnnotation(ctx context.Context, aiGatewayRoute *aigv1b1.AIGatewayRoute) (string, error) {
+	policies := make(map[string]*aigv1a1.QuotaPolicy)
+	for i := range aiGatewayRoute.Spec.Rules {
+		for j := range aiGatewayRoute.Spec.Rules[i].BackendRefs {
+			br := &aiGatewayRoute.Spec.Rules[i].BackendRefs[j]
+			key := fmt.Sprintf("%s.%s", br.Name, br.GetNamespace(aiGatewayRoute.Namespace))
+			var list aigv1a1.QuotaPolicyList
+			if err := c.client.List(ctx, &list,
+				client.MatchingFields{k8sClientIndexAIServiceBackendToTargetingQuotaPolicy: key}); err != nil {
+				return "", fmt.Errorf("failed to list QuotaPolicies for backend %s: %w", key, err)
+			}
+			for k := range list.Items {
+				qp := &list.Items[k]
+				policies[qp.Namespace+"/"+qp.Name] = qp
+			}
+		}
+	}
+	if len(policies) == 0 {
+		return "", nil
+	}
+
+	names := make([]string, 0, len(policies))
+	for name := range policies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		spec, err := json.Marshal(policies[name].Spec)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal QuotaPolicy %s spec: %w", name, err)
+		}
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		h.Write(spec)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
