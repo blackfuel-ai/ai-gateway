@@ -527,6 +527,10 @@ func (a *anthropicToAWSBedrockTranslator) ResponseBody(_ map[string]string, body
 		Type:  "message",
 		Role:  "assistant",
 		Model: a.requestModel,
+		// Anthropic Messages responses always carry content as an array, empty when Bedrock
+		// returned no output message. Clients iterate it unconditionally, so it must never
+		// serialize as null.
+		Content: []anthropicschema.MessagesContentBlock{},
 	}
 
 	// Convert stop reason.
@@ -537,7 +541,6 @@ func (a *anthropicToAWSBedrockTranslator) ResponseBody(_ map[string]string, body
 
 	// Convert content blocks.
 	if bedrockResp.Output != nil {
-		anthropicResp.Content = make([]anthropicschema.MessagesContentBlock, 0)
 		for _, block := range bedrockResp.Output.Message.Content {
 			switch {
 			case block.Text != nil:
