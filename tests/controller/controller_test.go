@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gwaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
@@ -976,4 +977,95 @@ func TestGatewayConfigAnnotationChangePropagation(t *testing.T) {
 	}, 30*time.Second, 200*time.Millisecond,
 		"filter-config secret was NOT regenerated with EmitErrorMetadata=true after the "+
 			"gateway-config annotation was added to the existing Gateway")
+}
+
+// TestAIGatewayRouteControllerDeletionDuringReconcile deletes each AIGatewayRoute the moment its
+// finalizer appears, while the controller is still writing the HTTPRoute and the status. The
+// controller reads through the manager's cache, as StartControllers wires it, so the deletion
+// reconcile can hold a copy older than its own last write and get a Conflict removing the
+// finalizer. Every route must still be deleted.
+func TestAIGatewayRouteControllerDeletionDuringReconcile(t *testing.T) {
+	c, cfg, k := testsinternal.NewEnvTest(t)
+
+	opt := ctrl.Options{
+		Scheme: c.Scheme(), LeaderElection: false,
+		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+	}
+	mgr, err := ctrl.NewManager(cfg, opt)
+	require.NoError(t, err)
+
+	// Each reconcile notifies the Gateway controller; nothing consumes that here.
+	eventCh := internaltesting.NewControllerEventChan[*gwapiv1.Gateway]()
+	go func() {
+		for {
+			select {
+			case <-t.Context().Done():
+				return
+			case <-eventCh.Ch:
+			}
+		}
+	}()
+	rc := controller.NewAIGatewayRouteController(mgr.GetClient(), k, defaultLogger(), eventCh.Ch, "/foobar/")
+	err = controller.TypedControllerBuilderForCRD(mgr, &aigv1b1.AIGatewayRoute{}).Complete(rc)
+	require.NoError(t, err)
+
+	const gatewayName = "gtw"
+	require.NoError(t, c.Create(t.Context(), &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: gatewayName, Namespace: "default"},
+		Spec: gwapiv1.GatewaySpec{
+			GatewayClassName: "gwclass",
+			Listeners:        []gwapiv1.Listener{{Name: "listener1", Port: 8080, Protocol: "http"}},
+		},
+	}))
+	require.NoError(t, c.Create(t.Context(), &aigv1b1.AIServiceBackend{
+		ObjectMeta: metav1.ObjectMeta{Name: "backend1", Namespace: "default"},
+		Spec: aigv1b1.AIServiceBackendSpec{
+			APISchema: defaultSchema,
+			BackendRef: gwapiv1.BackendObjectReference{
+				Name:  "backend1",
+				Kind:  ptr.To(gwapiv1.Kind("Backend")),
+				Group: ptr.To(gwapiv1.Group("gateway.envoyproxy.io")),
+			},
+		},
+	}))
+
+	go func() { require.NoError(t, mgr.Start(t.Context())) }()
+	require.True(t, mgr.GetCache().WaitForCacheSync(t.Context()))
+
+	const routes = 40
+	for i := range routes {
+		route := &aigv1b1.AIGatewayRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("churn-%d", i), Namespace: "default"},
+			Spec: aigv1b1.AIGatewayRouteSpec{
+				ParentRefs: []gwapiv1a2.ParentReference{{
+					Name:  gatewayName,
+					Kind:  ptr.To(gwapiv1a2.Kind("Gateway")),
+					Group: ptr.To(gwapiv1a2.Group("gateway.networking.k8s.io")),
+				}},
+				Rules: []aigv1b1.AIGatewayRouteRule{{
+					BackendRefs: []aigv1b1.AIGatewayRouteRuleBackendRef{{Name: "backend1", Weight: ptr.To[int32](1)}},
+				}},
+			},
+		}
+		require.NoError(t, c.Create(t.Context(), route))
+		require.Eventually(t, func() bool {
+			var r aigv1b1.AIGatewayRoute
+			return c.Get(t.Context(), client.ObjectKeyFromObject(route), &r) == nil && len(r.Finalizers) > 0
+		}, 10*time.Second, time.Millisecond)
+		require.NoError(t, c.Delete(t.Context(), route))
+	}
+
+	var left []string
+	require.Eventually(t, func() bool {
+		var list aigv1b1.AIGatewayRouteList
+		if err := c.List(t.Context(), &list, client.InNamespace("default")); err != nil {
+			return false
+		}
+		left = left[:0]
+		for i := range list.Items {
+			left = append(left, list.Items[i].Name)
+		}
+		return len(left) == 0
+	}, 30*time.Second, 200*time.Millisecond, "routes left Terminating: %v", &left)
 }
