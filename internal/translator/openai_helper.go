@@ -116,12 +116,9 @@ func anthropicMessagesToOpenAI(body *anthropic.MessagesRequest) []openai.ChatCom
 }
 
 // appendAnthropicAssistantMessage converts an Anthropic assistant message to OpenAI format.
-// It extracts tool_use blocks as OpenAI tool_calls on the assistant message, and preserves
-// text, thinking, and redacted_thinking content blocks.
-//
-// When thinking or redacted_thinking blocks are present, the content is encoded as a
-// structured []ChatCompletionAssistantMessageParamContent array to preserve full fidelity.
-// Otherwise, plain string content is used for backward compatibility.
+// It extracts tool_use blocks as OpenAI tool_calls on the assistant message, joins
+// thinking and redacted_thinking blocks, in order, into the message-level reasoning
+// field, and carries the text blocks as plain string content.
 func appendAnthropicAssistantMessage(messages []openai.ChatCompletionMessageParamUnion, msg anthropic.MessageParam) []openai.ChatCompletionMessageParamUnion {
 	var toolCalls []openai.ChatCompletionMessageToolCallParam
 	var reasoning []string
