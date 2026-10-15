@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"os/exec"
 	"strings"
 	"testing"
@@ -97,6 +98,14 @@ func TestInferencePoolIntegration(t *testing.T) {
 }`, map[string]string{"Authorization": "sk-abcdefghijklmnopqrstuvwxyz"}, http.StatusOK)
 	})
 
+	// Deleting one pool must not fail the other pools' requests on connections opened before the
+	// deletion. Those connections keep the previous filter chain while it drains, and that chain
+	// still carries the deleted pool's EPP filter; its EPP cluster is gone, so the filter must be
+	// inert unless a route activates it.
+	t.Run("endpointpicker_survives_sibling_pool_deletion", func(t *testing.T) {
+		testInferencePoolSurvivesSiblingPoolDeletion(t, egSelector, baseManifest)
+	})
+
 	t.Cleanup(func() {
 		_ = e2elib.KubectlDeleteManifest(context.Background(), aiGWRouteManifest)
 	})
@@ -176,6 +185,71 @@ func testInferenceGatewayConnectivity(t *testing.T, egSelector, body string, add
 		t.Logf("Gateway connectivity test passed: status=%d", resp.StatusCode)
 		return true
 	}, 2*time.Minute, 5*time.Second, "Gateway should return expected status code", expectedStatusCode)
+}
+
+// testInferencePoolSurvivesSiblingPoolDeletion opens a keep-alive connection to the llama pool,
+// deletes the mistral pool, waits until fresh connections see the new configuration, and then
+// requires a llama request on the pre-deletion connection to still succeed. baseManifest is
+// re-applied afterwards to restore the deleted pool.
+func testInferencePoolSurvivesSiblingPoolDeletion(t *testing.T, egSelector, baseManifest string) {
+	fwd := e2elib.RequireNewHTTPPortForwarder(t, inferenceGatewayNamespace, egSelector, e2elib.EnvoyGatewayDefaultServicePort)
+	defer fwd.Kill()
+
+	llamaBody := `{"messages":[{"role":"user","content":"Say this is a test"}],"model":"meta-llama/Llama-3.1-8B-Instruct"}`
+	llamaHeaders := map[string]string{"Authorization": "sk-abcdefghijklmnopqrstuvwxyz"}
+	mistralBody := `{"messages":[{"role":"user","content":"Say this is a test"}],"model":"mistral:latest"}`
+
+	keepAlive := &http.Client{Transport: &http.Transport{MaxConnsPerHost: 1, MaxIdleConnsPerHost: 1}}
+	fresh := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
+	// Open the connection that will be bound to the pre-deletion filter chain.
+	require.Eventually(t, func() bool {
+		status, _ := doInferenceRequest(t, keepAlive, fwd.Address(), llamaBody, llamaHeaders)
+		return status == http.StatusOK
+	}, 2*time.Minute, 2*time.Second, "llama pool should serve before the deletion")
+
+	require.NoError(t, e2elib.Kubectl(t.Context(), "delete", "inferencepool", "mistral", "-n", inferenceGatewayNamespace).Run())
+	t.Cleanup(func() {
+		_ = e2elib.KubectlApplyManifest(context.Background(), baseManifest)
+	})
+
+	// The new configuration is live once a fresh connection no longer reaches the mistral pool.
+	require.Eventually(t, func() bool {
+		status, _ := doInferenceRequest(t, fresh, fwd.Address(), mistralBody, nil)
+		return status != http.StatusOK
+	}, 2*time.Minute, 2*time.Second, "mistral pool deletion should reach the gateway")
+
+	status, reused := doInferenceRequest(t, keepAlive, fwd.Address(), llamaBody, llamaHeaders)
+	require.True(t, reused, "the request must reuse the connection opened before the deletion")
+	require.Equal(t, http.StatusOK, status)
+}
+
+// doInferenceRequest sends a chat completion request with the given client and reports the
+// response status and whether the request reused an existing connection. A transport error is
+// reported as status 0.
+func doInferenceRequest(t *testing.T, client *http.Client, address, body string, headers map[string]string) (int, bool) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var reused bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, address+"/v1/chat/completions", strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Logf("request failed: %v", err)
+		return 0, reused
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "failed to read response body")
+	t.Logf("Response status: %d, reused connection: %t, body: %s", resp.StatusCode, reused, string(respBody))
+	return resp.StatusCode, reused
 }
 
 // getInferencePoolStatus retrieves the status of an InferencePool resource.

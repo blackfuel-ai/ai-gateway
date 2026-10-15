@@ -918,7 +918,7 @@ func (s *Server) maybeModifyListenerAndRoutes(listeners []*listenerv3.Listener, 
 			}
 			for _, vh := range routeCfg.VirtualHosts {
 				s.log.Info("patching virtual host with inference pool filters", "listener", listener, "virtual_host", vh.Name)
-				if err := s.patchVirtualHostWithInferencePool(vh, pools, mirrorPools, mirrorPoolsByRuleCluster); err != nil {
+				if err := s.patchVirtualHostWithInferencePool(vh, mirrorPoolsByRuleCluster); err != nil {
 					return fmt.Errorf("failed to patch virtual host %s in route config %s: %w", vh.Name, routeCfg.Name, err)
 				}
 			}
@@ -1053,54 +1053,41 @@ func (s *Server) patchListenerWithInferencePoolFilters(listener *listenerv3.List
 	}
 }
 
-// patchVirtualHostWithInferencePool adds the necessary per-route configuration to disable
-// inference pool filters on routes they do not belong to. A route keeps enabled: its primary
-// pool's EPP filter (route metadata), plus — when one of its rule's request-mirror legs targets
-// a pool — that mirror pool's EPP filter. Every other EPP filter is explicitly disabled per
-// route via ExtProcPerRoute, which the ext_proc filter re-evaluates AFTER the aigateway extproc
-// injects x-ai-eg-model and the route re-matches.
+// patchVirtualHostWithInferencePool activates the inference pool EPP filters on the routes they
+// belong to. Every EPP filter is inert by default (see buildHTTPFilterForInferencePool); a route
+// activates its primary pool's EPP filter (route metadata), plus — when one of its rule's
+// request-mirror legs targets a pool — that mirror pool's EPP filter, via an ExtProcPerRoute
+// processing-mode override, which the ext_proc filter evaluates AFTER the aigateway extproc
+// injects x-ai-eg-model and the route re-matches. Every other EPP filter is left untouched, so a
+// filter whose pool was deleted, still present in a draining filter chain, stays inert instead
+// of depending on a per-route entry that the current route config no longer carries.
 //
 // The mirror endpoint copy filter is enabled on every route, on purpose. It is safe by
 // position: it sits after all mirror EPP filters and before all primary EPP filters, and on a
 // route without a mirror leg nothing before it sets the standard endpoint-picker header
-// (foreign mirror EPPs are ExtProcPerRoute-disabled), so its %REQ()% append evaluates empty
-// and is skipped while its remove strips any client-spoofed value. It must NOT be disabled via
-// the generic route FilterConfig: Envoy evaluates that once, at filter-chain creation, against
-// the INITIAL route match — which on this listener is never the real route, because every
-// request re-matches only after the aigateway extproc injects the model header. A generic
-// disable therefore removes the filter from every real request stream permanently and no
-// shadow clone can ever resolve its ORIGINAL_DST cluster.
-func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, inferencePools, mirrorPools []*gwaiev1.InferencePool, mirrorPoolsByRuleCluster map[string]*gwaiev1.InferencePool) error {
-	inferenceMatrix := make(map[string]*gwaiev1.InferencePool)
-	for _, pool := range inferencePools {
-		inferenceMatrix[httpFilterNameForInferencePool(pool)] = pool
-	}
-	for _, pool := range mirrorPools {
-		inferenceMatrix[httpFilterNameForInferencePool(pool)] = pool
-	}
+// (foreign mirror EPPs stay inert), so its %REQ()% append evaluates empty and is skipped while
+// its remove strips any client-spoofed value. It must NOT be disabled via the generic route
+// FilterConfig: Envoy evaluates that once, at filter-chain creation, against the INITIAL route
+// match — which on this listener is never the real route, because every request re-matches only
+// after the aigateway extproc injects the model header. A generic disable therefore removes the
+// filter from every real request stream permanently and no shadow clone can ever resolve its
+// ORIGINAL_DST cluster. The same constraint is why EPP filters are activated through
+// ExtProcPerRoute rather than an HCM-level disabled flag.
+func (s *Server) patchVirtualHostWithInferencePool(vh *routev3.VirtualHost, mirrorPoolsByRuleCluster map[string]*gwaiev1.InferencePool) error {
 	for _, route := range vh.Routes {
-		override := &extprocv3.ExtProcPerRoute{
-			Override: &extprocv3.ExtProcPerRoute_Disabled{
-				Disabled: true,
-			},
-		}
-		overrideAny, err := toAny(override)
-		if err != nil {
-			return fmt.Errorf("failed to marshal ExtProcPerRoute to Any: %w", err)
-		}
-		enabled := make(map[string]struct{}, 2)
-		if inferencePool := getInferencePoolByMetadata(route.Metadata); inferencePool != nil {
-			enabled[httpFilterNameForInferencePool(inferencePool)] = struct{}{}
-		}
-		mirrorPool := mirrorPoolForRoute(route, mirrorPoolsByRuleCluster)
-		if mirrorPool != nil {
-			enabled[httpFilterNameForInferencePool(mirrorPool)] = struct{}{}
-		}
-		for key, pool := range inferenceMatrix {
-			if _, keep := enabled[key]; keep {
+		for _, pool := range []*gwaiev1.InferencePool{
+			getInferencePoolByMetadata(route.Metadata),
+			mirrorPoolForRoute(route, mirrorPoolsByRuleCluster),
+		} {
+			if pool == nil {
 				continue
 			}
-			s.log.Info("disabling inference pool filter", "route", route.Name, "filter", key, "pool", pool.Name)
+			overrideAny, err := toAny(buildExtProcPerRouteForInferencePool(pool))
+			if err != nil {
+				return fmt.Errorf("failed to marshal ExtProcPerRoute to Any: %w", err)
+			}
+			key := httpFilterNameForInferencePool(pool)
+			s.log.Info("activating inference pool filter", "route", route.Name, "filter", key, "pool", pool.Name)
 			if route.TypedPerFilterConfig == nil {
 				route.TypedPerFilterConfig = make(map[string]*anypb.Any)
 			}

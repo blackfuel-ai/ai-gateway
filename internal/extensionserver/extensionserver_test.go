@@ -1486,13 +1486,13 @@ func TestPatchVirtualHostWithInferencePool(t *testing.T) {
 	}
 
 	// Helper function to create a route with InferencePool metadata.
-	createRouteWithInferencePool := func(routeName string, pool *gwaiev1.InferencePool) *routev3.Route {
+	createRouteWithInferencePool := func(routeName string, pool *gwaiev1.InferencePool, bodyMode string) *routev3.Route {
 		metadata := &corev3.Metadata{
 			FilterMetadata: map[string]*structpb.Struct{
 				internalapi.InternalEndpointMetadataNamespace: {
 					Fields: map[string]*structpb.Value{
 						"per_route_rule_inference_pool": structpb.NewStringValue(
-							fmt.Sprintf("%s/%s/test-epp/9002/duplex/false", pool.Namespace, pool.Name),
+							fmt.Sprintf("%s/%s/test-epp/9002/%s/false", pool.Namespace, pool.Name, bodyMode),
 						),
 					},
 				},
@@ -1510,9 +1510,8 @@ func TestPatchVirtualHostWithInferencePool(t *testing.T) {
 			Name:   "test-vh",
 			Routes: []*routev3.Route{},
 		}
-		pools := []*gwaiev1.InferencePool{createInferencePool("test-pool", "test-ns")}
 
-		err := s.patchVirtualHostWithInferencePool(vh, pools, nil, nil)
+		err := s.patchVirtualHostWithInferencePool(vh, nil)
 		require.NoError(t, err)
 		// Should handle gracefully when no routes exist.
 	})
@@ -1525,62 +1524,45 @@ func TestPatchVirtualHostWithInferencePool(t *testing.T) {
 			Name:   "test-vh",
 			Routes: []*routev3.Route{normalRoute},
 		}
-		pools := []*gwaiev1.InferencePool{createInferencePool("test-pool", "test-ns")}
 
-		err := s.patchVirtualHostWithInferencePool(vh, pools, nil, nil)
+		err := s.patchVirtualHostWithInferencePool(vh, nil)
 		require.NoError(t, err)
 
-		// Verify the route was configured to disable all inference pool filters.
-		require.NotNil(t, normalRoute.TypedPerFilterConfig)
-		filterName := httpFilterNameForInferencePool(pools[0])
-		require.Contains(t, normalRoute.TypedPerFilterConfig, filterName)
+		// No EPP filter is activated: every EPP filter stays inert on this route.
+		require.Empty(t, normalRoute.TypedPerFilterConfig)
 	})
 
 	t.Run("route with matching InferencePool metadata", func(t *testing.T) {
 		pool := createInferencePool("test-pool", "test-ns")
-		inferenceRoute := createRouteWithInferencePool("inference-route", pool)
+		inferenceRoute := createRouteWithInferencePool("inference-route", pool, "duplex")
 
 		vh := &routev3.VirtualHost{
 			Name:   "test-vh",
 			Routes: []*routev3.Route{inferenceRoute},
 		}
-		pools := []*gwaiev1.InferencePool{pool}
 
-		err := s.patchVirtualHostWithInferencePool(vh, pools, nil, nil)
+		err := s.patchVirtualHostWithInferencePool(vh, nil)
 		require.NoError(t, err)
 
-		// Verify the route was not configured to disable its own filter.
-		// It should not have any TypedPerFilterConfig for its own filter.
-		if inferenceRoute.TypedPerFilterConfig != nil {
-			filterName := httpFilterNameForInferencePool(pool)
-			require.NotContains(t, inferenceRoute.TypedPerFilterConfig, filterName)
-		}
+		// The route activates its own EPP filter with the full processing mode.
+		require.Len(t, inferenceRoute.TypedPerFilterConfig, 1)
+		requireEPPActivated(t, inferenceRoute, httpFilterNameForInferencePool(pool), extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED)
 	})
 
-	t.Run("route with different InferencePool metadata", func(t *testing.T) {
-		pool1 := createInferencePool("pool1", "test-ns")
-		pool2 := createInferencePool("pool2", "test-ns")
-
-		// Route uses pool1, but we have both pool1 and pool2 in the system.
-		inferenceRoute := createRouteWithInferencePool("inference-route", pool1)
+	t.Run("route with buffered InferencePool metadata", func(t *testing.T) {
+		pool := createInferencePool("test-pool", "test-ns")
+		inferenceRoute := createRouteWithInferencePool("inference-route", pool, "buffered")
 
 		vh := &routev3.VirtualHost{
 			Name:   "test-vh",
 			Routes: []*routev3.Route{inferenceRoute},
 		}
-		pools := []*gwaiev1.InferencePool{pool1, pool2}
 
-		err := s.patchVirtualHostWithInferencePool(vh, pools, nil, nil)
+		err := s.patchVirtualHostWithInferencePool(vh, nil)
 		require.NoError(t, err)
 
-		// Verify the route disables pool2's filter but not pool1's filter.
-		require.NotNil(t, inferenceRoute.TypedPerFilterConfig)
-
-		pool1FilterName := httpFilterNameForInferencePool(pool1)
-		pool2FilterName := httpFilterNameForInferencePool(pool2)
-
-		require.NotContains(t, inferenceRoute.TypedPerFilterConfig, pool1FilterName)
-		require.Contains(t, inferenceRoute.TypedPerFilterConfig, pool2FilterName)
+		require.Len(t, inferenceRoute.TypedPerFilterConfig, 1)
+		requireEPPActivated(t, inferenceRoute, httpFilterNameForInferencePool(pool), extprocv3.ProcessingMode_BUFFERED)
 	})
 
 	t.Run("route with direct response containing 'No matching route found'", func(t *testing.T) {
@@ -1601,42 +1583,13 @@ func TestPatchVirtualHostWithInferencePool(t *testing.T) {
 			Name:   "test-vh",
 			Routes: []*routev3.Route{directResponseRoute},
 		}
-		pools := []*gwaiev1.InferencePool{createInferencePool("test-pool", "test-ns")}
 
-		err := s.patchVirtualHostWithInferencePool(vh, pools, nil, nil)
+		err := s.patchVirtualHostWithInferencePool(vh, nil)
 		require.NoError(t, err)
 
-		// Verify the direct response route was not skipped (And TypedPerFilterConfig added).
-		require.NotNil(t, directResponseRoute.TypedPerFilterConfig)
-	})
-
-	t.Run("route with direct response not containing 'No matching route found'", func(t *testing.T) {
-		directResponseRoute := &routev3.Route{
-			Name: "direct-response-route",
-			Action: &routev3.Route_DirectResponse{
-				DirectResponse: &routev3.DirectResponseAction{
-					Body: &corev3.DataSource{
-						Specifier: &corev3.DataSource_InlineString{
-							InlineString: "Some other response",
-						},
-					},
-				},
-			},
-		}
-
-		vh := &routev3.VirtualHost{
-			Name:   "test-vh",
-			Routes: []*routev3.Route{directResponseRoute},
-		}
-		pools := []*gwaiev1.InferencePool{createInferencePool("test-pool", "test-ns")}
-
-		err := s.patchVirtualHostWithInferencePool(vh, pools, nil, nil)
-		require.NoError(t, err)
-
-		// Verify the direct response route was processed (TypedPerFilterConfig added).
-		require.NotNil(t, directResponseRoute.TypedPerFilterConfig)
-		filterName := httpFilterNameForInferencePool(pools[0])
-		require.Contains(t, directResponseRoute.TypedPerFilterConfig, filterName)
+		// The direct response carries no pool, so no EPP filter is activated and the 404 is
+		// returned without calling any EPP.
+		require.Empty(t, directResponseRoute.TypedPerFilterConfig)
 	})
 
 	t.Run("multiple routes with mixed scenarios", func(t *testing.T) {
@@ -1644,32 +1597,59 @@ func TestPatchVirtualHostWithInferencePool(t *testing.T) {
 		pool2 := createInferencePool("pool2", "test-ns")
 
 		normalRoute := &routev3.Route{Name: "normal-route"}
-		inferenceRoute1 := createRouteWithInferencePool("inference-route1", pool1)
-		inferenceRoute2 := createRouteWithInferencePool("inference-route2", pool2)
+		inferenceRoute1 := createRouteWithInferencePool("inference-route1", pool1, "duplex")
+		inferenceRoute2 := createRouteWithInferencePool("inference-route2", pool2, "duplex")
 
 		vh := &routev3.VirtualHost{
 			Name:   "test-vh",
 			Routes: []*routev3.Route{normalRoute, inferenceRoute1, inferenceRoute2},
 		}
-		pools := []*gwaiev1.InferencePool{pool1, pool2}
 
-		err := s.patchVirtualHostWithInferencePool(vh, pools, nil, nil)
+		err := s.patchVirtualHostWithInferencePool(vh, nil)
 		require.NoError(t, err)
 
-		// Verify normal route disables both filters.
-		require.NotNil(t, normalRoute.TypedPerFilterConfig)
-		require.Len(t, normalRoute.TypedPerFilterConfig, 2)
+		// Normal route activates nothing.
+		require.Empty(t, normalRoute.TypedPerFilterConfig)
 
-		// Verify inference route 1 disables only pool2's filter.
-		require.NotNil(t, inferenceRoute1.TypedPerFilterConfig)
+		// Each inference route activates only its own pool's filter; the foreign pool's filter
+		// is left at its inert default instead of being disabled.
 		require.Len(t, inferenceRoute1.TypedPerFilterConfig, 1)
-		require.Contains(t, inferenceRoute1.TypedPerFilterConfig, httpFilterNameForInferencePool(pool2))
-
-		// Verify inference route 2 disables only pool1's filter.
-		require.NotNil(t, inferenceRoute2.TypedPerFilterConfig)
+		requireEPPActivated(t, inferenceRoute1, httpFilterNameForInferencePool(pool1), extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED)
 		require.Len(t, inferenceRoute2.TypedPerFilterConfig, 1)
-		require.Contains(t, inferenceRoute2.TypedPerFilterConfig, httpFilterNameForInferencePool(pool1))
+		requireEPPActivated(t, inferenceRoute2, httpFilterNameForInferencePool(pool2), extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED)
 	})
+}
+
+// requireEPPActivated asserts that the route activates the named EPP filter through an
+// ExtProcPerRoute processing-mode override carrying all six modes. Envoy replaces the whole
+// ProcessingMode with the override and does not validate it, so trailers must be SEND here.
+func requireEPPActivated(t *testing.T, route *routev3.Route, filterName string, bodyMode extprocv3.ProcessingMode_BodySendMode) {
+	t.Helper()
+	require.Contains(t, route.TypedPerFilterConfig, filterName)
+	perRoute := &extprocv3.ExtProcPerRoute{}
+	require.NoError(t, route.TypedPerFilterConfig[filterName].UnmarshalTo(perRoute))
+	require.False(t, perRoute.GetDisabled())
+	mode := perRoute.GetOverrides().GetProcessingMode()
+	require.NotNil(t, mode)
+	require.Equal(t, extprocv3.ProcessingMode_SEND, mode.RequestHeaderMode)
+	require.Equal(t, extprocv3.ProcessingMode_SEND, mode.ResponseHeaderMode)
+	require.Equal(t, bodyMode, mode.RequestBodyMode)
+	require.Equal(t, bodyMode, mode.ResponseBodyMode)
+	require.Equal(t, extprocv3.ProcessingMode_SEND, mode.RequestTrailerMode)
+	require.Equal(t, extprocv3.ProcessingMode_SEND, mode.ResponseTrailerMode)
+}
+
+// requireEPPInert asserts that an EPP filter's base config never talks to its EPP: Envoy only
+// opens the gRPC stream when a mode sends something, so a filter left over in a draining filter
+// chain after its pool (and EPP cluster) was removed cannot fail the request.
+func requireEPPInert(t *testing.T, filter *extprocv3.ExternalProcessor) {
+	t.Helper()
+	require.Equal(t, extprocv3.ProcessingMode_SKIP, filter.ProcessingMode.RequestHeaderMode)
+	require.Equal(t, extprocv3.ProcessingMode_SKIP, filter.ProcessingMode.ResponseHeaderMode)
+	require.Equal(t, extprocv3.ProcessingMode_NONE, filter.ProcessingMode.RequestBodyMode)
+	require.Equal(t, extprocv3.ProcessingMode_NONE, filter.ProcessingMode.ResponseBodyMode)
+	require.Equal(t, extprocv3.ProcessingMode_SKIP, filter.ProcessingMode.RequestTrailerMode)
+	require.Equal(t, extprocv3.ProcessingMode_SKIP, filter.ProcessingMode.ResponseTrailerMode)
 }
 
 // TestPostClusterModify tests the PostClusterModify method.
@@ -2433,10 +2413,7 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 
 		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
-		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.RequestBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.ResponseBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.RequestTrailerMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.ResponseTrailerMode)
+		requireEPPInert(t, filter)
 		require.False(t, filter.AllowModeOverride)
 	})
 
@@ -2456,10 +2433,7 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 
 		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
-		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.RequestBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.ResponseBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.RequestTrailerMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.ResponseTrailerMode)
+		requireEPPInert(t, filter)
 		require.False(t, filter.AllowModeOverride)
 	})
 
@@ -2479,11 +2453,11 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 
 		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
-		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.RequestBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.ResponseBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.RequestTrailerMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.ResponseTrailerMode)
-		require.True(t, filter.AllowModeOverride)
+		requireEPPInert(t, filter)
+		// Envoy never honored mode overrides on a full-duplex pool, because its gate reads the
+		// base processing mode. The base is now inert (NONE), so the flag is dropped to keep
+		// that behavior.
+		require.False(t, filter.AllowModeOverride)
 	})
 
 	t.Run("with both annotations", func(t *testing.T) {
@@ -2503,12 +2477,43 @@ func TestBuildHTTPFilterForInferencePool(t *testing.T) {
 
 		filter := buildHTTPFilterForInferencePool(pool, false)
 		require.NotNil(t, filter)
-		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.RequestBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_BUFFERED, filter.ProcessingMode.ResponseBodyMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.RequestTrailerMode)
-		require.Equal(t, extprocv3.ProcessingMode_SEND, filter.ProcessingMode.ResponseTrailerMode)
+		requireEPPInert(t, filter)
 		require.True(t, filter.AllowModeOverride)
 	})
+}
+
+// TestBuildExtProcPerRouteForInferencePool tests the per-route override that activates a pool's
+// EPP filter on the routes the pool backs.
+func TestBuildExtProcPerRouteForInferencePool(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		annotations map[string]string
+		bodyMode    extprocv3.ProcessingMode_BodySendMode
+	}{
+		{name: "default is duplex", bodyMode: extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED},
+		{
+			name:        "buffered annotation",
+			annotations: map[string]string{"aigateway.envoyproxy.io/processing-body-mode": "buffered"},
+			bodyMode:    extprocv3.ProcessingMode_BUFFERED,
+		},
+		{
+			name:        "invalid annotation falls back to duplex",
+			annotations: map[string]string{"aigateway.envoyproxy.io/processing-body-mode": "invalid"},
+			bodyMode:    extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := &gwaiev1.InferencePool{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "test-ns", Annotations: tc.annotations},
+				Spec:       gwaiev1.InferencePoolSpec{EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: "test-epp"}},
+			}
+			perRoute := buildExtProcPerRouteForInferencePool(pool)
+			anyCfg, err := toAny(perRoute)
+			require.NoError(t, err)
+			route := &routev3.Route{TypedPerFilterConfig: map[string]*anypb.Any{"epp": anyCfg}}
+			requireEPPActivated(t, route, "epp", tc.bodyMode)
+		})
+	}
 }
 
 // TestBuildExtProcClusterForInferencePoolEndpointPicker tests cluster building.
