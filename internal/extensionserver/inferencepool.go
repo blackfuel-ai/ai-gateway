@@ -343,12 +343,19 @@ func buildInferencePoolHTTPFilter(pool *gwaiev1.InferencePool, mirror bool) (*ht
 // converts to "continue". The short MessageTimeout bounds how long an unresponsive mirror EPP
 // can stall the primary request. Primary pool EPP filters stay fail-closed: a request that
 // cannot be routed to an endpoint must fail.
+//
+// The filter is inert by default: every processing mode skips, so Envoy never opens a stream to
+// the EPP. Routes backed by the pool activate it with buildExtProcPerRouteForInferencePool. Every
+// EPP filter sits in the one HCM chain shared by all routes, and Envoy keeps a replaced chain
+// alive while its connections drain. A deleted pool's filter thus outlives both its EPP cluster
+// and any route config naming it, and only an inert default keeps it from failing the requests
+// on those connections with "Cluster not available".
 func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool, mirror bool) *extprocv3.ExternalProcessor {
-	// Read processing body mode from annotations, default to "duplex" (FULL_DUPLEX_STREAMED)
-	processingBodyMode := getProcessingBodyModeFromAnnotations(pool)
-
-	// Read allow mode override from annotations, default to false
-	allowModeOverride := getAllowModeOverrideFromAnnotations(pool)
+	// Envoy gates EPP mode overrides on the base processing mode, which used to carry the pool's
+	// body mode and suppressed them for full-duplex pools. The base is now inert, so keep the
+	// annotation only for buffered pools to preserve that behavior.
+	allowModeOverride := getAllowModeOverrideFromAnnotations(pool) &&
+		getProcessingBodyModeFromAnnotations(pool) == extprocv3.ProcessingMode_BUFFERED
 
 	messageTimeout := 300 * time.Second
 	if mirror {
@@ -365,17 +372,44 @@ func buildHTTPFilterForInferencePool(pool *gwaiev1.InferencePool, mirror bool) *
 			},
 		},
 		ProcessingMode: &extprocv3.ProcessingMode{
-			RequestHeaderMode:   extprocv3.ProcessingMode_SEND,
-			RequestBodyMode:     processingBodyMode,
-			RequestTrailerMode:  extprocv3.ProcessingMode_SEND,
-			ResponseBodyMode:    processingBodyMode,
-			ResponseHeaderMode:  extprocv3.ProcessingMode_SEND,
-			ResponseTrailerMode: extprocv3.ProcessingMode_SEND,
+			RequestHeaderMode:   extprocv3.ProcessingMode_SKIP,
+			RequestBodyMode:     extprocv3.ProcessingMode_NONE,
+			RequestTrailerMode:  extprocv3.ProcessingMode_SKIP,
+			ResponseBodyMode:    extprocv3.ProcessingMode_NONE,
+			ResponseHeaderMode:  extprocv3.ProcessingMode_SKIP,
+			ResponseTrailerMode: extprocv3.ProcessingMode_SKIP,
 		},
 		AllowModeOverride:        allowModeOverride,
 		MessageTimeout:           durationpb.New(messageTimeout),
 		FailureModeAllow:         mirror,
 		DisableImmediateResponse: mirror,
+	}
+}
+
+// buildExtProcPerRouteForInferencePool returns the per-route config that activates the pool's
+// inert EPP filter (see buildHTTPFilterForInferencePool) on a route the pool backs.
+//
+// Envoy replaces the whole base processing mode with this override and does not validate it, so
+// all six modes are set explicitly, with trailers SEND as full-duplex streaming requires. The
+// ext_proc filter merges per-route config when it processes request headers, after the aigateway
+// extproc injected the model header and the route was re-matched, so the override applies on the
+// real route.
+func buildExtProcPerRouteForInferencePool(pool *gwaiev1.InferencePool) *extprocv3.ExtProcPerRoute {
+	// Read processing body mode from annotations, default to "duplex" (FULL_DUPLEX_STREAMED)
+	processingBodyMode := getProcessingBodyModeFromAnnotations(pool)
+	return &extprocv3.ExtProcPerRoute{
+		Override: &extprocv3.ExtProcPerRoute_Overrides{
+			Overrides: &extprocv3.ExtProcOverrides{
+				ProcessingMode: &extprocv3.ProcessingMode{
+					RequestHeaderMode:   extprocv3.ProcessingMode_SEND,
+					RequestBodyMode:     processingBodyMode,
+					RequestTrailerMode:  extprocv3.ProcessingMode_SEND,
+					ResponseBodyMode:    processingBodyMode,
+					ResponseHeaderMode:  extprocv3.ProcessingMode_SEND,
+					ResponseTrailerMode: extprocv3.ProcessingMode_SEND,
+				},
+			},
+		},
 	}
 }
 

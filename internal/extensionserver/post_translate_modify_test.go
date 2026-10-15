@@ -1072,8 +1072,12 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 	require.False(t, primaryEP.FailureModeAllow, "primary EPP must stay fail-closed")
 	require.False(t, primaryEP.DisableImmediateResponse)
 
-	// Virtual host per-route config: the mirror rule's route keeps the mirror filters enabled;
-	// a plain route gets everything disabled including the copy filter.
+	// Both EPP filters are inert by default; routes activate them per route.
+	requireEPPInert(t, mirrorEP)
+	requireEPPInert(t, primaryEP)
+
+	// Virtual host per-route config: the mirror rule's route activates the mirror EPP filter;
+	// a plain route activates nothing.
 	mirrorRuleCluster := "httproute/ns/myroute/rule/0"
 	vh := &routev3.VirtualHost{
 		Routes: []*routev3.Route{
@@ -1092,23 +1096,86 @@ func Test_patchListenerAndVirtualHost_mirrorPool(t *testing.T) {
 		},
 	}
 	mirrorMap := map[string]*gwaiev1.InferencePool{mirrorRuleCluster: mirrorPool}
-	require.NoError(t, s.patchVirtualHostWithInferencePool(vh,
-		[]*gwaiev1.InferencePool{primaryPool}, []*gwaiev1.InferencePool{mirrorPool}, mirrorMap))
+	require.NoError(t, s.patchVirtualHostWithInferencePool(vh, mirrorMap))
 
 	mirrorRoute := vh.Routes[0]
 	plainRoute := vh.Routes[1]
-	// Mirror route: mirror EPP enabled (no disable override), primary EPP disabled (route
-	// metadata carries no primary pool in this synthetic setup).
-	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEPPName)
-	require.Contains(t, mirrorRoute.TypedPerFilterConfig, primaryEPPName)
-	// Plain route: every foreign EPP filter disabled.
-	require.Contains(t, plainRoute.TypedPerFilterConfig, mirrorEPPName)
-	require.Contains(t, plainRoute.TypedPerFilterConfig, primaryEPPName)
+	// Mirror route: mirror EPP activated; primary EPP left inert (route metadata carries no
+	// primary pool in this synthetic setup).
+	requireEPPActivated(t, mirrorRoute, mirrorEPPName, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED)
+	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, primaryEPPName)
+	// Plain route: every EPP filter left inert.
+	require.NotContains(t, plainRoute.TypedPerFilterConfig, mirrorEPPName)
+	require.NotContains(t, plainRoute.TypedPerFilterConfig, primaryEPPName)
 	// The copy filter is never per-route disabled — a generic FilterConfig disable is evaluated
 	// against the INITIAL route match, which on this listener precedes the aigateway extproc's
 	// model-header injection, so it would strip the filter from every real request stream.
 	require.NotContains(t, mirrorRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
 	require.NotContains(t, plainRoute.TypedPerFilterConfig, mirrorEndpointCopyFilterName)
+}
+
+// Test_patchListenerAndVirtualHost_deletedPool pins the draining-filter-chain regression: when a
+// pool is deleted, Envoy keeps the previous listener's filter chain for the drain period, and
+// that chain still carries the deleted pool's EPP filter while the shared route config no longer
+// mentions the pool. Its EPP cluster is gone from CDS, so the filter must be inert by default,
+// with no route depending on a per-route entry for that pool to switch it off, or every request
+// on a draining connection fails with "Cluster not available".
+func Test_patchListenerAndVirtualHost_deletedPool(t *testing.T) {
+	s, err := New(newFakeClient(), logr.Discard(), udsPath, false, nil, nil, "envoy-ai-gateway-ratelimit.envoy-gateway-system", 5, false, false)
+	require.NoError(t, err)
+
+	newPool := func(name string) *gwaiev1.InferencePool {
+		return &gwaiev1.InferencePool{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+			Spec: gwaiev1.InferencePoolSpec{
+				EndpointPickerRef: &gwaiev1.EndpointPickerRef{Name: gwaiev1.ObjectName(name + "-epp"), Port: ptr.To(gwaiev1.Port{Number: 9002})},
+			},
+		}
+	}
+	prodPool := newPool("prod-pool")
+	deletedPool := newPool("deleted-pool")
+
+	// Listener translated while both pools existed: the draining filter chain.
+	hcmAny, err := toAny(&httpconnectionmanagerv3.HttpConnectionManager{
+		HttpFilters: []*httpconnectionmanagerv3.HttpFilter{{Name: "envoy.filters.http.router"}},
+	})
+	require.NoError(t, err)
+	drainingListener := &listenerv3.Listener{
+		Name: "test-listener",
+		FilterChains: []*listenerv3.FilterChain{{
+			Filters: []*listenerv3.Filter{{
+				Name:       "envoy.filters.network.http_connection_manager",
+				ConfigType: &listenerv3.Filter_TypedConfig{TypedConfig: hcmAny},
+			}},
+		}},
+	}
+	s.patchListenerWithInferencePoolFilters(drainingListener, []*gwaiev1.InferencePool{prodPool, deletedPool}, nil)
+
+	// Route config translated after the deletion: only the prod pool's route remains.
+	prodRoute := &routev3.Route{Name: "prod-route"}
+	buildEPPMetadataForRoute(prodRoute, prodPool)
+	vh := &routev3.VirtualHost{Routes: []*routev3.Route{prodRoute}}
+	require.NoError(t, s.patchVirtualHostWithInferencePool(vh, nil))
+
+	deletedEPPName := httpFilterNameForInferencePool(deletedPool)
+	require.NotContains(t, prodRoute.TypedPerFilterConfig, deletedEPPName)
+	requireEPPActivated(t, prodRoute, httpFilterNameForInferencePool(prodPool), extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED)
+
+	// With no per-route entry, the deleted pool's filter falls back to its base config, which
+	// must never open a stream to the removed EPP cluster.
+	hcm, _, err := findHCM(drainingListener.FilterChains[0])
+	require.NoError(t, err)
+	var found bool
+	for _, f := range hcm.HttpFilters {
+		if f.Name != deletedEPPName {
+			continue
+		}
+		found = true
+		ep := &extprocv3.ExternalProcessor{}
+		require.NoError(t, f.GetTypedConfig().UnmarshalTo(ep))
+		requireEPPInert(t, ep)
+	}
+	require.True(t, found, "deleted pool's EPP filter must be in the draining chain")
 }
 
 // Test_patchListenerWithInferencePoolFilters_mirrorPoolWithoutEPP: a mirror pool without an

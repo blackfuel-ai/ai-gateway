@@ -10,7 +10,6 @@ import (
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/structpb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -148,9 +147,8 @@ func TestBuildHTTPFilterForInferencePool_Defaults(t *testing.T) {
 
 	filter := buildHTTPFilterForInferencePool(pool, false)
 	assert.NotNil(t, filter)
-	// Expect duplex by default
-	assert.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.RequestBodyMode)
-	assert.Equal(t, extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED, filter.ProcessingMode.ResponseBodyMode)
+	// The base filter is inert; routes backed by the pool activate it per route.
+	requireEPPInert(t, filter)
 	assert.False(t, filter.AllowModeOverride)
 	// Primary pool filters are fail-closed.
 	assert.False(t, filter.FailureModeAllow)
