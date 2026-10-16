@@ -1368,6 +1368,31 @@ data: [DONE]
 `,
 		},
 		{
+			// The upstream gzips the SSE stream. The gateway rewrites every chunk with the decoded,
+			// mutated lines, so the client must receive plain text with content-encoding dropped at
+			// header time: Envoy applies no header mutation carried by a streamed body response.
+			name:         "response-mutation - /v1/chat/completions - streaming gzip",
+			backend:      "response-mutation",
+			responseType: "sse-gzip",
+			path:         "/v1/chat/completions",
+			method:       http.MethodPost,
+			requestBody:  `{"model":"something","messages":[{"role":"user","content":"Hello"}], "stream": true}`,
+			expPath:      "/v1/chat/completions",
+			responseBody: `
+{"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","provider":"openai","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}],"usage":null}
+{"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","provider":"openai","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0.1}}
+[DONE]
+`,
+			expStatus: http.StatusOK,
+			expResponseBody: `data: {"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+
+data: [DONE]
+
+`,
+		},
+		{
 			name:            "openai - /v1/responses",
 			backend:         "openai",
 			path:            "/v1/responses",

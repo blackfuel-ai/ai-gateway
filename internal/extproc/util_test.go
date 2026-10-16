@@ -25,6 +25,15 @@ func TestIsGoodStatusCode(t *testing.T) {
 	}
 }
 
+func TestIsDecodedContentEncoding(t *testing.T) {
+	for _, enc := range []string{"gzip", "br"} {
+		require.True(t, isDecodedContentEncoding(enc), enc)
+	}
+	for _, enc := range []string{"zstd", "deflate", "identity", ""} {
+		require.False(t, isDecodedContentEncoding(enc), enc)
+	}
+}
+
 func TestDecodeContentIfNeeded(t *testing.T) {
 	tests := []struct {
 		name         string

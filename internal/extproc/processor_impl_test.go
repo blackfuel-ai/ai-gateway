@@ -348,6 +348,89 @@ func Test_chatCompletionProcessorUpstreamFilter_ProcessResponseHeaders(t *testin
 		require.Equal(t, []string{"content-length"}, commonRes.HeaderMutation.RemoveHeaders)
 		require.Equal(t, &extprocv3http.ProcessingMode{ResponseBodyMode: extprocv3http.ProcessingMode_STREAMED}, res.ModeOverride)
 	})
+	// Envoy applies the header mutation carried by a body response only in BUFFERED body
+	// mode. A streamed response's headers can therefore only be changed here, and a
+	// response body mutation replaces every streamed chunk with its decoded bytes, so the
+	// content-encoding header has to be dropped at this point.
+	t.Run("ok/streaming with response body mutation on decoded encoding", func(t *testing.T) {
+		for _, enc := range []string{"gzip", "br"} {
+			t.Run(enc, func(t *testing.T) {
+				inHeaders := &corev3.HeaderMap{
+					Headers: []*corev3.HeaderValue{{Key: ":status", Value: "200"}, {Key: "content-encoding", Value: enc}},
+				}
+				expHeaders := map[string]string{":status": "200", "content-encoding": enc}
+				mm := &mockMetrics{}
+				mt := &mockTranslator{t: t, expHeaders: expHeaders}
+				p := &chatCompletionProcessorUpstreamFilter{
+					translator:          mt,
+					metrics:             mm,
+					parent:              &chatCompletionProcessorRouterFilter{stream: true},
+					responseBodyMutator: bodymutator.NewBodyMutator(&filterapi.HTTPBodyMutation{Remove: []string{"provider"}}, nil),
+				}
+				res, err := p.ProcessResponseHeaders(t.Context(), inHeaders)
+				require.NoError(t, err)
+				commonRes := res.Response.(*extprocv3.ProcessingResponse_ResponseHeaders).ResponseHeaders.Response
+				require.Equal(t, []string{"content-length", "content-encoding"}, commonRes.HeaderMutation.RemoveHeaders)
+				require.Equal(t, &extprocv3http.ProcessingMode{ResponseBodyMode: extprocv3http.ProcessingMode_STREAMED}, res.ModeOverride)
+			})
+		}
+	})
+	t.Run("ok/streaming keeps content-encoding", func(t *testing.T) {
+		withMutation := bodymutator.NewBodyMutator(&filterapi.HTTPBodyMutation{Remove: []string{"provider"}}, nil)
+		for _, tc := range []struct {
+			name     string
+			encoding string
+			mutator  *bodymutator.BodyMutator
+		}{
+			// Without a response body mutation a passthrough stream forwards the compressed chunks as they are.
+			{name: "gzip without mutation", encoding: "gzip", mutator: nil},
+			// Nothing to drop when the upstream did not encode.
+			{name: "unencoded with mutation", encoding: "", mutator: withMutation},
+			// An encoding the processor does not decode passes through compressed, so its header must stay.
+			{name: "zstd with mutation", encoding: "zstd", mutator: withMutation},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				headers := []*corev3.HeaderValue{{Key: ":status", Value: "200"}}
+				expHeaders := map[string]string{":status": "200"}
+				if tc.encoding != "" {
+					headers = append(headers, &corev3.HeaderValue{Key: "content-encoding", Value: tc.encoding})
+					expHeaders["content-encoding"] = tc.encoding
+				}
+				mm := &mockMetrics{}
+				mt := &mockTranslator{t: t, expHeaders: expHeaders}
+				p := &chatCompletionProcessorUpstreamFilter{
+					translator:          mt,
+					metrics:             mm,
+					parent:              &chatCompletionProcessorRouterFilter{stream: true},
+					responseBodyMutator: tc.mutator,
+				}
+				res, err := p.ProcessResponseHeaders(t.Context(), &corev3.HeaderMap{Headers: headers})
+				require.NoError(t, err)
+				commonRes := res.Response.(*extprocv3.ProcessingResponse_ResponseHeaders).ResponseHeaders.Response
+				require.Equal(t, []string{"content-length"}, commonRes.HeaderMutation.RemoveHeaders)
+			})
+		}
+	})
+	t.Run("ok/non-streaming gzip with response body mutation", func(t *testing.T) {
+		// The buffered path drops content-encoding in the body response, where Envoy still applies header mutations.
+		inHeaders := &corev3.HeaderMap{
+			Headers: []*corev3.HeaderValue{{Key: ":status", Value: "200"}, {Key: "content-encoding", Value: "gzip"}},
+		}
+		expHeaders := map[string]string{":status": "200", "content-encoding": "gzip"}
+		mm := &mockMetrics{}
+		mt := &mockTranslator{t: t, expHeaders: expHeaders}
+		p := &chatCompletionProcessorUpstreamFilter{
+			translator:          mt,
+			metrics:             mm,
+			parent:              &chatCompletionProcessorRouterFilter{},
+			responseBodyMutator: bodymutator.NewBodyMutator(&filterapi.HTTPBodyMutation{Remove: []string{"provider"}}, nil),
+		}
+		res, err := p.ProcessResponseHeaders(t.Context(), inHeaders)
+		require.NoError(t, err)
+		commonRes := res.Response.(*extprocv3.ProcessingResponse_ResponseHeaders).ResponseHeaders.Response
+		require.Empty(t, commonRes.HeaderMutation.RemoveHeaders)
+		require.Nil(t, res.ModeOverride)
+	})
 	t.Run("error/streaming", func(t *testing.T) {
 		inHeaders := &corev3.HeaderMap{
 			Headers: []*corev3.HeaderValue{{Key: ":status", Value: "500"}, {Key: "dog", RawValue: []byte("cat")}},

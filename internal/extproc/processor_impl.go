@@ -553,6 +553,15 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	// is invalid for a streaming SSE response.
 	if mode != nil {
 		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, "content-length")
+		// A response body mutation replaces every streamed chunk with its decoded,
+		// mutated lines, so a compressed upstream stream reaches the client as plain
+		// text. Envoy applies the header mutation carried by a body response only in
+		// BUFFERED body mode, so the content-encoding header can only be dropped
+		// here, with the headers. Encodings the processor does not decode pass
+		// through compressed and keep their header.
+		if isDecodedContentEncoding(u.responseEncoding) && u.responseBodyMutator.HasMutations() {
+			headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, "content-encoding")
+		}
 	}
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 		ResponseHeaders: &extprocv3.HeadersResponse{
