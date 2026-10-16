@@ -26,8 +26,19 @@ type contentDecodingResult struct {
 	isEncoded bool
 }
 
+// isDecodedContentEncoding reports whether decodeContentIfNeeded decompresses a body carrying
+// the given content-encoding. Any other encoding passes through the processor still compressed.
+func isDecodedContentEncoding(contentEncoding string) bool {
+	switch contentEncoding {
+	case "gzip", "br":
+		return true
+	default:
+		return false
+	}
+}
+
 // decodeContentIfNeeded decompresses the response body based on the content-encoding header.
-// Currently, supports gzip and brotli encoding, but can be extended to support other encodings in the future.
+// The encodings it decodes are the ones isDecodedContentEncoding reports.
 // Returns a reader for the (potentially decompressed) body and metadata about the encoding.
 func decodeContentIfNeeded(body []byte, contentEncoding string) (contentDecodingResult, error) {
 	// An empty body has nothing to decompress. gzip.NewReader reads the gzip

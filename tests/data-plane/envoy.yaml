@@ -312,6 +312,14 @@ static_resources:
                             headers:
                               - name: x-test-backend
                                 string_match:
+                                  exact: response-mutation
+                          route:
+                            cluster: testupstream-response-mutation
+                        - match:
+                            prefix: "/"
+                            headers:
+                              - name: x-test-backend
+                                string_match:
                                   exact: dynmd-cred
                           route:
                             cluster: testupstream-dynmd-cred
@@ -1878,6 +1886,70 @@ static_resources:
                   filter_metadata:
                     aigateway.envoy.io:
                       per_route_rule_backend_name: "testupstream-body-mutation-anthropic"
+    - name: testupstream-response-mutation
+      connect_timeout: 0.25s
+      per_connection_buffer_limit_bytes: 52428800
+      type: STATIC
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http_protocol_options:
+              accept_http_10: true
+              default_host_for_http_10: "127.0.0.1"
+          http_filters:
+            - name: upstream_extproc
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                allow_mode_override: true
+                request_attributes:
+                  - xds.upstream_host_metadata.filter_metadata['aigateway.envoy.io']['per_route_rule_backend_name']
+                  - xds.cluster_metadata.filter_metadata['aigateway.envoy.io']['per_route_rule_backend_name']
+                processing_mode:
+                  request_header_mode: "SEND"
+                  # The upstream processor replaces the request body in its headers response only
+                  # when it has something to change; a passthrough request keeps NONE here, as the
+                  # extension server configures it, so Envoy never sends the body to the upstream filter.
+                  request_body_mode: "NONE"
+                  response_header_mode: "SKIP"
+                  response_body_mode: "NONE"
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: extproc_cluster
+                  timeout: 30s
+                message_timeout: 60s
+                metadata_options:
+                  receivingNamespaces:
+                    untyped:
+                      - io.envoy.ai_gateway
+            - name: envoy.filters.http.header_mutation
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                mutations:
+                  request_mutations:
+                    - append:
+                        append_action: ADD_IF_ABSENT
+                        header:
+                          key: content-length
+                          value: "%DYNAMIC_METADATA(io.envoy.ai_gateway:content_length)%"
+            - name: envoy.filters.http.upstream_codec
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec
+      load_assignment:
+        cluster_name: testupstream-response-mutation
+        endpoints:
+          - priority: 0
+            lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 8080
+                metadata:
+                  filter_metadata:
+                    aigateway.envoy.io:
+                      per_route_rule_backend_name: "testupstream-response-mutation"
     # testupstream-dynmd-cred sources its API key from dynamic metadata written by the downstream
     # header_to_metadata filter. forwarding_namespaces mirrors what the extension server emits for
     # a credentialOverride.fromDynamicMetadata policy; without it Envoy sends an empty

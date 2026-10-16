@@ -1,0 +1,37 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata:
+  name: dog-backend
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    name: dog-service
+    kind: Backend
+    group: gateway.envoyproxy.io
+    port: 80
+  responseBodyMutation:
+    remove:
+      - field1
+      - field2
+      - field3
+      - field4
+      - field5
+      - field6
+      - field7
+      - field8
+      - field9
+      - field10
+      - field11
+      - field12
+      - field13
+      - field14
+      - field15
+      - field16
+      - field17

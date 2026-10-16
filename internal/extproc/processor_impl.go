@@ -122,19 +122,20 @@ type (
 	upstreamProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.Spec[ReqT, RespT, RespChunkT]] struct {
 		parent *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]
 
-		logger             *slog.Logger
-		requestHeaders     map[string]string
-		responseHeaders    map[string]string
-		responseEncoding   string
-		compressedBuf      []byte // accumulates raw compressed bytes across streaming chunks
-		decompressedOffset int    // tracks decompressed bytes already returned
-		translator         translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
-		modelNameOverride  internalapi.ModelNameOverride
-		headerMutator      *headermutator.HeaderMutator
-		bodyMutator        *bodymutator.BodyMutator
-		backendName        string
-		routeName          string
-		handler            filterapi.BackendAuthHandler
+		logger              *slog.Logger
+		requestHeaders      map[string]string
+		responseHeaders     map[string]string
+		responseEncoding    string
+		compressedBuf       []byte // accumulates raw compressed bytes across streaming chunks
+		decompressedOffset  int    // tracks decompressed bytes already returned
+		translator          translator.Translator[ReqT, tracingapi.Span[RespT, RespChunkT]]
+		modelNameOverride   internalapi.ModelNameOverride
+		headerMutator       *headermutator.HeaderMutator
+		bodyMutator         *bodymutator.BodyMutator
+		responseBodyMutator *bodymutator.BodyMutator
+		backendName         string
+		routeName           string
+		handler             filterapi.BackendAuthHandler
 		// unsupportedBackendErr is set by SetBackend and answered as a 422 in ProcessRequestHeaders.
 		unsupportedBackendErr error
 		// isMirror is true when the resolved backend is a shadow/mirror destination.
@@ -552,6 +553,15 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 	// is invalid for a streaming SSE response.
 	if mode != nil {
 		headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, "content-length")
+		// A response body mutation replaces every streamed chunk with its decoded,
+		// mutated lines, so a compressed upstream stream reaches the client as plain
+		// text. Envoy applies the header mutation carried by a body response only in
+		// BUFFERED body mode, so the content-encoding header can only be dropped
+		// here, with the headers. Encodings the processor does not decode pass
+		// through compressed and keep their header.
+		if isDecodedContentEncoding(u.responseEncoding) && u.responseBodyMutator.HasMutations() {
+			headerMutation.RemoveHeaders = append(headerMutation.RemoveHeaders, "content-encoding")
+		}
 	}
 	return &extprocv3.ProcessingResponse{Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 		ResponseHeaders: &extprocv3.HeadersResponse{
@@ -634,11 +644,55 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRespo
 		return resp, nil
 	}
 
+	// Capture the decoded body when response mutation is configured: passthrough
+	// translators return a nil newBody, in which case the mutator must operate on
+	// the decoded bytes rather than the (possibly compressed) raw chunk.
+	var decodedBody []byte
+	if u.responseBodyMutator.HasMutations() {
+		decodedBody, err = io.ReadAll(decodingResult.reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read decoded response body: %w", err)
+		}
+		decodingResult.reader = bytes.NewReader(decodedBody)
+	}
+
 	newHeaders, newBody, tokenUsage, responseModel, err := u.translator.ResponseBody(u.responseHeaders, decodingResult.reader, body.EndOfStream, u.parent.span)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform response: %w", err)
 	}
 	headerMutation, bodyMutation := mutationsFromTranslationResult(newHeaders, newBody)
+
+	// Apply response body mutation (field stripping) if configured.
+	if u.responseBodyMutator.HasMutations() {
+		// Get the body to mutate: use newBody if translator already mutated it, else the decoded body.
+		bodyToMutate := newBody
+		if bodyToMutate == nil {
+			bodyToMutate = decodedBody
+		}
+		if u.parent.stream {
+			// Streaming mutation is stateful and never errors: per-line sjson
+			// failures leave the line unchanged, and incomplete trailing lines
+			// are buffered across calls.
+			newBody = u.responseBodyMutator.MutateResponseSSE(bodyToMutate, body.EndOfStream)
+			// Recompute mutations after body changed.
+			// Content-length is intentionally not updated for streaming responses:
+			// SSE uses Transfer-Encoding: chunked; setting content-length per chunk is incorrect.
+			headerMutation, bodyMutation = mutationsFromTranslationResult(newHeaders, newBody)
+		} else {
+			mutatedBody, mutateErr := u.responseBodyMutator.MutateResponse(bodyToMutate)
+			if mutateErr != nil {
+				u.logger.Error("failed to apply response body mutation", "error", mutateErr)
+			} else {
+				newBody = mutatedBody
+				// Recompute mutations after body changed.
+				headerMutation, bodyMutation = mutationsFromTranslationResult(newHeaders, newBody)
+				headerMutation.SetHeaders = append(headerMutation.SetHeaders, &corev3.HeaderValueOption{
+					AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+					Header:       &corev3.HeaderValue{Key: "content-length", RawValue: []byte(strconv.Itoa(len(newBody)))},
+				})
+			}
+		}
+	}
 
 	// Remove content-encoding header if original body encoded but was mutated in the processor.
 	headerMutation = removeContentEncodingIfNeeded(headerMutation, bodyMutation, decodingResult.isEncoded)
@@ -772,6 +826,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) SetBackend(c
 	u.handler = backend.Handler
 	u.headerMutator = headermutator.NewHeaderMutator(backend.Backend.HeaderMutation, rp.requestHeaders)
 	u.bodyMutator = bodymutator.NewBodyMutator(backend.Backend.BodyMutation, rp.originalRequestBodyRaw)
+	u.responseBodyMutator = bodymutator.NewBodyMutator(backend.Backend.ResponseBodyMutation, nil)
 	// Header-derived labels/CEL must be able to see the overridden request model.
 	if u.modelNameOverride != "" {
 		u.requestHeaders[internalapi.ModelNameHeaderKeyDefault] = u.modelNameOverride

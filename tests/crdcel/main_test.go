@@ -110,6 +110,11 @@ func TestAIServiceBackends(t *testing.T) {
 			name:   "header-value-filters-unsupported-schema.yaml",
 			expErr: "headerValueFilters is only honored by GCPAnthropic and AWSAnthropic backends",
 		},
+		{name: "response-body-mutation.yaml"},
+		{
+			name:   "response-body-mutation-too-many.yaml",
+			expErr: "must have at most 16 items",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data, err := testdata.ReadFile(path.Join("testdata/aiservicebackends", tc.name))

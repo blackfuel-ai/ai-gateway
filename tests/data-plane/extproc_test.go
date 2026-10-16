@@ -166,6 +166,14 @@ var (
 		},
 	}
 
+	testUpstreamResponseMutationBackend = filterapi.Backend{
+		Name:   "testupstream-response-mutation",
+		Schema: openAISchema,
+		ResponseBodyMutation: &filterapi.HTTPBodyMutation{
+			Remove: []string{"provider", "usage.cost"},
+		},
+	}
+
 	// envoyConfig is the embedded Envoy configuration template.
 	//
 	//go:embed envoy.yaml

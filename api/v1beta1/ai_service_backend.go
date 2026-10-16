@@ -78,6 +78,12 @@ type AIServiceBackendSpec struct {
 	// +optional
 	BodyMutation *HTTPBodyMutation `json:"bodyMutation,omitempty"`
 
+	// ResponseBodyMutation defines the mutation of HTTP response body JSON fields that will be applied
+	// to the response from the backend before returning to the client.
+	// Only field removal is supported on the response path.
+	// +optional
+	ResponseBodyMutation *HTTPResponseBodyMutation `json:"responseBodyMutation,omitempty"`
+
 	// HeaderValueFilters filter individual values out of multi-valued request headers before sending
 	// the request to this backend, so that one value an upstream provider does not accept does not
 	// fail the whole request. At most one filter per header name.
@@ -93,4 +99,34 @@ type AIServiceBackendSpec struct {
 
 	// TODO: maybe add backend-level LLMRequestCost configuration that overrides the AIGatewayRoute-level LLMRequestCost.
 	// 	That may be useful for the backend that has a different cost calculation logic.
+}
+
+// HTTPResponseBodyMutation defines the mutation of HTTP response body JSON fields that will be applied
+// to the response from the backend before returning to the client. Only field removal is supported on
+// the response path.
+type HTTPResponseBodyMutation struct {
+	// Remove the given JSON field(s) from the HTTP response body before returning to the client.
+	// Each entry is an sjson path: a top-level field name, or a dotted path such as "usage.cost"
+	// for a nested field. On a streaming response the fields are removed from every SSE data line.
+	//
+	// Input:
+	//   {
+	//     "model": "gpt-4",
+	//     "service_tier": "default",
+	//     "usage": {"total_tokens": 12, "cost": 0.1}
+	//   }
+	//
+	// Config:
+	//   remove: ["service_tier", "usage.cost"]
+	//
+	// Output:
+	//   {
+	//     "model": "gpt-4",
+	//     "usage": {"total_tokens": 12}
+	//   }
+	//
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=16
+	Remove []string `json:"remove,omitempty"`
 }
