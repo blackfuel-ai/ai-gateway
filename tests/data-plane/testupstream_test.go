@@ -83,6 +83,7 @@ func TestWithTestUpstream(t *testing.T) {
 			testUpstreamAWSAnthropicBackend,
 			testUpstreamBodyMutationBackend,
 			testUpstreamBodyMutationAnthropicBackend,
+			testUpstreamResponseMutationBackend,
 			{
 				Name: "testupstream-openai-5xx", Schema: openAISchema, HeaderMutation: &filterapi.HTTPHeaderMutation{
 					Set: []filterapi.HTTPHeader{{Name: testupstreamlib.ResponseStatusKey, Value: "500"}},
@@ -1320,6 +1321,51 @@ data: {"type":"message_stop","amazon-bedrock-invocationMetrics":{"inputTokenCoun
 			responseBody:    `{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"Hello! How can I assist you?"}],"usage":{"input_tokens":5,"output_tokens":10}}`,
 			expStatus:       http.StatusOK,
 			expResponseBody: `{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"Hello! How can I assist you?"}],"usage":{"input_tokens":5,"output_tokens":10}}`,
+		},
+		{
+			name:            "response-mutation - /v1/chat/completions - configured fields removed",
+			backend:         "response-mutation",
+			path:            "/v1/chat/completions",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"something","messages":[{"role":"user","content":"Hello"}]}`,
+			expPath:         "/v1/chat/completions",
+			responseBody:    `{"id":"chatcmpl-rm","object":"chat.completion","created":123,"model":"something","provider":"openai","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0.1}}`,
+			expStatus:       http.StatusOK,
+			expResponseBody: `{"id":"chatcmpl-rm","object":"chat.completion","created":123,"model":"something","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+		},
+		{
+			name:            "response-mutation - /v1/chat/completions - gzip",
+			backend:         "response-mutation",
+			responseType:    "gzip",
+			path:            "/v1/chat/completions",
+			method:          http.MethodPost,
+			requestBody:     `{"model":"something","messages":[{"role":"user","content":"Hello"}]}`,
+			expPath:         "/v1/chat/completions",
+			responseBody:    `{"id":"chatcmpl-rm","object":"chat.completion","created":123,"model":"something","provider":"openai","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0.1}}`,
+			expStatus:       http.StatusOK,
+			expResponseBody: `{"id":"chatcmpl-rm","object":"chat.completion","created":123,"model":"something","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+		},
+		{
+			name:         "response-mutation - /v1/chat/completions - streaming",
+			backend:      "response-mutation",
+			responseType: "sse",
+			path:         "/v1/chat/completions",
+			method:       http.MethodPost,
+			requestBody:  `{"model":"something","messages":[{"role":"user","content":"Hello"}], "stream": true}`,
+			expPath:      "/v1/chat/completions",
+			responseBody: `
+{"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","provider":"openai","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}],"usage":null}
+{"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","provider":"openai","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0.1}}
+[DONE]
+`,
+			expStatus: http.StatusOK,
+			expResponseBody: `data: {"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-rm","object":"chat.completion.chunk","created":123,"model":"something","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+
+data: [DONE]
+
+`,
 		},
 		{
 			name:            "openai - /v1/responses",
