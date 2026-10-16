@@ -1908,7 +1908,10 @@ static_resources:
                   - xds.cluster_metadata.filter_metadata['aigateway.envoy.io']['per_route_rule_backend_name']
                 processing_mode:
                   request_header_mode: "SEND"
-                  request_body_mode: "BUFFERED"
+                  # The upstream processor replaces the request body in its headers response only
+                  # when it has something to change; a passthrough request keeps NONE here, as the
+                  # extension server configures it, so Envoy never sends the body to the upstream filter.
+                  request_body_mode: "NONE"
                   response_header_mode: "SKIP"
                   response_body_mode: "NONE"
                 grpc_service:
