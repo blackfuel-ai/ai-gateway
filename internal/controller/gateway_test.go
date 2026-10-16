@@ -395,12 +395,15 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 					// Header name should be normalized to lowercase in the filter config.
 					{Name: "X-Foo", Value: "foo"},
 				}, Remove: []string{"x-Bar"}},
+				ResponseBodyMutation: &aigv1b1.HTTPResponseBodyMutation{Remove: []string{"provider", "usage.cost"}},
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "orange", Namespace: gwNamespace},
 			Spec: aigv1b1.AIServiceBackendSpec{
 				BackendRef: gwapiv1.BackendObjectReference{Name: "some-backend1", Namespace: ptr.To[gwapiv1.Namespace](gwNamespace)},
+				// An empty remove list must not reach the filter config.
+				ResponseBodyMutation: &aigv1b1.HTTPResponseBodyMutation{Remove: []string{}},
 			},
 		},
 		{
@@ -500,6 +503,15 @@ func TestGatewayController_reconcileFilterConfigSecret(t *testing.T) {
 		require.Equal(t, "x-foo", fc.Backends[0].HeaderMutation.Set[0].Name)
 		require.Equal(t, "foo", fc.Backends[0].HeaderMutation.Set[0].Value)
 		require.Equal(t, "x-bar", fc.Backends[0].HeaderMutation.Remove[0])
+
+		responseBodyMutations := map[string]*filterapi.HTTPBodyMutation{}
+		for i := range fc.Backends {
+			responseBodyMutations[fc.Backends[i].Name] = fc.Backends[i].ResponseBodyMutation
+		}
+		require.Equal(t, map[string]*filterapi.HTTPBodyMutation{
+			internalapi.PerRouteRuleRefBackendName(gwNamespace, "apple", "route1", 0, 0):  {Remove: []string{"provider", "usage.cost"}},
+			internalapi.PerRouteRuleRefBackendName(gwNamespace, "orange", "route2", 0, 0): nil,
+		}, responseBodyMutations)
 	}
 }
 
@@ -4300,6 +4312,55 @@ func Test_bodyMutationToFilterAPI(t *testing.T) {
 	}
 }
 
+func Test_responseBodyMutationToFilterAPI(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    *aigv1b1.HTTPResponseBodyMutation
+		expected *filterapi.HTTPBodyMutation
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "empty remove",
+			input: &aigv1b1.HTTPResponseBodyMutation{
+				Remove: []string{},
+			},
+			expected: nil,
+		},
+		{
+			name:     "nil remove field",
+			input:    &aigv1b1.HTTPResponseBodyMutation{},
+			expected: nil,
+		},
+		{
+			name: "populated remove",
+			input: &aigv1b1.HTTPResponseBodyMutation{
+				Remove: []string{"service_tier", "internal_flag", "debug_mode"},
+			},
+			expected: &filterapi.HTTPBodyMutation{
+				Remove: []string{"service_tier", "internal_flag", "debug_mode"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := responseBodyMutationToFilterAPI(tt.input)
+			if tt.expected == nil {
+				require.Nil(t, result)
+				return
+			}
+			require.NotNil(t, result)
+			if d := cmp.Diff(tt.expected, result); d != "" {
+				t.Errorf("responseBodyMutationToFilterAPI() mismatch (-expected +got):\n%s", d)
+			}
+		})
+	}
+}
+
 // TestGatewayController_reconcileFilterConfigSecret_GlobalDefaults tests that
 // global LLM request costs from GatewayConfig are properly included in the filter config
 // when no routes override them.
@@ -5056,6 +5117,8 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 			BodyMutation: &aigv1b1.HTTPBodyMutation{
 				Set: []aigv1b1.HTTPBodyField{{Path: "shadow", Value: "true"}},
 			},
+			// A mirror leg never returns its response downstream, so this must not reach its filter config.
+			ResponseBodyMutation: &aigv1b1.HTTPResponseBodyMutation{Remove: []string{"provider"}},
 		},
 	}
 	require.NoError(t, fakeClient.Create(t.Context(), primary))
@@ -5116,6 +5179,7 @@ func TestGatewayController_reconcileFilterConfigSecret_Mirrors(t *testing.T) {
 	require.Equal(t, "shadow-model", mirror.ModelNameOverride)
 	require.NotNil(t, mirror.HeaderMutation)
 	require.NotNil(t, mirror.BodyMutation)
+	require.Nil(t, mirror.ResponseBodyMutation)
 
 	// The missing-backend mirror must have been skipped.
 	for i := range fc.Backends {

@@ -900,6 +900,39 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              responseBodyMutation:
+                description: |-
+                  ResponseBodyMutation defines the mutation of HTTP response body JSON fields that will be applied
+                  to the response from the backend before returning to the client.
+                  Only field removal is supported on the response path.
+                properties:
+                  remove:
+                    description: |-
+                      Remove the given JSON field(s) from the HTTP response body before returning to the client.
+                      Each entry is an sjson path: a top-level field name, or a dotted path such as "usage.cost"
+                      for a nested field. On a streaming response the fields are removed from every SSE data line.
+
+                      Input:
+                        {
+                          "model": "gpt-4",
+                          "service_tier": "default",
+                          "usage": {"total_tokens": 12, "cost": 0.1}
+                        }
+
+                      Config:
+                        remove: ["service_tier", "usage.cost"]
+
+                      Output:
+                        {
+                          "model": "gpt-4",
+                          "usage": {"total_tokens": 12}
+                        }
+                    items:
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
               schema:
                 description: |-
                   APISchema specifies the API schema of the output format of requests from

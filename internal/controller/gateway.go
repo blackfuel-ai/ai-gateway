@@ -285,6 +285,23 @@ func bodyMutationToFilterAPI(m *aigv1b1.HTTPBodyMutation) *filterapi.HTTPBodyMut
 	return ret
 }
 
+// responseBodyMutationToFilterAPI converts an aigv1b1.HTTPResponseBodyMutation to filterapi.HTTPBodyMutation.
+// Only field removal is supported on the response path.
+//
+// An empty remove list maps to nil: BodyMutator.HasMutations is true for any non-nil
+// config, and the upstream processor uses it to decide whether to read the decoded
+// response body and buffer SSE lines, so a config that removes nothing must not
+// switch that path on.
+func responseBodyMutationToFilterAPI(m *aigv1b1.HTTPResponseBodyMutation) *filterapi.HTTPBodyMutation {
+	if m == nil || len(m.Remove) == 0 {
+		return nil
+	}
+	ret := &filterapi.HTTPBodyMutation{}
+	ret.Remove = make([]string, 0, len(m.Remove))
+	ret.Remove = append(ret.Remove, m.Remove...)
+	return ret
+}
+
 // validateCELExpression validates and returns a CEL expression for cost calculation.
 func validateCELExpression(cost aigv1b1.LLMRequestCost) (string, error) {
 	if cost.CEL == nil {
@@ -678,6 +695,7 @@ func (c *GatewayController) reconcileFilterConfigSecret(
 					// Merge with route-level taking precedence over backend-level
 					mergedBodyMutation := mergeBodyMutations(routeBodyMutation, backendBodyMutation)
 					b.BodyMutation = bodyMutationToFilterAPI(mergedBodyMutation)
+					b.ResponseBodyMutation = responseBodyMutationToFilterAPI(backendObj.Spec.ResponseBodyMutation)
 
 					b.Schema = schemaToFilterAPI(backendObj.Spec.APISchema)
 					b.HeaderValueFilters = headerValueFiltersToFilterAPI(backendObj.Spec.HeaderValueFilters)
