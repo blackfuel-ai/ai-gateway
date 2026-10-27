@@ -51,6 +51,10 @@ type MessagesRequest struct {
 	// https://docs.claude.com/en/api/messages#body-metadata
 	Metadata *MessagesMetadata `json:"metadata,omitempty"`
 
+	// OutputConfig holds the output configuration, of which only the effort is read.
+	// https://platform.claude.com/docs/en/api/messages#body-output-config
+	OutputConfig *OutputConfig `json:"output_config,omitempty"`
+
 	// ServiceTier indicates the service tier for the request.
 	// https://docs.claude.com/en/api/messages#body-service-tier
 	ServiceTier *MessageServiceTier `json:"service_tier,omitempty"`
@@ -1311,6 +1315,16 @@ type (
 		Display string `json:"display,omitempty"` // "summarized" or "omitted".
 	}
 )
+
+// OutputConfig is the output configuration of a Messages request.
+// https://platform.claude.com/docs/en/build-with-claude/effort
+type OutputConfig struct {
+	// Effort is how much effort the model spends on its response, thinking included.
+	Effort OutputConfigEffort `json:"effort,omitempty"`
+}
+
+// OutputConfigEffort is an effort level: "low", "medium", "high", "xhigh" or "max".
+type OutputConfigEffort string
 
 // Thinking config type constants used by Thinking.
 const (
