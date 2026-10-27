@@ -107,19 +107,18 @@ func anthropicThinkingToReasoningEffort(t *anthropic.Thinking, outputConfig *ant
 }
 
 // anthropicEffortToReasoningEffort converts an Anthropic output_config effort
-// level to the reasoning_effort level of the same name; it is the inverse of
-// mapReasoningEffortToOutputConfigEffort.
+// level to the reasoning_effort level of the same name.
 func anthropicEffortToReasoningEffort(effort anthropic.OutputConfigEffort) (openai.ReasoningEffort, error) {
 	switch effort {
-	case "low":
+	case anthropic.OutputConfigEffortLow:
 		return openai.ReasoningEffortLow, nil
-	case "medium":
+	case anthropic.OutputConfigEffortMedium:
 		return openai.ReasoningEffortMedium, nil
-	case "high":
+	case anthropic.OutputConfigEffortHigh:
 		return openai.ReasoningEffortHigh, nil
-	case "xhigh":
+	case anthropic.OutputConfigEffortXhigh:
 		return openai.ReasoningEffortXhigh, nil
-	case "max":
+	case anthropic.OutputConfigEffortMax:
 		return openai.ReasoningEffortMax, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported output_config.effort: %q (supported: low, medium, high, xhigh, max)", internalapi.ErrInvalidRequestBody, effort)

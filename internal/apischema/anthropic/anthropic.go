@@ -1326,6 +1326,15 @@ type OutputConfig struct {
 // OutputConfigEffort is an effort level: "low", "medium", "high", "xhigh" or "max".
 type OutputConfigEffort string
 
+// Effort levels of OutputConfig.Effort.
+const (
+	OutputConfigEffortLow    OutputConfigEffort = "low"
+	OutputConfigEffortMedium OutputConfigEffort = "medium"
+	OutputConfigEffortHigh   OutputConfigEffort = "high"
+	OutputConfigEffortXhigh  OutputConfigEffort = "xhigh"
+	OutputConfigEffortMax    OutputConfigEffort = "max"
+)
+
 // Thinking config type constants used by Thinking.
 const (
 	thinkingConfigTypeEnabled  = "enabled"
