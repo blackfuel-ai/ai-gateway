@@ -52,35 +52,45 @@ func buildOpenAIChatCompletionRequest(body *anthropic.MessagesRequest, modelName
 		req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
 	}
 
-	// Map Anthropic thinking config to OpenAI thinking config.
-	if body.Thinking != nil {
-		req.Thinking = anthropicThinkingToOpenAI(body.Thinking)
-	}
+	req.ReasoningEffort = anthropicThinkingToReasoningEffort(body.Thinking)
 
 	return req
 }
 
-// anthropicThinkingToOpenAI converts an Anthropic Thinking config to OpenAI ThinkingUnion.
-func anthropicThinkingToOpenAI(t *anthropic.Thinking) *openai.ThinkingUnion {
+// Budget thresholds below which an enabled thinking config maps to the lower
+// reasoning_effort level. They follow the LiteLLM convention that pairs each
+// effort level with a thinking budget (low 1024, medium 2048, high 4096).
+const (
+	thinkingBudgetMediumEffort = 2048
+	thinkingBudgetHighEffort   = 4096
+)
+
+// anthropicThinkingToReasoningEffort maps an Anthropic thinking config to the
+// reasoning_effort a vLLM backend acts on. bf-vllm derives every chat-template
+// thinking toggle (enable_thinking, thinking, thinking_mode) from that single
+// field: "none" turns thinking off and any other value turns it on; the value
+// itself also reaches templates that grade their reasoning by effort. An
+// enabled config is bucketed by its budget, a disabled one is "none", and an
+// adaptive or absent one sets nothing so the model decides. The display
+// option has no counterpart on this path and is ignored.
+func anthropicThinkingToReasoningEffort(t *anthropic.Thinking) openai.ReasoningEffort {
 	if t == nil {
-		return nil
+		return ""
 	}
 	switch {
-	case t.Enabled != nil:
-		return &openai.ThinkingUnion{OfEnabled: &openai.ThinkingEnabled{
-			Type:         "enabled",
-			BudgetTokens: int64(t.Enabled.BudgetTokens),
-		}}
 	case t.Disabled != nil:
-		return &openai.ThinkingUnion{OfDisabled: &openai.ThinkingDisabled{
-			Type: "disabled",
-		}}
-	case t.Adaptive != nil:
-		return &openai.ThinkingUnion{OfAdaptive: &openai.ThinkingAdaptive{
-			Type: "adaptive",
-		}}
+		return openai.ReasoningEffortNone
+	case t.Enabled != nil:
+		switch budget := t.Enabled.BudgetTokens; {
+		case budget < thinkingBudgetMediumEffort:
+			return openai.ReasoningEffortLow
+		case budget < thinkingBudgetHighEffort:
+			return openai.ReasoningEffortMedium
+		default:
+			return openai.ReasoningEffortHigh
+		}
 	default:
-		return nil
+		return ""
 	}
 }
 

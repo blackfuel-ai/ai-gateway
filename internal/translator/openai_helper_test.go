@@ -1005,55 +1005,37 @@ func TestAppendAnthropicAssistantMessage_NoThinkingUnchanged(t *testing.T) {
 }
 
 func TestBuildOpenAIChatCompletionRequest_ThinkingConfig(t *testing.T) {
-	t.Run("thinking enabled with budget", func(t *testing.T) {
-		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 8192,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Think hard"}}},
-			Thinking:  &anthropic.Thinking{Enabled: &anthropic.ThinkingEnabled{Type: "enabled", BudgetTokens: 4096}},
-		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		require.NotNil(t, req.Thinking)
-		require.NotNil(t, req.Thinking.OfEnabled)
-		assert.Equal(t, "enabled", req.Thinking.OfEnabled.Type)
-		assert.Equal(t, int64(4096), req.Thinking.OfEnabled.BudgetTokens)
-	})
-
-	t.Run("thinking disabled", func(t *testing.T) {
-		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 100,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
-			Thinking:  &anthropic.Thinking{Disabled: &anthropic.ThinkingDisabled{Type: "disabled"}},
-		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		require.NotNil(t, req.Thinking)
-		require.NotNil(t, req.Thinking.OfDisabled)
-		assert.Equal(t, "disabled", req.Thinking.OfDisabled.Type)
-	})
-
-	t.Run("thinking adaptive", func(t *testing.T) {
-		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 100,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
-			Thinking:  &anthropic.Thinking{Adaptive: &anthropic.ThinkingAdaptive{Type: "adaptive"}},
-		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		require.NotNil(t, req.Thinking)
-		require.NotNil(t, req.Thinking.OfAdaptive)
-		assert.Equal(t, "adaptive", req.Thinking.OfAdaptive.Type)
-	})
-
-	t.Run("no thinking config", func(t *testing.T) {
-		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 100,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
-		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		assert.Nil(t, req.Thinking)
-	})
+	enabled := func(budget float64) *anthropic.Thinking {
+		return &anthropic.Thinking{Enabled: &anthropic.ThinkingEnabled{Type: "enabled", BudgetTokens: budget}}
+	}
+	tests := []struct {
+		name     string
+		thinking *anthropic.Thinking
+		effort   openai.ReasoningEffort
+	}{
+		{name: "no thinking config", thinking: nil, effort: ""},
+		{name: "disabled", thinking: &anthropic.Thinking{Disabled: &anthropic.ThinkingDisabled{Type: "disabled"}}, effort: openai.ReasoningEffortNone},
+		{name: "adaptive leaves the model to decide", thinking: &anthropic.Thinking{Adaptive: &anthropic.ThinkingAdaptive{Type: "adaptive"}}, effort: ""},
+		{name: "enabled budget 1024", thinking: enabled(1024), effort: openai.ReasoningEffortLow},
+		{name: "enabled budget 2047", thinking: enabled(2047), effort: openai.ReasoningEffortLow},
+		{name: "enabled budget 2048", thinking: enabled(2048), effort: openai.ReasoningEffortMedium},
+		{name: "enabled budget 4095", thinking: enabled(4095), effort: openai.ReasoningEffortMedium},
+		{name: "enabled budget 4096", thinking: enabled(4096), effort: openai.ReasoningEffortHigh},
+		{name: "enabled budget 32000", thinking: enabled(32000), effort: openai.ReasoningEffortHigh},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &anthropic.MessagesRequest{
+				Model:     "claude-3",
+				MaxTokens: 8192,
+				Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Think hard"}}},
+				Thinking:  tt.thinking,
+			}
+			req := buildOpenAIChatCompletionRequest(body, "")
+			assert.Equal(t, tt.effort, req.ReasoningEffort)
+			assert.Nil(t, req.Thinking, "the vLLM request carries reasoning_effort only")
+		})
+	}
 }
 
 func TestAppendAnthropicUserMessage_Base64Image(t *testing.T) {

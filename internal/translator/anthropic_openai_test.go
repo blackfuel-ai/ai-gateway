@@ -1134,10 +1134,8 @@ func TestAnthropicToOpenAITranslator_RequestBody_ThinkingConfig(t *testing.T) {
 
 	var req map[string]any
 	require.NoError(t, json.Unmarshal(newBody, &req))
-	thinking, ok := req["thinking"].(map[string]any)
-	require.True(t, ok, "expected thinking config in request body")
-	assert.Equal(t, "enabled", thinking["type"])
-	assert.Equal(t, float64(4096), thinking["budget_tokens"])
+	assert.Equal(t, "high", req["reasoning_effort"])
+	assert.NotContains(t, req, "thinking", "vLLM has no thinking field; the config travels as reasoning_effort")
 }
 
 func TestAnthropicToOpenAITranslator_RequestBody_MultiTurnWithThinking(t *testing.T) {
