@@ -61,13 +61,12 @@ func buildOpenAIChatCompletionRequest(body *anthropic.MessagesRequest, modelName
 	return req, nil
 }
 
-// Thinking budgets from which an enabled thinking config maps to each
-// reasoning_effort level; a budget below the low threshold maps to "minimal".
-// Each level pairs with a thinking budget of low 1024, medium 8192 and
-// high 16384 tokens, so Claude Code's think, think hard and ultrathink budgets
-// (4000, 10000 and 31999) land on low, medium and high.
+// Thinking budgets from which an enabled thinking config maps to the medium
+// and high reasoning_effort levels; any smaller budget maps to "low". Each level
+// pairs with a thinking budget of low 1024, medium 8192 and high 16384 tokens,
+// so Claude Code's think, think hard and ultrathink budgets (4000, 10000 and
+// 31999) land on low, medium and high.
 const (
-	thinkingBudgetLowEffort    = 1024
 	thinkingBudgetMediumEffort = 8192
 	thinkingBudgetHighEffort   = 16384
 )
@@ -93,8 +92,6 @@ func anthropicThinkingToReasoningEffort(t *anthropic.Thinking, outputConfig *ant
 		return openai.ReasoningEffortNone, nil
 	case t.Enabled != nil:
 		switch budget := t.Enabled.BudgetTokens; {
-		case budget < thinkingBudgetLowEffort:
-			return openai.ReasoningEffortMinimal, nil
 		case budget < thinkingBudgetMediumEffort:
 			return openai.ReasoningEffortLow, nil
 		case budget < thinkingBudgetHighEffort:

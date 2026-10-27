@@ -1035,7 +1035,7 @@ func TestBuildOpenAIChatCompletionRequest_ThinkingConfig(t *testing.T) {
 		{name: "effort without thinking config", thinking: nil, outputConfig: effort("high"), effort: ""},
 		{name: "disabled", thinking: disabled, effort: openai.ReasoningEffortNone},
 		{name: "disabled ignores effort", thinking: disabled, outputConfig: effort("high"), effort: openai.ReasoningEffortNone},
-		{name: "enabled budget 1023", thinking: enabled(1023), effort: openai.ReasoningEffortMinimal},
+		{name: "enabled budget 1023", thinking: enabled(1023), effort: openai.ReasoningEffortLow},
 		{name: "enabled budget 1024", thinking: enabled(1024), effort: openai.ReasoningEffortLow},
 		{name: "enabled budget 8191", thinking: enabled(8191), effort: openai.ReasoningEffortLow},
 		{name: "enabled budget 8192", thinking: enabled(8192), effort: openai.ReasoningEffortMedium},
