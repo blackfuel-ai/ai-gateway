@@ -438,6 +438,14 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 		bodyMutation = &extprocv3.BodyMutation{}
 	}
 
+	// The body the backend receives: the replaced one, or the original when the
+	// body is left as it arrived.
+	sentBody := bodyMutation.GetBody()
+	if sentBody == nil {
+		sentBody = u.parent.originalRequestBodyRaw
+	}
+	reasoningEffortMetadata := buildUpstreamReasoningEffortDynamicMetadata(upstreamReasoningEffort(sentBody))
+
 	for _, h := range headerMutation.SetHeaders {
 		u.requestHeaders[h.Header.Key] = string(h.Header.RawValue)
 	}
@@ -481,7 +489,10 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 					buildBackendDynamicMetadata(u.backendName),
 					buildRequestHeaderDynamicMetadata(u.requestHeaders),
 				),
-				buildToolsDigestDynamicMetadata(u.parent.toolsDigest),
+				mergeDynamicMetadata(
+					buildToolsDigestDynamicMetadata(u.parent.toolsDigest),
+					reasoningEffortMetadata,
+				),
 			),
 		}, nil
 	}
@@ -493,6 +504,7 @@ func (u *upstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessReque
 	dm = mergeDynamicMetadata(dm, buildBackendDynamicMetadata(u.backendName))
 	dm = mergeDynamicMetadata(dm, buildRequestHeaderDynamicMetadata(u.requestHeaders))
 	dm = mergeDynamicMetadata(dm, buildToolsDigestDynamicMetadata(u.parent.toolsDigest))
+	dm = mergeDynamicMetadata(dm, reasoningEffortMetadata)
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extprocv3.HeadersResponse{
