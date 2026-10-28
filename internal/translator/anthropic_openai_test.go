@@ -1263,6 +1263,58 @@ func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_Thinking(t *testi
 	assert.Equal(t, "The answer is 42.", anthropicResp.Content[1].Text.Text)
 }
 
+// vLLM (and OpenRouter) carry a non-streaming reply's reasoning on the plain-string
+// message.reasoning field. The wire body is fed raw so the test covers the decode:
+// a field the message struct does not declare is dropped before the translator runs.
+func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_ReasoningStringField(t *testing.T) {
+	newTranslator := func(t *testing.T) AnthropicMessagesTranslator {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		reqBody := &anthropic.MessagesRequest{
+			Model:     "claude-3",
+			MaxTokens: 100,
+			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
+		}
+		_, _, err := translator.RequestBody(nil, reqBody, false)
+		require.NoError(t, err)
+		return translator
+	}
+	translate := func(t *testing.T, wire string) anthropic.MessagesResponse {
+		_, body, _, _, err := newTranslator(t).ResponseBody(
+			map[string]string{"content-type": "application/json"},
+			strings.NewReader(wire),
+			true,
+			nil,
+		)
+		require.NoError(t, err)
+		var anthropicResp anthropic.MessagesResponse
+		require.NoError(t, json.Unmarshal(body, &anthropicResp))
+		return anthropicResp
+	}
+
+	t.Run("reasoning becomes a thinking block before the text", func(t *testing.T) {
+		anthropicResp := translate(t, `{"id":"chatcmpl-rs","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop",`+
+			`"message":{"role":"assistant","content":"The answer is 42.","reasoning":"Let me calculate..."}}],`+
+			`"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
+
+		require.Len(t, anthropicResp.Content, 2)
+		require.NotNil(t, anthropicResp.Content[0].Thinking)
+		assert.Equal(t, "Let me calculate...", anthropicResp.Content[0].Thinking.Thinking)
+		assert.Empty(t, anthropicResp.Content[0].Thinking.Signature)
+		require.NotNil(t, anthropicResp.Content[1].Text)
+		assert.Equal(t, "The answer is 42.", anthropicResp.Content[1].Text.Text)
+	})
+
+	t.Run("reasoning_content wins when both are present", func(t *testing.T) {
+		anthropicResp := translate(t, `{"id":"chatcmpl-rs","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop",`+
+			`"message":{"role":"assistant","content":"Answer","reasoning_content":"A","reasoning":"B"}}],`+
+			`"usage":{"prompt_tokens":10,"completion_tokens":20}}`)
+
+		require.Len(t, anthropicResp.Content, 2)
+		require.NotNil(t, anthropicResp.Content[0].Thinking)
+		assert.Equal(t, "A", anthropicResp.Content[0].Thinking.Thinking)
+	})
+}
+
 func TestAnthropicToOpenAITranslator_ResponseBody_Streaming_Thinking(t *testing.T) {
 	translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "claude-3")
 	reqBody := &anthropic.MessagesRequest{
