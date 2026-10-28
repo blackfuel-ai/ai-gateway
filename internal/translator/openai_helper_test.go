@@ -20,6 +20,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
@@ -78,7 +79,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 				{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hello"}},
 			},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		assert.Equal(t, "claude-3-haiku", req.Model)
 		require.NotNil(t, req.MaxCompletionTokens)
 		assert.Equal(t, int64(100), *req.MaxCompletionTokens)
@@ -93,7 +95,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 			Model:    "claude-3-haiku",
 			Messages: []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "gpt-4o")
+		req, err := buildOpenAIChatCompletionRequest(body, "gpt-4o")
+		require.NoError(t, err)
 		assert.Equal(t, "gpt-4o", req.Model)
 	})
 
@@ -105,7 +108,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 				{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}},
 			},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		require.Len(t, req.Messages, 2)
 		require.NotNil(t, req.Messages[0].OfSystem)
 		assert.Equal(t, openai.ChatMessageRoleSystem, req.Messages[0].OfSystem.Role)
@@ -121,7 +125,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 				{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}},
 			},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		require.Len(t, req.Messages, 1)
 		assert.Nil(t, req.Messages[0].OfSystem)
 	})
@@ -135,7 +140,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 				{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Bye"}},
 			},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		require.Len(t, req.Messages, 3)
 		assert.NotNil(t, req.Messages[0].OfUser)
 		assert.NotNil(t, req.Messages[1].OfAssistant)
@@ -150,7 +156,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 			Stream:   true,
 			Messages: []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		assert.True(t, req.Stream)
 		require.NotNil(t, req.StreamOptions)
 		assert.True(t, req.StreamOptions.IncludeUsage)
@@ -161,7 +168,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 			Model:    "claude-3",
 			Messages: []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		assert.False(t, req.Stream)
 		assert.Nil(t, req.StreamOptions)
 	})
@@ -175,7 +183,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 			TopP:        &topP,
 			Messages:    []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		require.NotNil(t, req.Temperature)
 		assert.Equal(t, &temp, req.Temperature)
 		require.NotNil(t, req.TopP)
@@ -196,7 +205,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 				}},
 			},
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		require.Len(t, req.Tools, 1)
 		assert.Equal(t, openai.ToolTypeFunction, req.Tools[0].Type)
 		require.NotNil(t, req.Tools[0].Function)
@@ -211,7 +221,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 			Messages:   []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
 			ToolChoice: &tc,
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		assert.Nil(t, req.Tools)
 		assert.Nil(t, req.ToolChoice)
 	})
@@ -223,7 +234,8 @@ func TestBuildOpenAIChatCompletionRequest(t *testing.T) {
 			Tools:      []anthropic.ToolUnion{{Tool: &anthropic.Tool{Name: "search", InputSchema: json.RawMessage(`{"type":"object"}`)}}},
 			ToolChoice: ptr.To(anthropic.ToolChoice{Auto: &anthropic.ToolChoiceAuto{Type: "auto"}}),
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
+		req, err := buildOpenAIChatCompletionRequest(body, "")
+		require.NoError(t, err)
 		require.NotNil(t, req.Tools)
 		require.NotNil(t, req.ToolChoice)
 		assert.Equal(t, string(openai.ToolChoiceTypeAuto), req.ToolChoice.Value)
@@ -1005,54 +1017,67 @@ func TestAppendAnthropicAssistantMessage_NoThinkingUnchanged(t *testing.T) {
 }
 
 func TestBuildOpenAIChatCompletionRequest_ThinkingConfig(t *testing.T) {
-	t.Run("thinking enabled with budget", func(t *testing.T) {
-		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 8192,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Think hard"}}},
-			Thinking:  &anthropic.Thinking{Enabled: &anthropic.ThinkingEnabled{Type: "enabled", BudgetTokens: 4096}},
-		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		require.NotNil(t, req.Thinking)
-		require.NotNil(t, req.Thinking.OfEnabled)
-		assert.Equal(t, "enabled", req.Thinking.OfEnabled.Type)
-		assert.Equal(t, int64(4096), req.Thinking.OfEnabled.BudgetTokens)
-	})
+	enabled := func(budget float64) *anthropic.Thinking {
+		return &anthropic.Thinking{Enabled: &anthropic.ThinkingEnabled{Type: "enabled", BudgetTokens: budget}}
+	}
+	disabled := &anthropic.Thinking{Disabled: &anthropic.ThinkingDisabled{Type: "disabled"}}
+	adaptive := &anthropic.Thinking{Adaptive: &anthropic.ThinkingAdaptive{Type: "adaptive"}}
+	effort := func(e anthropic.OutputConfigEffort) *anthropic.OutputConfig {
+		return &anthropic.OutputConfig{Effort: e}
+	}
+	tests := []struct {
+		name         string
+		thinking     *anthropic.Thinking
+		outputConfig *anthropic.OutputConfig
+		effort       openai.ReasoningEffort
+	}{
+		{name: "no thinking config", thinking: nil, effort: ""},
+		{name: "effort without thinking config", thinking: nil, outputConfig: effort("high"), effort: ""},
+		{name: "disabled", thinking: disabled, effort: openai.ReasoningEffortNone},
+		{name: "disabled ignores effort", thinking: disabled, outputConfig: effort("high"), effort: openai.ReasoningEffortNone},
+		{name: "enabled budget 1023", thinking: enabled(1023), effort: openai.ReasoningEffortLow},
+		{name: "enabled budget 1024", thinking: enabled(1024), effort: openai.ReasoningEffortLow},
+		{name: "enabled budget 8191", thinking: enabled(8191), effort: openai.ReasoningEffortLow},
+		{name: "enabled budget 8192", thinking: enabled(8192), effort: openai.ReasoningEffortMedium},
+		{name: "enabled budget 16383", thinking: enabled(16383), effort: openai.ReasoningEffortMedium},
+		{name: "enabled budget 16384", thinking: enabled(16384), effort: openai.ReasoningEffortHigh},
+		{name: "enabled budget 31999", thinking: enabled(31999), effort: openai.ReasoningEffortHigh},
+		{name: "enabled budget decides over effort", thinking: enabled(1024), outputConfig: effort("max"), effort: openai.ReasoningEffortLow},
+		{name: "adaptive without effort leaves the model to decide", thinking: adaptive, effort: ""},
+		{name: "adaptive with empty output_config", thinking: adaptive, outputConfig: &anthropic.OutputConfig{}, effort: ""},
+		{name: "adaptive effort low", thinking: adaptive, outputConfig: effort("low"), effort: openai.ReasoningEffortLow},
+		{name: "adaptive effort medium", thinking: adaptive, outputConfig: effort("medium"), effort: openai.ReasoningEffortMedium},
+		{name: "adaptive effort high", thinking: adaptive, outputConfig: effort("high"), effort: openai.ReasoningEffortHigh},
+		{name: "adaptive effort xhigh", thinking: adaptive, outputConfig: effort("xhigh"), effort: openai.ReasoningEffortXhigh},
+		{name: "adaptive effort max", thinking: adaptive, outputConfig: effort("max"), effort: openai.ReasoningEffortMax},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &anthropic.MessagesRequest{
+				Model:        "claude-3",
+				MaxTokens:    32000,
+				Messages:     []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Think hard"}}},
+				Thinking:     tt.thinking,
+				OutputConfig: tt.outputConfig,
+			}
+			req, err := buildOpenAIChatCompletionRequest(body, "")
+			require.NoError(t, err)
+			assert.Equal(t, tt.effort, req.ReasoningEffort)
+			assert.Nil(t, req.Thinking, "the vLLM request carries reasoning_effort only")
+		})
+	}
 
-	t.Run("thinking disabled", func(t *testing.T) {
+	t.Run("adaptive with an unknown effort is an invalid request", func(t *testing.T) {
 		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 100,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
-			Thinking:  &anthropic.Thinking{Disabled: &anthropic.ThinkingDisabled{Type: "disabled"}},
+			Model:        "claude-3",
+			MaxTokens:    32000,
+			Messages:     []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Think hard"}}},
+			Thinking:     adaptive,
+			OutputConfig: effort("minimal"),
 		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		require.NotNil(t, req.Thinking)
-		require.NotNil(t, req.Thinking.OfDisabled)
-		assert.Equal(t, "disabled", req.Thinking.OfDisabled.Type)
-	})
-
-	t.Run("thinking adaptive", func(t *testing.T) {
-		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 100,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
-			Thinking:  &anthropic.Thinking{Adaptive: &anthropic.ThinkingAdaptive{Type: "adaptive"}},
-		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		require.NotNil(t, req.Thinking)
-		require.NotNil(t, req.Thinking.OfAdaptive)
-		assert.Equal(t, "adaptive", req.Thinking.OfAdaptive.Type)
-	})
-
-	t.Run("no thinking config", func(t *testing.T) {
-		body := &anthropic.MessagesRequest{
-			Model:     "claude-3",
-			MaxTokens: 100,
-			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
-		}
-		req := buildOpenAIChatCompletionRequest(body, "")
-		assert.Nil(t, req.Thinking)
+		_, err := buildOpenAIChatCompletionRequest(body, "")
+		require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+		assert.Contains(t, err.Error(), `"minimal"`)
 	})
 }
 

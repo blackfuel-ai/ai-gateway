@@ -2428,3 +2428,20 @@ func TestToolResultContent_InToolResultBlockParam(t *testing.T) {
 func strPtr(s string) *string {
 	return &s
 }
+
+func TestMessagesRequest_UnmarshalJSON_OutputConfig(t *testing.T) {
+	var req MessagesRequest
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"model": "m",
+		"max_tokens": 16,
+		"messages": [],
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "low"}
+	}`), &req))
+	require.NotNil(t, req.OutputConfig)
+	require.Equal(t, OutputConfigEffort("low"), req.OutputConfig.Effort)
+
+	var noConfig MessagesRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"model": "m", "max_tokens": 16, "messages": []}`), &noConfig))
+	require.Nil(t, noConfig.OutputConfig)
+}

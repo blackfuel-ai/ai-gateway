@@ -18,6 +18,7 @@ import (
 
 	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
 	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
+	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/json"
 )
 
@@ -1134,10 +1135,37 @@ func TestAnthropicToOpenAITranslator_RequestBody_ThinkingConfig(t *testing.T) {
 
 	var req map[string]any
 	require.NoError(t, json.Unmarshal(newBody, &req))
-	thinking, ok := req["thinking"].(map[string]any)
-	require.True(t, ok, "expected thinking config in request body")
-	assert.Equal(t, "enabled", thinking["type"])
-	assert.Equal(t, float64(4096), thinking["budget_tokens"])
+	assert.Equal(t, "low", req["reasoning_effort"])
+	assert.NotContains(t, req, "thinking", "vLLM has no thinking field; the config travels as reasoning_effort")
+}
+
+func TestAnthropicToOpenAITranslator_RequestBody_AdaptiveThinkingEffort(t *testing.T) {
+	adaptive := func(effort anthropic.OutputConfigEffort) *anthropic.MessagesRequest {
+		return &anthropic.MessagesRequest{
+			Model:        "claude-3",
+			MaxTokens:    8192,
+			Messages:     []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Think"}}},
+			Thinking:     &anthropic.Thinking{Adaptive: &anthropic.ThinkingAdaptive{Type: "adaptive"}},
+			OutputConfig: &anthropic.OutputConfig{Effort: effort},
+		}
+	}
+
+	t.Run("declared effort travels as reasoning_effort", func(t *testing.T) {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		_, newBody, err := translator.RequestBody(nil, adaptive("low"), false)
+		require.NoError(t, err)
+
+		var req map[string]any
+		require.NoError(t, json.Unmarshal(newBody, &req))
+		assert.Equal(t, "low", req["reasoning_effort"])
+		assert.NotContains(t, req, "output_config")
+	})
+
+	t.Run("unknown effort is an invalid request", func(t *testing.T) {
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		_, _, err := translator.RequestBody(nil, adaptive("extreme"), false)
+		require.ErrorIs(t, err, internalapi.ErrInvalidRequestBody)
+	})
 }
 
 func TestAnthropicToOpenAITranslator_RequestBody_MultiTurnWithThinking(t *testing.T) {

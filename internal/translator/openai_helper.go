@@ -22,8 +22,8 @@ import (
 // The following are helper functions for creating an OpenAI ChatCompletionRequest from an Anthropic MessagesRequest
 
 // buildOpenAIChatCompletionRequest converts an Anthropic MessagesRequest into an OpenAI ChatCompletionRequest.
-// It handles model override, system prompts, message conversion, tools, and tool choice.
-func buildOpenAIChatCompletionRequest(body *anthropic.MessagesRequest, modelNameOverride internalapi.ModelNameOverride) *openai.ChatCompletionRequest {
+// It handles model override, system prompts, message conversion, tools, tool choice, and the reasoning effort.
+func buildOpenAIChatCompletionRequest(body *anthropic.MessagesRequest, modelNameOverride internalapi.ModelNameOverride) (*openai.ChatCompletionRequest, error) {
 	model := cmp.Or(modelNameOverride, body.Model)
 	messages := anthropicMessagesToOpenAI(body)
 	tools := anthropicToolsToOpenAI(body.Tools)
@@ -52,35 +52,76 @@ func buildOpenAIChatCompletionRequest(body *anthropic.MessagesRequest, modelName
 		req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
 	}
 
-	// Map Anthropic thinking config to OpenAI thinking config.
-	if body.Thinking != nil {
-		req.Thinking = anthropicThinkingToOpenAI(body.Thinking)
+	effort, err := anthropicThinkingToReasoningEffort(body.Thinking, body.OutputConfig)
+	if err != nil {
+		return nil, err
 	}
+	req.ReasoningEffort = effort
 
-	return req
+	return req, nil
 }
 
-// anthropicThinkingToOpenAI converts an Anthropic Thinking config to OpenAI ThinkingUnion.
-func anthropicThinkingToOpenAI(t *anthropic.Thinking) *openai.ThinkingUnion {
+// Thinking budgets from which an enabled thinking config maps to the medium
+// and high reasoning_effort levels; any smaller budget maps to "low". Each level
+// pairs with a thinking budget of low 1024, medium 8192 and high 16384 tokens,
+// so Claude Code's think, think hard and ultrathink budgets (4000, 10000 and
+// 31999) land on low, medium and high.
+const (
+	thinkingBudgetMediumEffort = 8192
+	thinkingBudgetHighEffort   = 16384
+)
+
+// anthropicThinkingToReasoningEffort maps an Anthropic thinking config and
+// output config to the reasoning_effort a vLLM backend acts on. bf-vllm derives
+// every chat-template thinking toggle (enable_thinking, thinking,
+// thinking_mode) from that single field: "none" turns thinking off and any
+// other value turns it on; the value itself also reaches templates that grade
+// their reasoning by effort.
+//
+// A disabled config is "none" and an enabled one is graded by its budget,
+// whatever output_config.effort says. An adaptive config carries
+// output_config.effort when the request declares one and otherwise sets
+// nothing, as does an absent config, so the model decides. The display option
+// has no counterpart on this path and is ignored.
+func anthropicThinkingToReasoningEffort(t *anthropic.Thinking, outputConfig *anthropic.OutputConfig) (openai.ReasoningEffort, error) {
 	if t == nil {
-		return nil
+		return "", nil
 	}
 	switch {
-	case t.Enabled != nil:
-		return &openai.ThinkingUnion{OfEnabled: &openai.ThinkingEnabled{
-			Type:         "enabled",
-			BudgetTokens: int64(t.Enabled.BudgetTokens),
-		}}
 	case t.Disabled != nil:
-		return &openai.ThinkingUnion{OfDisabled: &openai.ThinkingDisabled{
-			Type: "disabled",
-		}}
-	case t.Adaptive != nil:
-		return &openai.ThinkingUnion{OfAdaptive: &openai.ThinkingAdaptive{
-			Type: "adaptive",
-		}}
+		return openai.ReasoningEffortNone, nil
+	case t.Enabled != nil:
+		switch budget := t.Enabled.BudgetTokens; {
+		case budget < thinkingBudgetMediumEffort:
+			return openai.ReasoningEffortLow, nil
+		case budget < thinkingBudgetHighEffort:
+			return openai.ReasoningEffortMedium, nil
+		default:
+			return openai.ReasoningEffortHigh, nil
+		}
+	case t.Adaptive != nil && outputConfig != nil && outputConfig.Effort != "":
+		return anthropicEffortToReasoningEffort(outputConfig.Effort)
 	default:
-		return nil
+		return "", nil
+	}
+}
+
+// anthropicEffortToReasoningEffort converts an Anthropic output_config effort
+// level to the reasoning_effort level of the same name.
+func anthropicEffortToReasoningEffort(effort anthropic.OutputConfigEffort) (openai.ReasoningEffort, error) {
+	switch effort {
+	case anthropic.OutputConfigEffortLow:
+		return openai.ReasoningEffortLow, nil
+	case anthropic.OutputConfigEffortMedium:
+		return openai.ReasoningEffortMedium, nil
+	case anthropic.OutputConfigEffortHigh:
+		return openai.ReasoningEffortHigh, nil
+	case anthropic.OutputConfigEffortXhigh:
+		return openai.ReasoningEffortXhigh, nil
+	case anthropic.OutputConfigEffortMax:
+		return openai.ReasoningEffortMax, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported output_config.effort: %q (supported: low, medium, high, xhigh, max)", internalapi.ErrInvalidRequestBody, effort)
 	}
 }
 
