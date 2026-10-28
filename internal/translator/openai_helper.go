@@ -485,8 +485,10 @@ func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string
 	}
 }
 
-// appendThinkingBlocks converts OpenAI ThinkingBlocks and ReasoningContent to Anthropic
-// thinking/redacted_thinking content blocks. ThinkingBlocks take priority over ReasoningContent.
+// appendThinkingBlocks converts OpenAI ThinkingBlocks, ReasoningContent and Reasoning to
+// Anthropic thinking/redacted_thinking content blocks, in that order of precedence:
+// ThinkingBlocks carry signatures, ReasoningContent is the DeepSeek-style field, and
+// Reasoning is the plain string vLLM and OpenRouter set on a non-streaming message.
 func appendThinkingBlocks(content []anthropic.MessagesContentBlock, msg *openai.ChatCompletionResponseChoiceMessage) []anthropic.MessagesContentBlock {
 	// Prefer ThinkingBlocks (structured, preserves signatures).
 	if len(msg.ThinkingBlocks) > 0 {
@@ -505,8 +507,14 @@ func appendThinkingBlocks(content []anthropic.MessagesContentBlock, msg *openai.
 		return content
 	}
 
-	// Fall back to ReasoningContent (used by AWS Bedrock, Gemini, Qwen, DeepSeek).
+	// Fall back to ReasoningContent (used by AWS Bedrock, Gemini, Qwen, DeepSeek),
+	// then to the plain-string Reasoning field (vLLM, OpenRouter).
 	if msg.ReasoningContent == nil {
+		if msg.Reasoning != nil && *msg.Reasoning != "" {
+			content = append(content, anthropic.MessagesContentBlock{
+				Thinking: &anthropic.ThinkingBlock{Type: "thinking", Thinking: *msg.Reasoning},
+			})
+		}
 		return content
 	}
 	// Some models (Qwen, DeepSeek) return reasoning content as a plain string.

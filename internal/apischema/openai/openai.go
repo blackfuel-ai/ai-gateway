@@ -1531,6 +1531,11 @@ type ChatCompletionResponseChoiceMessage struct {
 	// See https://docs.litellm.ai/docs/reasoning_content for the convention.
 	ThinkingBlocks []ThinkingBlock `json:"thinking_blocks,omitempty"`
 
+	// Reasoning is the plain-string reasoning field vLLM and OpenRouter set on a
+	// non-streaming message: {"message": {"reasoning": "..."}}. Distinct from
+	// ReasoningContent, the reasoning_content field used by DeepSeek-style backends.
+	Reasoning *string `json:"reasoning,omitempty"`
+
 	// GCPVertexAI specific fields.
 
 	// SafetyRatings contains safety ratings copied from the GCP Vertex AI response as-is.
