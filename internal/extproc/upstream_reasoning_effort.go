@@ -6,16 +6,25 @@
 package extproc
 
 import (
+	"strings"
+	"unsafe"
+
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 )
 
-// upstreamReasoningEffortPaths are the request body members that carry a reasoning
-// effort level, one per backend schema: reasoning_effort on chat completions,
-// reasoning.effort on responses and output_config.effort on Anthropic messages.
-var upstreamReasoningEffortPaths = []string{"reasoning_effort", "reasoning.effort", "output_config.effort"}
+// upstreamReasoningEffortMembers are the top-level request body members that carry
+// a reasoning effort level, in precedence order, one per backend schema:
+// reasoning_effort on chat completions, reasoning.effort on responses and
+// output_config.effort on Anthropic messages. effortPath locates the level inside
+// the member, "" being the member itself.
+var upstreamReasoningEffortMembers = [...]struct{ name, effortPath string }{
+	{name: "reasoning_effort"},
+	{name: "reasoning", effortPath: "effort"},
+	{name: "output_config", effortPath: "effort"},
+}
 
 // invalidReasoningEffort stands for an effort member the access log must not carry
 // as sent: a value of another JSON type, or a string that is not a short token.
@@ -30,18 +39,39 @@ const maxReasoningEffortLength = 32
 // an Anthropic client's output_config.effort or thinking budget arrives at an
 // OpenAI-schema backend as reasoning_effort.
 //
-// It returns the first member of upstreamReasoningEffortPaths the body sets, ""
+// It returns the first member of upstreamReasoningEffortMembers the body sets, ""
 // when it sets none (null included), and invalidReasoningEffort for a value that
 // is not a string of 1 to 32 characters of [a-z0-9_-], so the access log never
 // carries free text from a request body.
+//
+// The body runs to megabytes on a long conversation, so it is walked once, member
+// by member, over a string view that shares its bytes: gjson.ParseBytes would copy
+// it and a lookup per path would walk it once per path.
 func upstreamReasoningEffort(body []byte) string {
-	for _, r := range gjson.GetManyBytes(body, upstreamReasoningEffortPaths...) {
+	// The view lives only for this call, which neither mutates the body nor lets a
+	// result escape uncloned; gjson.GetBytes reads bytes the same way.
+	view := unsafe.String(unsafe.SliceData(body), len(body)) //nolint:gosec // G103: read-only view, see above.
+	var found [len(upstreamReasoningEffortMembers)]gjson.Result
+	gjson.Parse(view).ForEach(func(key, value gjson.Result) bool {
+		for i, m := range upstreamReasoningEffortMembers {
+			if key.Str != m.name || found[i].Exists() {
+				continue
+			}
+			if m.effortPath != "" {
+				value = value.Get(m.effortPath)
+			}
+			found[i] = value
+		}
+		return true
+	})
+	for _, r := range found {
 		switch r.Type {
 		case gjson.Null:
 			continue
 		case gjson.String:
 			if isReasoningEffortToken(r.Str) {
-				return r.Str
+				// r.Str shares the body's bytes; the metadata outlives this call.
+				return strings.Clone(r.Str)
 			}
 			return invalidReasoningEffort
 		default:

@@ -36,6 +36,10 @@ func Test_upstreamReasoningEffort(t *testing.T) {
 		{name: "null is absent", body: `{"reasoning_effort":null,"output_config":{"effort":"low"}}`, exp: "low"},
 		{name: "thinking alone carries no level", body: `{"thinking":{"type":"enabled","budget_tokens":31999}}`, exp: ""},
 		{name: "first member wins", body: `{"output_config":{"effort":"low"},"reasoning_effort":"high"}`, exp: "high"},
+		{name: "member without effort", body: `{"reasoning":{"summary":"auto"},"output_config":{"effort":"low"}}`, exp: "low"},
+		{name: "nested member is not read", body: `{"messages":[{"reasoning_effort":"high"}],"metadata":{"output_config":{"effort":"low"}}}`, exp: ""},
+		{name: "escaped key", body: `{"reasoning_effort":"medium"}`, exp: "medium"},
+		{name: "not an object", body: `["reasoning_effort","high"]`, exp: ""},
 		{name: "not a token", body: `{"reasoning_effort":"High Effort"}`, exp: invalidReasoningEffort},
 		{name: "too long", body: `{"reasoning_effort":"` + strings.Repeat("a", maxReasoningEffortLength+1) + `"}`, exp: invalidReasoningEffort},
 		{name: "longest token", body: `{"reasoning_effort":"` + strings.Repeat("a", maxReasoningEffortLength) + `"}`, exp: strings.Repeat("a", maxReasoningEffortLength)},
@@ -47,6 +51,13 @@ func Test_upstreamReasoningEffort(t *testing.T) {
 			require.Equal(t, tc.exp, upstreamReasoningEffort([]byte(tc.body)))
 		})
 	}
+}
+
+func Test_upstreamReasoningEffort_doesNotShareBody(t *testing.T) {
+	body := []byte(`{"reasoning_effort":"high"}`)
+	effort := upstreamReasoningEffort(body)
+	copy(body, strings.Repeat("x", len(body)))
+	require.Equal(t, "high", effort)
 }
 
 func Test_buildUpstreamReasoningEffortDynamicMetadata(t *testing.T) {
