@@ -2836,7 +2836,7 @@ Each gateway replica estimates from the responses it served itself.
   name="byReasoningEffort"
   type="boolean"
   required="false"
-  description="ByReasoningEffort also groups the responses by the reasoning effort their<br />requests ask for, so a request is estimated from the responses of its own<br />effort. The effort is read from the request body: reasoning_effort on chat<br />completions, reasoning.effort on responses and, on Anthropic messages, the<br />effort its thinking and output_config translate to. A request setting none<br />forms its own group, and an endpoint with no such member is one group. A new<br />effort of a known ByHeader value has no estimate until the next period.<br />Defaults to false."
+  description="ByReasoningEffort also groups the responses by the reasoning effort their<br />requests ask for, so a request is estimated from the responses of its own<br />effort. The effort is read from the request body: reasoning_effort on chat<br />completions, reasoning.effort on responses and, on Anthropic messages, the<br />effort its thinking and output_config translate to. A request setting none<br />forms its own group, an endpoint with no such member is one group, and every<br />value other than none, minimal, low, medium, high, xhigh and max is one group.<br />A request whose effort has no successful response of its ByHeader value in the<br />last completed period has no estimate.<br />Defaults to false."
 /><ApiField
   name="emitMetric"
   type="boolean"
@@ -5643,7 +5643,7 @@ Each gateway replica estimates from the responses it served itself.
   name="byReasoningEffort"
   type="boolean"
   required="false"
-  description="ByReasoningEffort also groups the responses by the reasoning effort their<br />requests ask for, so a request is estimated from the responses of its own<br />effort. The effort is read from the request body: reasoning_effort on chat<br />completions, reasoning.effort on responses and, on Anthropic messages, the<br />effort its thinking and output_config translate to. A request setting none<br />forms its own group, and an endpoint with no such member is one group. A new<br />effort of a known ByHeader value has no estimate until the next period.<br />Defaults to false."
+  description="ByReasoningEffort also groups the responses by the reasoning effort their<br />requests ask for, so a request is estimated from the responses of its own<br />effort. The effort is read from the request body: reasoning_effort on chat<br />completions, reasoning.effort on responses and, on Anthropic messages, the<br />effort its thinking and output_config translate to. A request setting none<br />forms its own group, an endpoint with no such member is one group, and every<br />value other than none, minimal, low, medium, high, xhigh and max is one group.<br />A request whose effort has no successful response of its ByHeader value in the<br />last completed period has no estimate.<br />Defaults to false."
 /><ApiField
   name="emitMetric"
   type="boolean"

@@ -712,6 +712,9 @@ func TestRequestReasoningEffort(t *testing.T) {
 		{"chat completion", &openai.ChatCompletionRequest{ReasoningEffort: "high"}, "high"},
 		{"chat completion without effort", &openai.ChatCompletionRequest{}, ""},
 		{"chat completion with a value that is no token", &openai.ChatCompletionRequest{ReasoningEffort: "Not A Token"}, invalidReasoningEffort},
+		{"chat completion with an unknown level", &openai.ChatCompletionRequest{ReasoningEffort: "turbo"}, invalidReasoningEffort},
+		{"responses with an unknown level", &openai.ResponseRequest{Reasoning: openai.ReasoningParam{Effort: "turbo"}}, invalidReasoningEffort},
+		{"responses minimal", &openai.ResponseRequest{Reasoning: openai.ReasoningParam{Effort: "minimal"}}, "minimal"},
 		{"responses", &openai.ResponseRequest{Reasoning: openai.ReasoningParam{Effort: "low"}}, "low"},
 		{"messages disabled", &anthropicschema.MessagesRequest{Thinking: &anthropicschema.Thinking{Disabled: &anthropicschema.ThinkingDisabled{}}}, "none"},
 		{"messages budget", &anthropicschema.MessagesRequest{Thinking: budget(1)}, "low"},
@@ -730,4 +733,61 @@ func TestRequestReasoningEffort(t *testing.T) {
 			require.Equal(t, tc.exp, requestReasoningEffort(tc.body))
 		})
 	}
+}
+
+// admitAndRecordOutput admits body on a router of the endpoint S and records the
+// output given as its response's usage, returning the admission response.
+func admitAndRecordOutput[ReqT, RespT, RespChunkT any, S endpointspec.Spec[ReqT, RespT, RespChunkT]](t *testing.T, cfg *filterapi.RuntimeConfig, ue *usageEstimates, path, body string, output uint32) *extprocv3.ProcessingResponse {
+	t.Helper()
+	rp := &routerProcessor[ReqT, RespT, RespChunkT, S]{
+		config:         cfg,
+		requestHeaders: map[string]string{":path": path, usageEstimateTestHeader: "key-a"},
+		logger:         slog.Default(),
+		tracer:         tracingapi.NoopTracer[ReqT, RespT, RespChunkT]{},
+	}
+	rp.setUsageEstimates(ue)
+	resp, err := rp.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: []byte(body)})
+	require.NoError(t, err)
+	var usage metrics.TokenUsage
+	usage.SetInputTokens(100)
+	usage.SetOutputTokens(output)
+	rp.recordUsageEstimateSuccess(t.Context(), &usage)
+	return resp
+}
+
+func TestUsageEstimate_ResponsesBodySetsTheEffortOfItsKey(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateOutput)
+	body := func(effort string) string {
+		return `{"model":"` + usageEstimateTestModel + `","input":"hi","reasoning":{"effort":"` + effort + `"}}`
+	}
+	run := func(effort string, output uint32) *extprocv3.ProcessingResponse {
+		return admitAndRecordOutput[openai.ResponseRequest, openai.Response, openai.ResponseStreamEventUnion, endpointspec.ResponsesEndpointSpec](t, cfg, ue, "/v1/responses", body(effort), output)
+	}
+
+	run("low", 200)
+	clock.nextPeriod()
+
+	require.Equal(t, 200.0, usageEstimateFields(t, run("low", 200))["estimated_output_token"].GetNumberValue())
+	require.Nil(t, run("high", 3000).DynamicMetadata)
+}
+
+func TestUsageEstimate_MessagesBodySetsTheEffortOfItsKey(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateOutput)
+	body := func(thinking string) string {
+		return `{"model":"` + usageEstimateTestModel + `","max_tokens":10,"messages":[],"thinking":` + thinking + `}`
+	}
+	run := func(thinking string, output uint32) *extprocv3.ProcessingResponse {
+		return admitAndRecordOutput[anthropicschema.MessagesRequest, anthropicschema.MessagesResponse, anthropicschema.MessagesStreamChunk, endpointspec.MessagesEndpointSpec](t, cfg, ue, "/v1/messages", body(thinking), output)
+	}
+	const disabled, enabledLow, enabledHigh = `{"type":"disabled"}`, `{"type":"enabled","budget_tokens":1024}`, `{"type":"enabled","budget_tokens":20000}`
+
+	run(disabled, 50)
+	run(enabledHigh, 3000)
+	clock.nextPeriod()
+
+	require.Equal(t, 50.0, usageEstimateFields(t, run(disabled, 50))["estimated_output_token"].GetNumberValue())
+	require.Equal(t, 3000.0, usageEstimateFields(t, run(enabledHigh, 3000))["estimated_output_token"].GetNumberValue())
+	require.Nil(t, run(enabledLow, 200).DynamicMetadata)
 }

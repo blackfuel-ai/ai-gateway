@@ -126,26 +126,30 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 // requestReasoningEffort returns the reasoning effort a parsed request body asks
 // for: the level a backend is sent, an Anthropic thinking config reading as the
 // effort it translates to. It returns "" when the body sets none or its endpoint has
-// no such member, and invalidReasoningEffort for a value that is not a short token,
-// which bounds the values a key can hold.
+// no such member, and invalidReasoningEffort for any value but a known level: the
+// body is client input and a key lives in memory, so the levels bound the keys a
+// ByHeader value can hold.
 func requestReasoningEffort(body any) string {
-	var effort string
+	var effort openai.ReasoningEffort
 	switch b := body.(type) {
 	case *openai.ChatCompletionRequest:
-		effort = string(b.ReasoningEffort)
+		effort = b.ReasoningEffort
 	case *openai.ResponseRequest:
-		effort = b.Reasoning.Effort
+		effort = openai.ReasoningEffort(b.Reasoning.Effort)
 	case *anthropic.MessagesRequest:
 		e, err := translator.AnthropicThinkingToReasoningEffort(b.Thinking, b.OutputConfig)
 		if err != nil {
 			return invalidReasoningEffort
 		}
-		effort = string(e)
+		effort = e
 	}
-	if effort != "" && !isReasoningEffortToken(effort) {
+	switch effort {
+	case "", openai.ReasoningEffortNone, openai.ReasoningEffortMinimal, openai.ReasoningEffortLow,
+		openai.ReasoningEffortMedium, openai.ReasoningEffortHigh, openai.ReasoningEffortXhigh, openai.ReasoningEffortMax:
+		return string(effort)
+	default:
 		return invalidReasoningEffort
 	}
-	return effort
 }
 
 // estimateOne computes the estimate of e for the request and reports whether the
