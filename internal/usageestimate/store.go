@@ -45,6 +45,10 @@ type Key struct {
 	Value string
 	// Model is the model the client asked for.
 	Model string
+	// ByReasoningEffort reports whether the key groups by reasoning effort. It keeps
+	// the group of the requests setting none apart from a key that does not group by
+	// effort and holds the requests of every effort.
+	ByReasoningEffort bool
 	// ReasoningEffort is the reasoning effort the request asks for, empty for a
 	// request that sets none and for a key that does not group by it.
 	ReasoningEffort string

@@ -687,6 +687,24 @@ func TestUsageEstimate_OnlyAnItemWithByReasoningEffortSplitsByEffort(t *testing.
 	require.NotContains(t, fields, "estimated_output_token")
 }
 
+func TestUsageEstimate_NoEffortGroupHoldsOnlyRequestsSettingNone(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateInput, testEstimateOutput)
+
+	runWithEffort(t, cfg, ue, "high", 100, 3000)
+	clock.nextPeriod()
+
+	// An item that does not group by effort shares its ByHeader with the one that does:
+	// its input estimate holds the high request, the no-effort output group does not.
+	fields := usageEstimateFields(t, runWithEffort(t, cfg, ue, "", 100, 50))
+	require.Contains(t, fields, "estimated_input_token")
+	require.NotContains(t, fields, "estimated_output_token")
+
+	clock.nextPeriod()
+	fields = usageEstimateFields(t, runWithEffort(t, cfg, ue, "", 100, 50))
+	require.Equal(t, 50.0, fields["estimated_output_token"].GetNumberValue())
+}
+
 func TestUsageEstimate_TotalTokensAddTheEstimatedOutput(t *testing.T) {
 	ue, _, clock := newTestUsageEstimates()
 	cfg := newUsageEstimateTestConfig(t, filterapi.UsageEstimate{

@@ -160,7 +160,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateOne(ct
 	if value == "" {
 		return 0, false
 	}
-	key := usageestimate.Key{Header: e.ByHeader, Value: value, Model: r.originalModel}
+	key := usageestimate.Key{Header: e.ByHeader, Value: value, Model: r.originalModel, ByReasoningEffort: e.ByReasoningEffort}
 	if e.ByReasoningEffort {
 		key.ReasoningEffort = st.reasoningEffort
 	}
