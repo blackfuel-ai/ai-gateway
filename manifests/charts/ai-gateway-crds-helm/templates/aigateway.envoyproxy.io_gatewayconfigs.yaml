@@ -773,9 +773,8 @@ spec:
                         effort. The effort is read from the request body: reasoning_effort on chat
                         completions, reasoning.effort on responses and, on Anthropic messages, the
                         effort its thinking and output_config translate to. A request setting none
-                        forms its own group, an endpoint with no such member is one group, and every
-                        value other than none, minimal, low, medium, high, xhigh and max is one group.
-                        A request whose effort has no successful response of its ByHeader value in the
+                        forms its own group, and an endpoint with no such member is one group. A
+                        request whose effort has no successful response of its ByHeader value in the
                         last completed period has no estimate.
 
                         Defaults to false.
@@ -1688,9 +1687,8 @@ spec:
                         effort. The effort is read from the request body: reasoning_effort on chat
                         completions, reasoning.effort on responses and, on Anthropic messages, the
                         effort its thinking and output_config translate to. A request setting none
-                        forms its own group, an endpoint with no such member is one group, and every
-                        value other than none, minimal, low, medium, high, xhigh and max is one group.
-                        A request whose effort has no successful response of its ByHeader value in the
+                        forms its own group, and an endpoint with no such member is one group. A
+                        request whose effort has no successful response of its ByHeader value in the
                         last completed period has no estimate.
 
                         Defaults to false.
