@@ -23,6 +23,7 @@ import (
 	"github.com/envoyproxy/ai-gateway/internal/endpointspec"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
+	"github.com/envoyproxy/ai-gateway/internal/json"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
 	"github.com/envoyproxy/ai-gateway/internal/tracing/tracingapi"
@@ -612,4 +613,121 @@ func TestUsageEstimate_TokenCountingEndpoint(t *testing.T) {
 	ct.recordUsageEstimateSuccess(t.Context(), &usage)
 	clock.nextPeriod()
 	require.Equal(t, usageestimate.Stats{}, ue.store.Stats(key, usageEstimateTestPeriod, 1))
+}
+
+var testEstimateOutput = filterapi.UsageEstimate{
+	MetadataKey: "estimated_output_token", CEL: "output_tokens", ByHeader: usageEstimateTestHeader, ByReasoningEffort: true, EmitMetric: true,
+}
+
+// runWithEffort admits a chat completion carrying reasoning_effort, sends it
+// upstream and completes it with the usage given, returning the admission response.
+func runWithEffort(t *testing.T, cfg *filterapi.RuntimeConfig, ue *usageEstimates, effort string, input, output uint32) *extprocv3.ProcessingResponse {
+	t.Helper()
+	rp := newUsageEstimateTestRouter(cfg, ue, map[string]string{usageEstimateTestHeader: "key-a"})
+	body, err := json.Marshal(map[string]any{"model": usageEstimateTestModel, "reasoning_effort": effort})
+	require.NoError(t, err)
+	resp, err := rp.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: body})
+	require.NoError(t, err)
+	u := setBackend(t, rp, false)
+	_, err = dispatch(t, u, &mockBackendAuthHandler{}, nil)
+	require.NoError(t, err)
+	inBody := &extprocv3.HttpBody{Body: []byte("some-body"), EndOfStream: true}
+	mt := &mockTranslator{t: t, expResponseBody: inBody}
+	mt.retUsedToken.SetInputTokens(input)
+	mt.retUsedToken.SetOutputTokens(output)
+	mt.retUsedToken.SetTotalTokens(input + output)
+	u.translator = mt
+	u.responseHeaders = map[string]string{":status": "200"}
+	_, err = rp.ProcessResponseBody(t.Context(), inBody)
+	require.NoError(t, err)
+	return resp
+}
+
+func TestUsageEstimate_OutputIsThePeriodMeanPerEffort(t *testing.T) {
+	ue, m, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateOutput)
+
+	runWithEffort(t, cfg, ue, "low", 100, 200)
+	runWithEffort(t, cfg, ue, "low", 100, 400)
+	runWithEffort(t, cfg, ue, "high", 100, 3000)
+	clock.nextPeriod()
+
+	low := runWithEffort(t, cfg, ue, "low", 100, 300)
+	require.Equal(t, 300.0, usageEstimateFields(t, low)["estimated_output_token"].GetNumberValue())
+	high := runWithEffort(t, cfg, ue, "high", 100, 1500)
+	require.Equal(t, 3000.0, usageEstimateFields(t, high)["estimated_output_token"].GetNumberValue())
+
+	// The ratio compares the estimate with the same expression on the actual output.
+	require.Equal(t, []recordedUsageEstimateRatio{
+		{"estimated_output_token", usageEstimateTestModel, 1},
+		{"estimated_output_token", usageEstimateTestModel, 2},
+	}, m.ratios)
+}
+
+func TestUsageEstimate_NewEffortOfAWarmKeyHasNoEstimate(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateOutput)
+
+	runWithEffort(t, cfg, ue, "low", 100, 200)
+	clock.nextPeriod()
+
+	require.Nil(t, runWithEffort(t, cfg, ue, "high", 100, 3000).DynamicMetadata)
+}
+
+func TestUsageEstimate_OnlyAnItemWithByReasoningEffortSplitsByEffort(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, testEstimateInput, testEstimateOutput)
+
+	runWithEffort(t, cfg, ue, "low", 100, 200)
+	clock.nextPeriod()
+
+	// The input estimate carries over to the other effort, the output one does not.
+	fields := usageEstimateFields(t, runWithEffort(t, cfg, ue, "high", 100, 3000))
+	require.Contains(t, fields, "estimated_input_token")
+	require.NotContains(t, fields, "estimated_output_token")
+}
+
+func TestUsageEstimate_TotalTokensAddTheEstimatedOutput(t *testing.T) {
+	ue, _, clock := newTestUsageEstimates()
+	cfg := newUsageEstimateTestConfig(t, filterapi.UsageEstimate{
+		MetadataKey: "estimated_total_token", CEL: "total_tokens", ByHeader: usageEstimateTestHeader,
+	})
+
+	runWithEffort(t, cfg, ue, "low", 100, 200)
+	clock.nextPeriod()
+
+	fields := usageEstimateFields(t, runWithEffort(t, cfg, ue, "low", 100, 200))
+	require.Equal(t, 300.0, fields["estimated_total_token"].GetNumberValue())
+}
+
+func TestRequestReasoningEffort(t *testing.T) {
+	budget := func(tokens float64) *anthropicschema.Thinking {
+		return &anthropicschema.Thinking{Enabled: &anthropicschema.ThinkingEnabled{BudgetTokens: tokens}}
+	}
+	for _, tc := range []struct {
+		name string
+		body any
+		exp  string
+	}{
+		{"chat completion", &openai.ChatCompletionRequest{ReasoningEffort: "high"}, "high"},
+		{"chat completion without effort", &openai.ChatCompletionRequest{}, ""},
+		{"chat completion with a value that is no token", &openai.ChatCompletionRequest{ReasoningEffort: "Not A Token"}, invalidReasoningEffort},
+		{"responses", &openai.ResponseRequest{Reasoning: openai.ReasoningParam{Effort: "low"}}, "low"},
+		{"messages disabled", &anthropicschema.MessagesRequest{Thinking: &anthropicschema.Thinking{Disabled: &anthropicschema.ThinkingDisabled{}}}, "none"},
+		{"messages budget", &anthropicschema.MessagesRequest{Thinking: budget(1)}, "low"},
+		{"messages adaptive", &anthropicschema.MessagesRequest{
+			Thinking:     &anthropicschema.Thinking{Adaptive: &anthropicschema.ThinkingAdaptive{}},
+			OutputConfig: &anthropicschema.OutputConfig{Effort: anthropicschema.OutputConfigEffortXhigh},
+		}, "xhigh"},
+		{"messages adaptive with an unknown effort", &anthropicschema.MessagesRequest{
+			Thinking:     &anthropicschema.Thinking{Adaptive: &anthropicschema.ThinkingAdaptive{}},
+			OutputConfig: &anthropicschema.OutputConfig{Effort: "unknown"},
+		}, invalidReasoningEffort},
+		{"messages without thinking", &anthropicschema.MessagesRequest{}, ""},
+		{"another endpoint", &openai.EmbeddingRequest{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.exp, requestReasoningEffort(tc.body))
+		})
+	}
 }

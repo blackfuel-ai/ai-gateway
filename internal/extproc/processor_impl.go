@@ -324,7 +324,7 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		Header:       &corev3.HeaderValue{Key: internalapi.EnvoyOriginalPathHeader, RawValue: []byte(originalPath)},
 	})
 	r.originalModel = originalModel
-	usageEstimateMetadata, usageEstimateHeaders, removedUsageEstimateHeaders := r.estimateUsage(ctx, len(rawBody.Body), logger)
+	usageEstimateMetadata, usageEstimateHeaders, removedUsageEstimateHeaders := r.estimateUsage(ctx, len(rawBody.Body), body, logger)
 	additionalHeaders = append(additionalHeaders, usageEstimateHeaders...)
 	r.originalRequestBody = body
 	if msgReq, ok := any(body).(*anthropic.MessagesRequest); ok {

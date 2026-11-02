@@ -155,7 +155,9 @@ type GatewayConfigSpec struct {
 //     observed in those responses;
 //   - cached input tokens: those input tokens times the cache rate of those
 //     responses, the mean of the share of each response's input tokens that
-//     were cached.
+//     were cached;
+//   - output tokens: the mean output tokens per successful response of those
+//     responses, whatever the size of the request.
 //
 // The CEL expression is evaluated on that estimated usage and on the measured
 // ratios of that period, and its result is stored under MetadataKey and, with
@@ -180,8 +182,9 @@ type UsageEstimate struct {
 	//	* input_tokens: the estimated number of input tokens.
 	//	* cached_input_tokens: the estimated number of cached read input tokens,
 	//	  input_tokens times cache_rate, so never more than input_tokens.
-	//	* total_tokens: equal to input_tokens.
-	//	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.
+	//	* output_tokens: the estimated number of output tokens.
+	//	* total_tokens: input_tokens plus output_tokens.
+	//	* reasoning_tokens and cache_creation_input_tokens: 0.
 	//	* backend and route_name: empty, as no route is selected at admission.
 	//	* input_tokens_per_byte: the input tokens of the successful responses of the
 	//	  period divided by the size of their request bodies, a double.
@@ -209,6 +212,18 @@ type UsageEstimate struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	ByHeader string `json:"byHeader"`
+	// ByReasoningEffort also groups the responses by the reasoning effort their
+	// requests ask for, so a request is estimated from the responses of its own
+	// effort. The effort is read from the request body: reasoning_effort on chat
+	// completions, reasoning.effort on responses and, on Anthropic messages, the
+	// effort its thinking and output_config translate to. A request setting none
+	// forms its own group, and an endpoint with no such member is one group. A new
+	// effort of a known ByHeader value has no estimate until the next period.
+	//
+	// Defaults to false.
+	//
+	// +optional
+	ByReasoningEffort bool `json:"byReasoningEffort,omitempty"`
 	// EmitMetric also records the estimate in metrics: a counter of the requests
 	// that got an estimate or none, and a histogram of the estimate divided by
 	// the same CEL expression evaluated on the actual usage of the response. The

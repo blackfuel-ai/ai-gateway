@@ -266,3 +266,38 @@ func TestStore_Run(t *testing.T) {
 	cancel()
 	<-done
 }
+
+func TestStore_OutputTokensAreThePeriodMean(t *testing.T) {
+	s, clock := newTestStore()
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100, OutputTokens: 300})
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 9000, InputTokens: 900, OutputTokens: 500})
+	clock.Advance(testPeriod)
+
+	// The answer's length does not follow the request's size: a request of any
+	// size is estimated at the mean output of the period.
+	for _, requestBytes := range []int{1, 1000, 1_000_000} {
+		require.Equal(t, uint32(400), s.Stats(testKey, testPeriod, requestBytes).OutputTokens)
+	}
+}
+
+func TestStore_OutputTokensCountEverySuccess(t *testing.T) {
+	s, clock := newTestStore()
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100, OutputTokens: 301})
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100})
+	clock.Advance(testPeriod)
+
+	// A success reporting no output counts in the mean, which rounds to nearest.
+	require.Equal(t, uint32(151), s.Stats(testKey, testPeriod, 1000).OutputTokens)
+}
+
+func TestStore_ReasoningEffortSeparatesKeys(t *testing.T) {
+	s, clock := newTestStore()
+	high := testKey
+	high.ReasoningEffort = "high"
+	s.Record(testKey, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100, OutputTokens: 50})
+	s.Record(high, testPeriod, Outcome{RequestBytes: 1000, InputTokens: 100, OutputTokens: 2000})
+	clock.Advance(testPeriod)
+
+	require.Equal(t, uint32(50), s.Stats(testKey, testPeriod, 1000).OutputTokens)
+	require.Equal(t, uint32(2000), s.Stats(high, testPeriod, 1000).OutputTokens)
+}

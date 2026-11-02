@@ -87,7 +87,8 @@ type AdmissionReserve struct {
 
 // UsageEstimate configures one token usage estimate emitted when a request is admitted.
 // The estimate is drawn from the responses completed in the last completed period for
-// requests carrying the same ByHeader value and model, and computed by the CEL expression.
+// requests carrying the same ByHeader value and model, and with ByReasoningEffort the
+// same reasoning effort, and computed by the CEL expression.
 type UsageEstimate struct {
 	// MetadataKey is the key of the dynamic metadata storing the estimate.
 	MetadataKey string `json:"metadataKey"`
@@ -95,6 +96,8 @@ type UsageEstimate struct {
 	CEL string `json:"cel"`
 	// ByHeader is the lower-cased name of the request header grouping the requests.
 	ByHeader string `json:"byHeader"`
+	// ByReasoningEffort also groups the requests by the reasoning effort they ask for.
+	ByReasoningEffort bool `json:"byReasoningEffort,omitempty"`
 	// EmitMetric also records the estimate in metrics.
 	EmitMetric bool `json:"emitMetric,omitempty"`
 	// EmitHeader also sends the estimate upstream in the request header named by
