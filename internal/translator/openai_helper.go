@@ -473,6 +473,15 @@ func openAIResponseToAnthropic(resp *openai.ChatCompletionResponse, model string
 		InputTokens:  float64(resp.Usage.PromptTokens),
 		OutputTokens: float64(resp.Usage.CompletionTokens),
 	}
+	// prompt_tokens includes the cache counts and Anthropic's input_tokens excludes
+	// them, as on the streaming message_delta.
+	if details := resp.Usage.PromptTokensDetails; details != nil {
+		cacheRead := uint32(details.CachedTokens)                //nolint:gosec
+		cacheCreation := uint32(details.CacheWriteTokensValue()) //nolint:gosec
+		usage.InputTokens = float64(anthropicWireInputTokens(resp.Usage.PromptTokens, cacheRead, cacheCreation))
+		usage.CacheReadInputTokens = float64(cacheRead)
+		usage.CacheCreationInputTokens = float64(cacheCreation)
+	}
 
 	return &anthropic.MessagesResponse{
 		ID:         resp.ID,

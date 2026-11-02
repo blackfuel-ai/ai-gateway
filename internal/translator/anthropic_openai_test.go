@@ -410,13 +410,25 @@ func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_UsageSplit(t *tes
 	respBytes, err := json.Marshal(openAIResp)
 	require.NoError(t, err)
 
-	_, _, tokenUsage, _, err := translator.ResponseBody(
+	_, body, tokenUsage, _, err := translator.ResponseBody(
 		map[string]string{"content-type": "application/json"},
 		bytes.NewReader(respBytes),
 		true,
 		nil,
 	)
 	require.NoError(t, err)
+
+	// The client reads the Anthropic split: input_tokens excludes the cache counts.
+	var decoded struct {
+		Usage map[string]int `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(body, &decoded))
+	assert.Equal(t, map[string]int{
+		"input_tokens":                36,
+		"cache_read_input_tokens":     900,
+		"cache_creation_input_tokens": 64,
+		"output_tokens":               20,
+	}, decoded.Usage)
 
 	cached, cachedSet := tokenUsage.CachedInputTokens()
 	require.True(t, cachedSet, "cached input tokens must be reported")
@@ -440,6 +452,59 @@ func TestAnthropicToOpenAITranslator_ResponseBody_NonStreaming_UsageSplit(t *tes
 	outputTokens, outputSet := tokenUsage.OutputTokens()
 	require.True(t, outputSet)
 	assert.Equal(t, uint32(20), outputTokens)
+}
+
+// TestAnthropicToOpenAITranslator_ResponseBody_UsageMatchesAcrossStreamModes pins
+// that a client reads the same usage whether or not it streams: the non-streaming
+// body and the streaming message_delta report the same upstream usage identically.
+func TestAnthropicToOpenAITranslator_ResponseBody_UsageMatchesAcrossStreamModes(t *testing.T) {
+	const upstreamUsage = `{"prompt_tokens":1000,"completion_tokens":20,"total_tokens":1020,"prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":64}}`
+
+	translate := func(t *testing.T, stream bool, contentType, upstreamBody string) []byte {
+		t.Helper()
+		translator := NewAnthropicToChatCompletionOpenAITranslator("v1", "")
+		_, _, err := translator.RequestBody(nil, &anthropic.MessagesRequest{
+			Model:     "claude-3-haiku",
+			MaxTokens: 100,
+			Stream:    stream,
+			Messages:  []anthropic.MessageParam{{Role: anthropic.MessageRoleUser, Content: anthropic.MessageContent{Text: "Hi"}}},
+		}, false)
+		require.NoError(t, err)
+		_, body, _, _, err := translator.ResponseBody(
+			map[string]string{"content-type": contentType},
+			strings.NewReader(upstreamBody),
+			true,
+			nil,
+		)
+		require.NoError(t, err)
+		return body
+	}
+
+	var nonStreaming struct {
+		Usage map[string]int `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(translate(t, false, "application/json",
+		`{"id":"chatcmpl-a","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Hi"}}],"usage":`+upstreamUsage+`}`,
+	), &nonStreaming))
+
+	events := parseSSEEventsFromBytes(translate(t, true, "text/event-stream",
+		"data: {\"id\":\"chatcmpl-a\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n\n"+
+			"data: {\"id\":\"chatcmpl-a\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":"+upstreamUsage+"}\n\n"+
+			"data: [DONE]\n\n",
+	))
+	var streaming struct {
+		Usage map[string]int `json:"usage"`
+	}
+	var messageDeltas int
+	for _, event := range events {
+		if event.eventType == "message_delta" {
+			messageDeltas++
+			require.NoError(t, json.Unmarshal([]byte(event.data), &streaming))
+		}
+	}
+	require.Equal(t, 1, messageDeltas)
+
+	assert.Equal(t, streaming.Usage, nonStreaming.Usage)
 }
 
 func TestAnthropicToOpenAITranslator_ResponseBody_Streaming(t *testing.T) {
