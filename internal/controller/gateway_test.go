@@ -4595,6 +4595,7 @@ func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing
 			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "X-Client-Id", EmitMetric: true, EmitHeader: true},
 			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
 			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+			{MetadataKey: "estimated_output_token", CEL: "output_tokens", ByHeader: "x-client-id", ByReasoningEffort: true},
 		}
 		_, err := c.reconcileFilterConfigSecret(t.Context(), "gw", gwNamespace, someNamespace, routes, nil, "test-uuid", nil, nil, false, estimates, 30*time.Second)
 		require.NoError(t, err)
@@ -4604,6 +4605,7 @@ func TestGatewayController_reconcileFilterConfigSecret_UsageEstimates(t *testing
 			{MetadataKey: "estimated_input_token", CEL: "input_tokens", ByHeader: "x-client-id", EmitMetric: true, EmitHeader: true},
 			{MetadataKey: "estimated_cached_input_token", CEL: "cached_input_tokens", ByHeader: "x-bf-quota-grant-id"},
 			{MetadataKey: "estimated_cache_rate", CEL: "cache_rate", ByHeader: "x-client-id"},
+			{MetadataKey: "estimated_output_token", CEL: "output_tokens", ByHeader: "x-client-id", ByReasoningEffort: true},
 		}, cfg.UsageEstimates)
 		require.Equal(t, 30*time.Second, cfg.UsageEstimatePeriod)
 	})

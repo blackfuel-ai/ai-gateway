@@ -7,13 +7,17 @@
 // fixed periods and estimates from the last completed period the token usage of a new
 // request of the same key.
 //
-// A key is the value of a request header (for example the API key identity) and
-// the model the client asked for. The estimate for a new request is:
+// A key is the value of a request header (for example the API key identity), the
+// model the client asked for and, when the caller groups by it, the reasoning effort
+// the request asks for. The estimate for a new request is:
 //   - input tokens: the request's body size times the input tokens per body byte
 //     of the successful responses of the last completed period;
 //   - cached input tokens: those estimated input tokens times the cache rate of
 //     that period, the mean over its successful responses of the share of their
-//     input tokens that were cached.
+//     input tokens that were cached;
+//   - output tokens: the mean output tokens per successful response of that period,
+//     whatever the size of the request, as the size of a request does not predict
+//     the length of its answer.
 //
 // The measured ratios of that period are exposed as well: its input tokens per
 // body byte and its cache rate.
@@ -41,22 +45,31 @@ type Key struct {
 	Value string
 	// Model is the model the client asked for.
 	Model string
+	// ByReasoningEffort reports whether the key groups by reasoning effort. It keeps
+	// the group of the requests setting none apart from a key that does not group by
+	// effort and holds the requests of every effort.
+	ByReasoningEffort bool
+	// ReasoningEffort is the reasoning effort the request asks for, empty for a
+	// request that sets none and for a key that does not group by it.
+	ReasoningEffort string
 }
 
 // Outcome is the usage a successful response reported for its request.
 type Outcome struct {
 	// RequestBytes is the size of the request body.
 	RequestBytes int
-	// InputTokens and CachedInputTokens are the usage the response reported.
+	// InputTokens, CachedInputTokens and OutputTokens are the usage the response
+	// reported.
 	InputTokens       uint32
 	CachedInputTokens uint32
+	OutputTokens      uint32
 }
 
 // Stats is the estimated usage of a new request of a key, and the measured
 // ratios it is drawn from, when the last completed period holds a successful
 // response.
 type Stats struct {
-	// Estimated reports whether InputTokens, CachedInputTokens,
+	// Estimated reports whether InputTokens, CachedInputTokens, OutputTokens,
 	// InputTokensPerByte and CacheRate hold a value. It is false when the period
 	// holds no successful response with a request body.
 	Estimated bool
@@ -65,6 +78,9 @@ type Stats struct {
 	// CachedInputTokens is the estimated number of cached input tokens:
 	// InputTokens times CacheRate.
 	CachedInputTokens uint32
+	// OutputTokens is the estimated number of output tokens: the mean, over the
+	// successful responses of the period, of the output tokens they reported.
+	OutputTokens uint32
 	// InputTokensPerByte is the input tokens of the successful responses of the
 	// period divided by the size of their request bodies.
 	InputTokensPerByte float64
@@ -100,6 +116,7 @@ type aggregate struct {
 	successes uint64
 	bytes     uint64
 	input     uint64
+	output    uint64
 	// cacheRates is the sum of the cache rate of each success that reported
 	// input tokens, and rated their number.
 	cacheRates float64
@@ -128,6 +145,7 @@ func (s *Store) Record(k Key, length time.Duration, o Outcome) {
 		a.successes++
 		a.bytes += uint64(max(o.RequestBytes, 0)) //nolint:gosec // non-negative after max.
 		a.input += uint64(o.InputTokens)
+		a.output += uint64(o.OutputTokens)
 		if o.InputTokens > 0 {
 			a.cacheRates += min(float64(o.CachedInputTokens)/float64(o.InputTokens), 1)
 			a.rated++
@@ -169,6 +187,7 @@ func (s *Store) Stats(k Key, length time.Duration, requestBytes int) Stats {
 	// exact in floating point. A cache rate of at most 1 keeps the result within
 	// InputTokens.
 	st.CachedInputTokens = uint32(math.Round(float64(st.InputTokens) * st.CacheRate))
+	st.OutputTokens = uint32(math.Round(float64(a.output) / float64(a.successes)))
 	return st
 }
 

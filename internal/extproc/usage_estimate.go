@@ -15,10 +15,13 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/envoyproxy/ai-gateway/internal/apischema/anthropic"
+	"github.com/envoyproxy/ai-gateway/internal/apischema/openai"
 	"github.com/envoyproxy/ai-gateway/internal/filterapi"
 	"github.com/envoyproxy/ai-gateway/internal/internalapi"
 	"github.com/envoyproxy/ai-gateway/internal/llmcostcel"
 	"github.com/envoyproxy/ai-gateway/internal/metrics"
+	"github.com/envoyproxy/ai-gateway/internal/translator"
 	"github.com/envoyproxy/ai-gateway/internal/usageestimate"
 )
 
@@ -51,6 +54,9 @@ type usageEstimateState struct {
 	period time.Duration
 	// requestBytes is the size of the request body the client sent.
 	requestBytes int
+	// reasoningEffort is the reasoning effort the request asks for, which groups the
+	// items with ByReasoningEffort.
+	reasoningEffort string
 	// keys are the keys the usage of the request is recorded under.
 	keys map[usageestimate.Key]struct{}
 	// admitted are the estimates computed at admission, for the ratio metric.
@@ -77,10 +83,11 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) setUsageEstima
 // without an estimate removes it, so no client-sent value of the header goes
 // upstream. It must be called once the original model is known. A request to an
 // endpoint that consumes no model usage has no estimate.
-func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(ctx context.Context, requestBytes int, logger *slog.Logger) (metadata *structpb.Struct, setHeaders []*corev3.HeaderValueOption, removeHeaders []string) {
+func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(ctx context.Context, requestBytes int, body *ReqT, logger *slog.Logger) (metadata *structpb.Struct, setHeaders []*corev3.HeaderValueOption, removeHeaders []string) {
 	st := &r.usageEstimate
 	st.period = r.config.UsageEstimatePeriod
 	st.requestBytes = requestBytes
+	st.reasoningEffort = requestReasoningEffort(body)
 	stats := make(map[usageestimate.Key]usageestimate.Stats)
 	fields := make(map[string]*structpb.Value)
 	for i := range r.config.UsageEstimates {
@@ -116,6 +123,31 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateUsage(
 	return metadata, setHeaders, removeHeaders
 }
 
+// requestReasoningEffort returns the reasoning effort a parsed request body asks
+// for: the level a backend is sent, an Anthropic thinking config reading as the
+// effort it translates to. It returns "" when the body sets none or its endpoint has
+// no such member, and invalidReasoningEffort for a value that is not a short token,
+// which bounds the values a key can hold.
+func requestReasoningEffort(body any) string {
+	var effort string
+	switch b := body.(type) {
+	case *openai.ChatCompletionRequest:
+		effort = string(b.ReasoningEffort)
+	case *openai.ResponseRequest:
+		effort = b.Reasoning.Effort
+	case *anthropic.MessagesRequest:
+		e, err := translator.AnthropicThinkingToReasoningEffort(b.Thinking, b.OutputConfig)
+		if err != nil {
+			return invalidReasoningEffort
+		}
+		effort = string(e)
+	}
+	if effort != "" && !isReasoningEffortToken(effort) {
+		return invalidReasoningEffort
+	}
+	return effort
+}
+
 // estimateOne computes the estimate of e for the request and reports whether the
 // request has one. stats caches the statistics of the keys already read for the
 // request.
@@ -128,7 +160,10 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateOne(ct
 	if value == "" {
 		return 0, false
 	}
-	key := usageestimate.Key{Header: e.ByHeader, Value: value, Model: r.originalModel}
+	key := usageestimate.Key{Header: e.ByHeader, Value: value, Model: r.originalModel, ByReasoningEffort: e.ByReasoningEffort}
+	if e.ByReasoningEffort {
+		key.ReasoningEffort = st.reasoningEffort
+	}
 	if st.keys == nil {
 		st.keys = make(map[usageestimate.Key]struct{})
 	}
@@ -146,7 +181,8 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) estimateOne(ct
 			Model:              r.requestHeaders[internalapi.ModelNameHeaderKeyDefault],
 			InputTokens:        s.InputTokens,
 			CachedInputTokens:  s.CachedInputTokens,
-			TotalTokens:        s.InputTokens,
+			OutputTokens:       s.OutputTokens,
+			TotalTokens:        uint32(min(uint64(s.InputTokens)+uint64(s.OutputTokens), math.MaxUint32)),
 			InputTokensPerByte: s.InputTokensPerByte,
 			CacheRate:          s.CacheRate,
 		})
@@ -213,7 +249,8 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEst
 		return
 	}
 	cached, _ := usage.CachedInputTokens()
-	o := usageestimate.Outcome{RequestBytes: st.requestBytes, InputTokens: input, CachedInputTokens: cached}
+	output, _ := usage.OutputTokens()
+	o := usageestimate.Outcome{RequestBytes: st.requestBytes, InputTokens: input, CachedInputTokens: cached, OutputTokens: output}
 	for key := range st.keys {
 		st.shared.store.Record(key, st.period, o)
 	}
@@ -230,7 +267,6 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) recordUsageEst
 		cacheRate = float64(cached) / float64(input)
 	}
 	cacheCreation, _ := usage.CacheCreationInputTokens()
-	output, _ := usage.OutputTokens()
 	total, _ := usage.TotalTokens()
 	reasoning, _ := usage.ReasoningTokens()
 	in := llmcostcel.EstimateInputs{

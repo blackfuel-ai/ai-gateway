@@ -2802,7 +2802,9 @@ period:
     observed in those responses;
   - cached input tokens: those input tokens times the cache rate of those
     responses, the mean of the share of each response's input tokens that
-    were cached.
+    were cached;
+  - output tokens: the mean output tokens per successful response of those
+    responses, whatever the size of the request.
 
 The CEL expression is evaluated on that estimated usage and on the measured
 ratios of that period, and its result is stored under MetadataKey and, with
@@ -2824,12 +2826,17 @@ Each gateway replica estimates from the responses it served itself.
   name="cel"
   type="string"
   required="true"
-  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* output_tokens: the estimated number of output tokens.<br />	* total_tokens: input_tokens plus output_tokens.<br />	* reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
 /><ApiField
   name="byHeader"
   type="string"
   required="true"
   description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value with a<br />successful response is kept in memory while it has successful responses,<br />and for one to two periods, plus up to 30 seconds, after its last one."
+/><ApiField
+  name="byReasoningEffort"
+  type="boolean"
+  required="false"
+  description="ByReasoningEffort also groups the responses by the reasoning effort their<br />requests ask for, so a request is estimated from the responses of its own<br />effort. The effort is read from the request body: reasoning_effort on chat<br />completions, reasoning.effort on responses and, on Anthropic messages, the<br />effort its thinking and output_config translate to. A request setting none<br />forms its own group, and an endpoint with no such member is one group. A<br />request whose effort has no successful response of its ByHeader value in the<br />last completed period has no estimate.<br />Defaults to false."
 /><ApiField
   name="emitMetric"
   type="boolean"
@@ -5602,7 +5609,9 @@ period:
     observed in those responses;
   - cached input tokens: those input tokens times the cache rate of those
     responses, the mean of the share of each response's input tokens that
-    were cached.
+    were cached;
+  - output tokens: the mean output tokens per successful response of those
+    responses, whatever the size of the request.
 
 The CEL expression is evaluated on that estimated usage and on the measured
 ratios of that period, and its result is stored under MetadataKey and, with
@@ -5624,12 +5633,17 @@ Each gateway replica estimates from the responses it served itself.
   name="cel"
   type="string"
   required="true"
-  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* total_tokens: equal to input_tokens.<br />	* output_tokens, reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
+  description="CEL is the CEL expression computing the estimate. It accepts the variables<br />of LLMRequestCost.CEL and the measured ratios, and must return an int, a uint<br />or a double that is finite and not negative. It is evaluated on the<br />estimated usage of the request:<br />	* model: the model name extracted from the request content.<br />	* input_tokens: the estimated number of input tokens.<br />	* cached_input_tokens: the estimated number of cached read input tokens,<br />	  input_tokens times cache_rate, so never more than input_tokens.<br />	* output_tokens: the estimated number of output tokens.<br />	* total_tokens: input_tokens plus output_tokens.<br />	* reasoning_tokens and cache_creation_input_tokens: 0.<br />	* backend and route_name: empty, as no route is selected at admission.<br />	* input_tokens_per_byte: the input tokens of the successful responses of the<br />	  period divided by the size of their request bodies, a double.<br />	* cache_rate: the mean, over the successful responses of the period, of the<br />	  share of each response's input tokens that were cached, a double between<br />	  0 and 1.<br />For example, `input_tokens - cached_input_tokens`<br />estimates the input tokens that are not served from the prompt cache, and<br />`cache_rate` emits the measured cache rate. CEL does not convert between<br />integers and doubles implicitly: write `double(input_tokens) * cache_rate`."
 /><ApiField
   name="byHeader"
   type="string"
   required="true"
   description="ByHeader names the request header whose value groups the responses the<br />estimate is drawn from. Requests without the header get no estimate.<br />The header should be set by the gateway, for example by an external<br />authorization service, rather than by clients. Each distinct value with a<br />successful response is kept in memory while it has successful responses,<br />and for one to two periods, plus up to 30 seconds, after its last one."
+/><ApiField
+  name="byReasoningEffort"
+  type="boolean"
+  required="false"
+  description="ByReasoningEffort also groups the responses by the reasoning effort their<br />requests ask for, so a request is estimated from the responses of its own<br />effort. The effort is read from the request body: reasoning_effort on chat<br />completions, reasoning.effort on responses and, on Anthropic messages, the<br />effort its thinking and output_config translate to. A request setting none<br />forms its own group, and an endpoint with no such member is one group. A<br />request whose effort has no successful response of its ByHeader value in the<br />last completed period has no estimate.<br />Defaults to false."
 /><ApiField
   name="emitMetric"
   type="boolean"

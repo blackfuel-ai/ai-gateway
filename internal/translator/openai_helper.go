@@ -52,7 +52,7 @@ func buildOpenAIChatCompletionRequest(body *anthropic.MessagesRequest, modelName
 		req.StreamOptions = &openai.StreamOptions{IncludeUsage: true}
 	}
 
-	effort, err := anthropicThinkingToReasoningEffort(body.Thinking, body.OutputConfig)
+	effort, err := AnthropicThinkingToReasoningEffort(body.Thinking, body.OutputConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ const (
 	thinkingBudgetHighEffort   = 16384
 )
 
-// anthropicThinkingToReasoningEffort maps an Anthropic thinking config and
+// AnthropicThinkingToReasoningEffort maps an Anthropic thinking config and
 // output config to the reasoning_effort a vLLM backend acts on. bf-vllm derives
 // every chat-template thinking toggle (enable_thinking, thinking,
 // thinking_mode) from that single field: "none" turns thinking off and any
@@ -83,7 +83,7 @@ const (
 // output_config.effort when the request declares one and otherwise sets
 // nothing, as does an absent config, so the model decides. The display option
 // has no counterpart on this path and is ignored.
-func anthropicThinkingToReasoningEffort(t *anthropic.Thinking, outputConfig *anthropic.OutputConfig) (openai.ReasoningEffort, error) {
+func AnthropicThinkingToReasoningEffort(t *anthropic.Thinking, outputConfig *anthropic.OutputConfig) (openai.ReasoningEffort, error) {
 	if t == nil {
 		return "", nil
 	}
