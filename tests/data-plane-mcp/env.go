@@ -85,6 +85,13 @@ func requireNewMCPEnv(t *testing.T, forceJSONResponse bool, writeTimeout time.Du
 // convention selector end to end.
 func requireNewMCPEnvWithExtProcEnv(t *testing.T, extraEnv []string, forceJSONResponse bool, writeTimeout time.Duration, path string, extprocArgs ...string) *mcpEnv {
 	t.Helper()
+	return requireNewMCPEnvWithBackendKeepAlive(t, extraEnv, 0, forceJSONResponse, writeTimeout, path, extprocArgs...)
+}
+
+// requireNewMCPEnvWithBackendKeepAlive is requireNewMCPEnvWithExtProcEnv with
+// the non-dumb backend pinging each client session every backendKeepAlive.
+func requireNewMCPEnvWithBackendKeepAlive(t *testing.T, extraEnv []string, backendKeepAlive time.Duration, forceJSONResponse bool, writeTimeout time.Duration, path string, extprocArgs ...string) *mcpEnv {
+	t.Helper()
 
 	internaltesting.ClearTestEnv(t)
 
@@ -131,6 +138,7 @@ func requireNewMCPEnvWithExtProcEnv(t *testing.T, extraEnv []string, forceJSONRe
 				ForceJSONResponse: forceJSONResponse,
 				DumbEchoServer:    false,
 				WriteTimeout:      writeTimeout,
+				KeepAlive:         backendKeepAlive,
 			})
 			srv2, mcp2 = testmcp.NewServer(&testmcp.Options{
 				Port:              ports["ts2"],

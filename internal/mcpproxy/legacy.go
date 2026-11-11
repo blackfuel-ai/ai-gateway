@@ -936,10 +936,15 @@ func (m *mcpRequestContext) maybeResponseModify(_ context.Context, req *jsonrpc.
 // maybeServerToClientRequestModify modifies the server->client request ID to include the backend name and path prefix
 // so that we can route the client->server response back to the correct backend.
 //
-// This essentially prepares the request for the future invocation of handleClientToServerResponse.
+// Every server->client message carrying an ID is a request whose response comes back through
+// handleClientToServerResponse, whatever its method: a backend heartbeat ping (mark3labs/mcp-go,
+// the go-sdk KeepAlive) is answered like a roots/list. A message without an ID is a notification
+// and keeps its ID-less form; the methods below that are requests by the MCP spec still require one.
 func (m *mcpRequestContext) maybeServerToClientRequestModify(ctx context.Context, msg *jsonrpc.Request, backend filterapi.MCPBackendName) error {
+	requiresID := false
 	switch msg.Method {
 	case "roots/list":
+		requiresID = true
 		if msg.Params != nil {
 			params := &mcp.ListRootsParams{}
 			if err := json.Unmarshal(msg.Params, params); err != nil {
@@ -950,6 +955,7 @@ func (m *mcpRequestContext) maybeServerToClientRequestModify(ctx context.Context
 			}
 		}
 	case "sampling/createMessage":
+		requiresID = true
 		if msg.Params != nil {
 			params := &mcp.CreateMessageParams{}
 			if err := json.Unmarshal(msg.Params, params); err != nil {
@@ -960,6 +966,7 @@ func (m *mcpRequestContext) maybeServerToClientRequestModify(ctx context.Context
 			}
 		}
 	case "elicitation/create":
+		requiresID = true
 		if msg.Params != nil {
 			params := &mcp.ElicitParams{}
 			if err := json.Unmarshal(msg.Params, params); err != nil {
@@ -973,20 +980,22 @@ func (m *mcpRequestContext) maybeServerToClientRequestModify(ctx context.Context
 		if msg.Params != nil {
 			params := &mcp.ResourceUpdatedNotificationParams{}
 			if err := json.Unmarshal(msg.Params, params); err != nil {
-				return fmt.Errorf("failed to unmarshal elicitation/create params: %w", err)
+				return fmt.Errorf("failed to unmarshal notifications/resources/updated params: %w", err)
 			}
 			params.URI = downstreamResourceURI(params.URI, backend)
 			msg.Params, _ = json.Marshal(params) // Already decoded params, so ignore error.
 		}
-	default:
-		// Others are not server->client requests that we care about.
+	}
+
+	if !msg.ID.IsValid() {
+		if requiresID {
+			return errors.New("missing id in the server->client request")
+		}
 		return nil
 	}
 
 	var prefixedID string
 	switch v := msg.ID.Raw().(type) {
-	case nil:
-		return errors.New("missing id in the server->client request")
 	case int64:
 		prefixedID = fmt.Sprintf("%d%si%s%s", v, nameSeparator, nameSeparator, backend)
 	case float64:
@@ -1050,6 +1059,7 @@ func (m *mcpRequestContext) recordResponse(ctx context.Context, rawMsg jsonrpc.M
 			m.metrics.RecordProgress(ctx, params)
 		case "notifications/message":
 		case "notifications/tools/list_changed":
+		case "ping":
 		case "roots/list":
 		case "sampling/createMessage":
 		case "elicitation/create":

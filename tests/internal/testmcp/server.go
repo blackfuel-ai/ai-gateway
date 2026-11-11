@@ -27,6 +27,9 @@ type Options struct {
 	ForceJSONResponse, DumbEchoServer bool
 	WriteTimeout                      time.Duration
 	DisableLog                        bool
+	// KeepAlive makes the server ping each client session at this interval,
+	// as mark3labs/mcp-go servers do with their heartbeat. Zero disables it.
+	KeepAlive time.Duration
 }
 
 // NewServer starts a demo MCP server with two tools: echo and sum.
@@ -48,7 +51,8 @@ func NewServer(opts *Options) (*http.Server, *mcp.Server) {
 	s := mcp.NewServer(
 		&mcp.Implementation{Name: "demo-http-server", Version: "0.1.0"},
 		&mcp.ServerOptions{
-			HasTools: true,
+			HasTools:  true,
+			KeepAlive: opts.KeepAlive,
 			RootsListChangedHandler: func(_ context.Context, request *mcp.RootsListChangedRequest) {
 				logger.Printf("RootsListChanged request: %+v", request)
 				handlerCounts.RootsListChanged.Add(1)
