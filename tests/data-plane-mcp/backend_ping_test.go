@@ -62,7 +62,7 @@ func TestMCPBackendPingRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), backendPingsToAnswer*backendKeepAlive+30*time.Second)
 	defer cancel()
-	pings := rawBackendPings(ctx, t, m.baseURL, sessionID)
+	pings, scanErr := rawBackendPings(ctx, t, m.baseURL, sessionID)
 
 	for i := range backendPingsToAnswer {
 		var ping map[string]json.RawMessage
@@ -70,7 +70,8 @@ func TestMCPBackendPingRoundTrip(t *testing.T) {
 		case p, ok := <-pings:
 			if !ok {
 				require.FailNowf(t, "backend ping stream closed",
-					"the GET stream ended before ping %d; the backend closes its session when an earlier answer is not matched", i+1)
+					"the GET stream ended before ping %d (read error: %v); the backend closes its session when an earlier answer is not matched",
+					i+1, <-scanErr)
 			}
 			ping = p
 		case <-ctx.Done():
@@ -145,13 +146,14 @@ func TestMCPBackendPingOpencode(t *testing.T) {
 func requireOpencode(t *testing.T) string {
 	t.Helper()
 	if bin := os.Getenv("AIGW_OPENCODE_BIN"); bin != "" {
-		if _, err := os.Stat(bin); err == nil {
+		if info, err := os.Stat(bin); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			return bin
 		}
 		if os.Getenv("AIGW_REQUIRE_OPENCODE") == "1" {
-			require.FailNowf(t, "pinned opencode missing", "AIGW_OPENCODE_BIN=%s does not exist; run `make install.opencode`", bin)
+			require.FailNowf(t, "pinned opencode missing",
+				"AIGW_OPENCODE_BIN=%s does not exist or is not executable; run `make install.opencode`", bin)
 		}
-		t.Logf("AIGW_OPENCODE_BIN=%s not found; falling back to PATH", bin)
+		t.Logf("AIGW_OPENCODE_BIN=%s does not exist or is not executable; falling back to PATH", bin)
 	}
 	if bin, err := exec.LookPath("opencode"); err == nil {
 		return bin
@@ -227,9 +229,10 @@ func rawInitialize(t *testing.T, baseURL string) string {
 }
 
 // rawBackendPings opens the GET stream and delivers every ping on it that did
-// not originate from the gateway's own heartbeat. The channel closes with the
-// stream.
-func rawBackendPings(ctx context.Context, t *testing.T, baseURL, sessionID string) <-chan map[string]json.RawMessage {
+// not originate from the gateway's own heartbeat. The ping channel closes with
+// the stream, after the error channel has received the scanner's error (nil at
+// a clean end of stream).
+func rawBackendPings(ctx context.Context, t *testing.T, baseURL, sessionID string) (<-chan map[string]json.RawMessage, <-chan error) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
 	require.NoError(t, err)
@@ -241,9 +244,14 @@ func rawBackendPings(ctx context.Context, t *testing.T, baseURL, sessionID strin
 	require.Equal(t, 2, resp.StatusCode/100, "GET stream status %d", resp.StatusCode)
 
 	pings := make(chan map[string]json.RawMessage)
+	scanErr := make(chan error, 1)
 	go func() {
-		defer close(pings)
 		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+		defer func() {
+			scanErr <- sc.Err()
+			close(pings)
+		}()
 		for sc.Scan() {
 			data, ok := strings.CutPrefix(sc.Text(), "data: ")
 			if !ok {
@@ -266,7 +274,7 @@ func rawBackendPings(ctx context.Context, t *testing.T, baseURL, sessionID strin
 			}
 		}
 	}()
-	return pings
+	return pings, scanErr
 }
 
 type recordedPost struct {

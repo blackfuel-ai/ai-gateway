@@ -237,7 +237,7 @@ OPENCODE_BIN ?= $(OPENCODE_DIR)/node_modules/@opencode/cli-$(OPENCODE_PLATFORM)/
 
 .PHONY: install.opencode
 install.opencode: ## Install the pinned opencode CLI for the host platform, used by test-data-plane-mcp.
-	@test -x $(OPENCODE_BIN) || npm install --prefix $(OPENCODE_DIR) --no-save --no-audit --no-fund --ignore-scripts @opencode/cli-$(OPENCODE_PLATFORM)@$(OPENCODE_VERSION)
+	@test -x $(OPENCODE_BIN) || npm install --registry=https://registry.npmjs.org --prefix $(OPENCODE_DIR) --no-save --no-audit --no-fund --ignore-scripts @opencode/cli-$(OPENCODE_PLATFORM)@$(OPENCODE_VERSION)
 	@$(OPENCODE_BIN) --version
 
 # This runs the end-to-end tests for the controller with EnvTest.
