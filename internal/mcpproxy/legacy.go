@@ -1059,6 +1059,7 @@ func (m *mcpRequestContext) recordResponse(ctx context.Context, rawMsg jsonrpc.M
 			m.metrics.RecordProgress(ctx, params)
 		case "notifications/message":
 		case "notifications/tools/list_changed":
+		case "ping":
 		case "roots/list":
 		case "sampling/createMessage":
 		case "elicitation/create":

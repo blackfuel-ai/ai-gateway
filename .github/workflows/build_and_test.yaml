@@ -187,7 +187,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
         with:
           path: ~/.cache/aigw-opencode
-          key: aigw-opencode-${{ hashFiles('Makefile') }}
+          key: aigw-opencode-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Makefile') }}
       - run: make install.opencode
       - run: make test-data-plane-mcp
         env:

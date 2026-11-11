@@ -183,6 +183,10 @@ func opencodeEnv(home, cfg string) []string {
 	)
 }
 
+// rawClient bounds each raw POST, so a wedged gateway fails the test within its
+// own budget. The GET stream is bound to the test's context instead.
+var rawClient = &http.Client{Timeout: 30 * time.Second}
+
 func rawHeaders(req *http.Request, sessionID string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -197,7 +201,7 @@ func rawPost(t *testing.T, baseURL, sessionID string, body []byte) (int, string)
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL, bytes.NewReader(body))
 	require.NoError(t, err)
 	rawHeaders(req, sessionID)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := rawClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -210,7 +214,7 @@ func rawInitialize(t *testing.T, baseURL string) string {
 		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw","version":"0"}}}`))
 	require.NoError(t, err)
 	rawHeaders(req, "")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := rawClient.Do(req)
 	require.NoError(t, err)
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
