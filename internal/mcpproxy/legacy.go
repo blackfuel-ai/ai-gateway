@@ -980,7 +980,7 @@ func (m *mcpRequestContext) maybeServerToClientRequestModify(ctx context.Context
 		if msg.Params != nil {
 			params := &mcp.ResourceUpdatedNotificationParams{}
 			if err := json.Unmarshal(msg.Params, params); err != nil {
-				return fmt.Errorf("failed to unmarshal elicitation/create params: %w", err)
+				return fmt.Errorf("failed to unmarshal notifications/resources/updated params: %w", err)
 			}
 			params.URI = downstreamResourceURI(params.URI, backend)
 			msg.Params, _ = json.Marshal(params) // Already decoded params, so ignore error.

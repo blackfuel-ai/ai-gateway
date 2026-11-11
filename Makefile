@@ -224,7 +224,19 @@ test-data-plane-mcp: build.extproc build.aigw ## Run the integration tests for M
 	@echo "Ensure func-e is built and Envoy is installed"
 	@@$(GO_TOOL) func-e run --version >/dev/null 2>&1
 	@echo "Run Data Plane MCP test"
-	@go test ./tests/data-plane-mcp/... -bench=. -benchtime=1x $(GO_TEST_E2E_ARGS) # Run the benchmark test case once to ensure the bench code is runnable.
+	@AIGW_OPENCODE_BIN=$(OPENCODE_BIN) go test ./tests/data-plane-mcp/... -bench=. -benchtime=1x $(GO_TEST_E2E_ARGS) # Run the benchmark test case once to ensure the bench code is runnable.
+
+# The opencode CLI the MCP data plane test drives as a real client. Only the
+# linux-x64 platform package is installed: it carries the binary, so the
+# launcher package's postinstall script never runs.
+OPENCODE_VERSION ?= 2.1.2
+OPENCODE_DIR ?= $(HOME)/.cache/aigw-opencode/$(OPENCODE_VERSION)
+OPENCODE_BIN := $(OPENCODE_DIR)/node_modules/@opencode/cli-linux-x64/bin/opencode
+
+.PHONY: install.opencode
+install.opencode: ## Install the pinned opencode CLI (linux-x64) used by test-data-plane-mcp.
+	@test -x $(OPENCODE_BIN) || npm install --prefix $(OPENCODE_DIR) --no-save --no-audit --no-fund --ignore-scripts @opencode/cli-linux-x64@$(OPENCODE_VERSION)
+	@$(OPENCODE_BIN) --version
 
 # This runs the end-to-end tests for the controller with EnvTest.
 #

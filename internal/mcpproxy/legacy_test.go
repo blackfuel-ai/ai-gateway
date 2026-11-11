@@ -1764,6 +1764,29 @@ func TestMCPProxy_maybeServerToClientRequestModify(t *testing.T) {
 			},
 		},
 		{
+			name: "notifications/resources/updated rewrites the uri and keeps no id",
+			msg:  &jsonrpc.Request{Method: "notifications/resources/updated", Params: []byte(`{"uri":"file:///x"}`)},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				require.False(t, modified.ID.IsValid())
+				params := &mcp.ResourceUpdatedNotificationParams{}
+				require.NoError(t, json.Unmarshal(modified.Params, params))
+				require.Equal(t, "backend+file:///x", params.URI)
+			},
+		},
+		{
+			name: "notifications/resources/updated without params",
+			msg:  &jsonrpc.Request{Method: "notifications/resources/updated"},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				require.False(t, modified.ID.IsValid())
+				require.Nil(t, modified.Params)
+			},
+		},
+		{
+			name:   "notifications/resources/updated invalid params",
+			msg:    &jsonrpc.Request{Method: "notifications/resources/updated", Params: []byte(`fewfwaf`)},
+			expErr: `failed to unmarshal notifications/resources/updated params:`,
+		},
+		{
 			name:   "roots/list invalid param",
 			msg:    &jsonrpc.Request{Method: "roots/list", Params: []byte(`fewfwaf`)},
 			expErr: `failed to unmarshal roots/list params:`,
