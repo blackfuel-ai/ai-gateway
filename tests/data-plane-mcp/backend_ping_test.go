@@ -67,7 +67,12 @@ func TestMCPBackendPingRoundTrip(t *testing.T) {
 	for i := range backendPingsToAnswer {
 		var ping map[string]json.RawMessage
 		select {
-		case ping = <-pings:
+		case p, ok := <-pings:
+			if !ok {
+				require.FailNowf(t, "backend ping stream closed",
+					"the GET stream ended before ping %d; the backend closes its session when an earlier answer is not matched", i+1)
+			}
+			ping = p
 		case <-ctx.Done():
 			require.FailNowf(t, "backend ping missing",
 				"ping %d never arrived; the backend closes its session when an earlier answer is not matched", i+1)
@@ -83,10 +88,14 @@ func TestMCPBackendPingRoundTrip(t *testing.T) {
 			"gateway refused the client's reply to backend ping %d (id %s): %s", i+1, ping["id"], body)
 	}
 
-	// A reply whose ID the gateway never issued cannot be routed to any backend.
+	// A numeric reply ID cannot be one the gateway rewrote, so the gateway refuses it before routing.
 	status, body := rawPost(t, m.baseURL, sessionID, []byte(`{"jsonrpc":"2.0","id":999,"result":{}}`))
 	require.Equal(t, http.StatusBadRequest, status)
 	require.Contains(t, body, "invalid response ID type")
+	// A rewritten ID naming a backend outside the route has nowhere to go.
+	status, body = rawPost(t, m.baseURL, sessionID, []byte(`{"jsonrpc":"2.0","id":"1__i__nonexistent","result":{}}`))
+	require.Equal(t, http.StatusNotFound, status)
+	require.Contains(t, body, "unknown backend nonexistent")
 }
 
 // TestMCPBackendPingOpencode connects the opencode CLI to the gateway while the
@@ -139,6 +148,10 @@ func requireOpencode(t *testing.T) string {
 		if _, err := os.Stat(bin); err == nil {
 			return bin
 		}
+		if os.Getenv("AIGW_REQUIRE_OPENCODE") == "1" {
+			require.FailNowf(t, "pinned opencode missing", "AIGW_OPENCODE_BIN=%s does not exist; run `make install.opencode`", bin)
+		}
+		t.Logf("AIGW_OPENCODE_BIN=%s not found; falling back to PATH", bin)
 	}
 	if bin, err := exec.LookPath("opencode"); err == nil {
 		return bin
@@ -236,6 +249,9 @@ func rawBackendPings(ctx context.Context, t *testing.T, baseURL, sessionID strin
 			if json.Unmarshal([]byte(data), &msg) != nil || string(msg["method"]) != `"ping"` {
 				continue
 			}
+			// IDs the gateway originates (its heartbeat ping and tools-changed requests,
+			// mcpproxy's envoyAIGatewayServerToClient*RequestIDPrefix) start with aigw-;
+			// rewritten backend IDs never do.
 			if strings.HasPrefix(string(msg["id"]), `"aigw-`) {
 				continue
 			}
@@ -303,6 +319,7 @@ func (p *recordingProxy) backendPingReplies() []recordedPost {
 		if json.Unmarshal([]byte(post.req), &msg) != nil || msg["method"] != nil || msg["id"] == nil {
 			continue
 		}
+		// Replies to the gateway's own requests carry its aigw- prefixed IDs.
 		if !strings.HasPrefix(string(msg["id"]), `"aigw-`) {
 			replies = append(replies, post)
 		}
