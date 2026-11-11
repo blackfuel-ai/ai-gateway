@@ -1731,9 +1731,37 @@ func TestMCPProxy_maybeServerToClientRequestModify(t *testing.T) {
 		verify func(t *testing.T, modified *jsonrpc.Request)
 	}{
 		{
-			name:   "not server-to-client request",
-			msg:    &jsonrpc.Request{Method: "ping"},
-			verify: func(t *testing.T, modified *jsonrpc.Request) { require.Equal(t, "ping", modified.Method) },
+			name: "notification without id is left unchanged",
+			msg:  &jsonrpc.Request{Method: "notifications/message", Params: []byte(`{"level":"info"}`)},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				require.False(t, modified.ID.IsValid())
+				require.JSONEq(t, `{"level":"info"}`, string(modified.Params))
+			},
+		},
+		{
+			// A backend heartbeat (mark3labs/mcp-go, go-sdk KeepAlive) pings with a numeric ID; the
+			// client's reply must route back through handleClientToServerResponse.
+			name: "ping with numeric id",
+			msg:  &jsonrpc.Request{ID: f64ID, Method: "ping"},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				require.Equal(t, "ping", modified.Method)
+				require.Equal(t, "1__i__backend", modified.ID.Raw().(string))
+			},
+		},
+		{
+			name: "ping with string id",
+			msg:  &jsonrpc.Request{ID: strID, Method: "ping"},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				require.Equal(t, "aWQ=__s__backend", modified.ID.Raw().(string))
+			},
+		},
+		{
+			name: "request with a method the gateway does not inspect",
+			msg:  &jsonrpc.Request{ID: f64ID, Method: "custom/method", Params: []byte(`{"k":"v"}`)},
+			verify: func(t *testing.T, modified *jsonrpc.Request) {
+				require.Equal(t, "1__i__backend", modified.ID.Raw().(string))
+				require.JSONEq(t, `{"k":"v"}`, string(modified.Params))
+			},
 		},
 		{
 			name:   "roots/list invalid param",
