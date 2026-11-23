@@ -607,6 +607,7 @@ QuotaPolicyList contains a list of QuotaPolicy
 - [MCPRouteBackendRef](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcproutebackendref)
 - [MCPRouteBackendTrafficPolicy](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcproutebackendtrafficpolicy)
 - [MCPRouteOAuth](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcprouteoauth)
+- [MCPRouteOAuthIssuer](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcprouteoauthissuer)
 - [MCPRouteSecurityPolicy](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcproutesecuritypolicy)
 - [MCPRouteSpec](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcproutespec)
 - [MCPRouteStatus](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcproutestatus)
@@ -2180,6 +2181,11 @@ Reference: https://modelcontextprotocol.io/specification/2025-06-18/basic/author
   required="true"
   description="Issuer is the authorization server's issuer identity."
 /><ApiField
+  name="additionalIssuers"
+  type="[MCPRouteOAuthIssuer](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcprouteoauthissuer) array"
+  required="false"
+  description="AdditionalIssuers lists further issuers whose access tokens are accepted beside those of Issuer.<br />It is meant for phasing the move of an authorization server from one host to another: accept the<br />tokens of both hosts, switch Issuer, and remove the old host last.<br />A token is accepted when it passes in full for one accepted issuer: its `iss` claim, its signature<br />by that issuer's own keys, and Audiences. ClaimToHeaders and the authorization rules then apply as<br />they do to a token from Issuer. Claims are not qualified by the issuer, so tokens with an equal `sub`<br />claim identify the same subject whichever issuer they come from. Only list issuers trusted as much as<br />Issuer; a rule that must tell them apart can match on the `iss` claim.<br />Issuer alone is advertised in the metadata the gateway publishes. AuthorizationServerMetadataURL and<br />JWKS apply to Issuer only.<br />The generated SecurityPolicy names the JWT provider of Issuer `mcp-jwt-provider`, and that of the<br />entry at position N of this list, counting from 1, `mcp-jwt-provider-N`. A SecurityPolicy merged with<br />it that refers to a JWT provider by name must name each of them."
+/><ApiField
   name="audiences"
   type="string array"
   required="false"
@@ -2204,6 +2210,32 @@ Reference: https://modelcontextprotocol.io/specification/2025-06-18/basic/author
   type="ClaimToHeader array"
   required="false"
   description="ClaimToHeaders specifies JWT claims to extract and forward as HTTP headers to backend MCP servers.<br />This enables backends to access user identity for authorization, auditing, or personalization.<br />Security considerations:<br />- Any client-provided headers matching the configured header names will be stripped to prevent forgery<br />- Only the specified claims are extracted; the full JWT is not forwarded to backends<br />- Consider using a header prefix (e.g., `X-Jwt-Claim-`) to avoid conflicts with other headers"
+/>
+
+
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1alpha1-mcprouteoauthissuer">MCPRouteOAuthIssuer</a>
+
+
+
+**Appears in:**
+- [MCPRouteOAuth](#github-com-envoyproxy-ai-gateway-api-v1alpha1-mcprouteoauth)
+
+MCPRouteOAuthIssuer defines a further issuer whose access tokens a MCPRoute accepts.
+
+##### Fields
+
+
+
+<ApiField
+  name="issuer"
+  type="string"
+  required="true"
+  description="Issuer is the issuer identity, compared with the `iss` claim of the token."
+/><ApiField
+  name="jwksUri"
+  type="string"
+  required="false"
+  description="JWKSURI is the URI of the JSON Web Key Set (JWKS) of this issuer. Local keys and custom backend<br />settings are not supported for additional issuers.<br />If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of<br />this issuer, as per RFC 8414. The keys of another issuer are never used. When the discovery fails,<br />the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,<br />or its tokens are refused if there is none, and the controller retries the discovery. The status of<br />the route names the issuer meanwhile."
 />
 
 
@@ -3410,6 +3442,7 @@ MCPRouteList contains a list of MCPRoute.
 - [MCPRouteBackendRef](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcproutebackendref)
 - [MCPRouteBackendTrafficPolicy](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcproutebackendtrafficpolicy)
 - [MCPRouteOAuth](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcprouteoauth)
+- [MCPRouteOAuthIssuer](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcprouteoauthissuer)
 - [MCPRoutePrefixMode](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcprouteprefixmode)
 - [MCPRouteSecurityPolicy](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcproutesecuritypolicy)
 - [MCPRouteSpec](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcproutespec)
@@ -5291,6 +5324,11 @@ Reference: https://modelcontextprotocol.io/specification/2025-06-18/basic/author
   required="true"
   description="Issuer is the authorization server's issuer identity."
 /><ApiField
+  name="additionalIssuers"
+  type="[MCPRouteOAuthIssuer](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcprouteoauthissuer) array"
+  required="false"
+  description="AdditionalIssuers lists further issuers whose access tokens are accepted beside those of Issuer.<br />It is meant for phasing the move of an authorization server from one host to another: accept the<br />tokens of both hosts, switch Issuer, and remove the old host last.<br />A token is accepted when it passes in full for one accepted issuer: its `iss` claim, its signature<br />by that issuer's own keys, and Audiences. ClaimToHeaders and the authorization rules then apply as<br />they do to a token from Issuer. Claims are not qualified by the issuer, so tokens with an equal `sub`<br />claim identify the same subject whichever issuer they come from. Only list issuers trusted as much as<br />Issuer; a rule that must tell them apart can match on the `iss` claim.<br />Issuer alone is advertised in the metadata the gateway publishes. AuthorizationServerMetadataURL and<br />JWKS apply to Issuer only.<br />The generated SecurityPolicy names the JWT provider of Issuer `mcp-jwt-provider`, and that of the<br />entry at position N of this list, counting from 1, `mcp-jwt-provider-N`. A SecurityPolicy merged with<br />it that refers to a JWT provider by name must name each of them."
+/><ApiField
   name="audiences"
   type="string array"
   required="false"
@@ -5315,6 +5353,32 @@ Reference: https://modelcontextprotocol.io/specification/2025-06-18/basic/author
   type="ClaimToHeader array"
   required="false"
   description="ClaimToHeaders specifies JWT claims to extract and forward as HTTP headers to backend MCP servers.<br />This enables backends to access user identity for authorization, auditing, or personalization.<br />Security considerations:<br />- Any client-provided headers matching the configured header names will be stripped to prevent forgery<br />- Only the specified claims are extracted; the full JWT is not forwarded to backends<br />- Consider using a header prefix (e.g., `X-Jwt-Claim-`) to avoid conflicts with other headers"
+/>
+
+
+#### <a id="github-com-envoyproxy-ai-gateway-api-v1beta1-mcprouteoauthissuer">MCPRouteOAuthIssuer</a>
+
+
+
+**Appears in:**
+- [MCPRouteOAuth](#github-com-envoyproxy-ai-gateway-api-v1beta1-mcprouteoauth)
+
+MCPRouteOAuthIssuer defines a further issuer whose access tokens a MCPRoute accepts.
+
+##### Fields
+
+
+
+<ApiField
+  name="issuer"
+  type="string"
+  required="true"
+  description="Issuer is the issuer identity, compared with the `iss` claim of the token."
+/><ApiField
+  name="jwksUri"
+  type="string"
+  required="false"
+  description="JWKSURI is the URI of the JSON Web Key Set (JWKS) of this issuer. Local keys and custom backend<br />settings are not supported for additional issuers.<br />If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of<br />this issuer, as per RFC 8414. The keys of another issuer are never used. When the discovery fails,<br />the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,<br />or its tokens are refused if there is none, and the controller retries the discovery. The status of<br />the route names the issuer meanwhile."
 />
 
 

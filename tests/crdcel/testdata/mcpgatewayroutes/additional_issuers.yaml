@@ -1,0 +1,29 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: MCPRoute
+metadata:
+  name: additional-issuers
+  namespace: default
+spec:
+  parentRefs:
+    - name: some-gateway
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  backendRefs:
+    - name: mcp-service
+      kind: Service
+      port: 80
+  securityPolicy:
+    oauth:
+      issuer: https://auth.example.com/realms/main
+      additionalIssuers:
+        - issuer: https://login.example.com/realms/main
+        - issuer: https://auth.example.com/realms/main/
+        - issuer: http://auth.example.net:8080
+          jwksUri: http://auth.example.net:8080/certs
+      protectedResourceMetadata:
+        resource: https://api.example.com/mcp
