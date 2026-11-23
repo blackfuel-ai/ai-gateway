@@ -555,7 +555,7 @@ type MCPRouteOAuthIssuer struct {
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Format=uri
-	// +kubebuilder:validation:Pattern=`^https?://[^\s/]+`
+	// +kubebuilder:validation:Pattern=`^https?://[^\s/]\S*$`
 	// +kubebuilder:validation:MaxLength=253
 	Issuer string `json:"issuer"`
 
@@ -563,14 +563,15 @@ type MCPRouteOAuthIssuer struct {
 	// settings are not supported for additional issuers.
 	//
 	// If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of
-	// this issuer, as per RFC 8414. The keys of another issuer are never used. When the discovery fails,
-	// the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,
+	// this issuer, as per RFC 8414. The metadata must name this very issuer, so set this field for an
+	// authorization server whose metadata names the same host whichever host is asked. The keys of
+	// another issuer are never used. When the discovery fails, the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,
 	// or its tokens are refused if there is none, and the controller retries the discovery. The status of
-	// the route names the issuer meanwhile.
+	// the route names the issuer meanwhile. Remove the entry to stop accepting the issuer.
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Format=uri
-	// +kubebuilder:validation:Pattern=`^https?://[^\s/]+`
+	// +kubebuilder:validation:Pattern=`^https?://[^\s/]\S*$`
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	JWKSURI *string `json:"jwksUri,omitempty"`

@@ -2235,7 +2235,7 @@ MCPRouteOAuthIssuer defines a further issuer whose access tokens a MCPRoute acce
   name="jwksUri"
   type="string"
   required="false"
-  description="JWKSURI is the URI of the JSON Web Key Set (JWKS) of this issuer. Local keys and custom backend<br />settings are not supported for additional issuers.<br />If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of<br />this issuer, as per RFC 8414. The keys of another issuer are never used. When the discovery fails,<br />the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,<br />or its tokens are refused if there is none, and the controller retries the discovery. The status of<br />the route names the issuer meanwhile."
+  description="JWKSURI is the URI of the JSON Web Key Set (JWKS) of this issuer. Local keys and custom backend<br />settings are not supported for additional issuers.<br />If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of<br />this issuer, as per RFC 8414. The metadata must name this very issuer, so set this field for an<br />authorization server whose metadata names the same host whichever host is asked. The keys of<br />another issuer are never used. When the discovery fails, the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,<br />or its tokens are refused if there is none, and the controller retries the discovery. The status of<br />the route names the issuer meanwhile. Remove the entry to stop accepting the issuer."
 />
 
 
@@ -5378,7 +5378,7 @@ MCPRouteOAuthIssuer defines a further issuer whose access tokens a MCPRoute acce
   name="jwksUri"
   type="string"
   required="false"
-  description="JWKSURI is the URI of the JSON Web Key Set (JWKS) of this issuer. Local keys and custom backend<br />settings are not supported for additional issuers.<br />If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of<br />this issuer, as per RFC 8414. The keys of another issuer are never used. When the discovery fails,<br />the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,<br />or its tokens are refused if there is none, and the controller retries the discovery. The status of<br />the route names the issuer meanwhile."
+  description="JWKSURI is the URI of the JSON Web Key Set (JWKS) of this issuer. Local keys and custom backend<br />settings are not supported for additional issuers.<br />If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of<br />this issuer, as per RFC 8414. The metadata must name this very issuer, so set this field for an<br />authorization server whose metadata names the same host whichever host is asked. The keys of<br />another issuer are never used. When the discovery fails, the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,<br />or its tokens are refused if there is none, and the controller retries the discovery. The status of<br />the route names the issuer meanwhile. Remove the entry to stop accepting the issuer."
 />
 
 

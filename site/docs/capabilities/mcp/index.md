@@ -367,11 +367,14 @@ A token is accepted when it passes in full for one accepted issuer: its `iss` cl
 issuer's own keys, and `audiences`. `claimToHeaders` and the authorization rules then apply as they do to
 a token from `issuer`. Only `issuer` is advertised in the metadata the gateway publishes.
 
-The keys of an additional issuer are discovered from its own metadata. Set `jwksUri` on the entry when the
-issuer publishes none. Local keys and custom backend settings, which `jwks` supports for `issuer`, are not
+The keys of an additional issuer are discovered from its own metadata, whose `issuer` must be the one of the
+entry, trailing slash included. Set `jwksUri` on the entry when the issuer publishes none, or when the
+authorization server names the same host in its metadata whichever host is asked, until or after it moves. Local keys and custom backend settings, which `jwks` supports for `issuer`, are not
 available for additional issuers. If the JWKS URI of one cannot be determined, the route and the other
 issuers are unaffected: the JWKS URI already in use for it is kept, or its tokens are refused if there is
-none. The status condition of the MCPRoute names the issuer, and the gateway tries again every minute.
+none. The status condition of the MCPRoute names the issuer, and the gateway tries again after a minute, then
+at growing intervals of up to 15 minutes. An unreachable issuer is not a revoked one: to stop accepting its
+tokens, remove it from the list.
 
 :::warning
 Claims are not qualified by the issuer: tokens with an equal `sub` claim identify the same subject, and

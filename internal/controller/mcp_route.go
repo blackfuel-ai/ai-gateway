@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/go-logr/logr"
@@ -45,6 +46,9 @@ type MCPRouteController struct {
 	logger logr.Logger
 	// gatewayEventChan is a channel to send events to the gateway controller.
 	gatewayEventChan chan event.GenericEvent
+	// additionalIssuerRetries maps the [types.NamespacedName] of the routes that wait for the JWKS URI of an
+	// additional issuer to their additionalIssuerRetry.
+	additionalIssuerRetries sync.Map
 }
 
 // NewMCPRouteController creates a new reconcile.TypedReconciler[reconcile.Request] for the MCPRoute resource.
@@ -67,6 +71,7 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 	var MCPRoute aigv1b1.MCPRoute
 	if err := c.client.Get(ctx, req.NamespacedName, &MCPRoute); err != nil {
 		if client.IgnoreNotFound(err) == nil {
+			c.additionalIssuerRetries.Delete(req.NamespacedName)
 			c.logger.Info("Deleting MCPRoute",
 				"namespace", req.Namespace, "name", req.Name)
 			return ctrl.Result{}, nil
@@ -90,8 +95,9 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 	c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeAccepted,
 		"MCP Gateway Route reconciled successfully"+undeterminedIssuersMessage(undeterminedIssuers))
 	if len(undeterminedIssuers) > 0 {
-		return reconcile.Result{RequeueAfter: additionalIssuerRetryInterval}, nil
+		return reconcile.Result{RequeueAfter: c.nextAdditionalIssuerRetry(req.NamespacedName, MCPRoute.Generation)}, nil
 	}
+	c.additionalIssuerRetries.Delete(req.NamespacedName)
 	return reconcile.Result{}, nil
 }
 

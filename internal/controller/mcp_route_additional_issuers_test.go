@@ -6,12 +6,15 @@
 package controller
 
 import (
+	"cmp"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/go-logr/logr"
@@ -36,8 +39,8 @@ const reconciledMessage = "MCP Gateway Route reconciled successfully"
 type testIssuer struct {
 	url  string
 	down atomic.Bool
-	// jwksURI overrides the published jwks_uri when not empty.
-	jwksURI string
+	// published and jwksURI override the published issuer and jwks_uri when not empty.
+	published, jwksURI string
 }
 
 func newTestIssuer(t *testing.T) *testIssuer {
@@ -55,7 +58,7 @@ func newTestIssuer(t *testing.T) *testIssuer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                 i.url,
+			"issuer":                 cmp.Or(i.published, i.url),
 			"authorization_endpoint": i.url + "/auth",
 			"token_endpoint":         i.url + "/token",
 			"jwks_uri":               jwksURI,
@@ -256,9 +259,10 @@ func TestMCPRouteController_AdditionalIssuers(t *testing.T) {
 		before := e.providers()
 
 		other.down.Store(true)
-		for range 2 {
+		for i := range 3 {
 			result, message := e.reconcile()
-			require.Equal(t, additionalIssuerRetryInterval, result.RequeueAfter)
+			// The delay grows, since every retry is a full reconciliation.
+			require.Equal(t, additionalIssuerRetryInterval<<i, result.RequeueAfter)
 			require.Equal(t, reconciledMessage+"; JWKS URI not found for additional issuers: "+other.url+" (last known JWKS URI kept)", message)
 			require.Equal(t, before, e.providers())
 		}
@@ -349,6 +353,41 @@ func TestMCPRouteController_AdditionalIssuers(t *testing.T) {
 		})
 	}
 
+	t.Run("the metadata of another issuer is not used", func(t *testing.T) {
+		primary, other := newTestIssuer(t), newTestIssuer(t)
+		for _, published := range []string{primary.url, other.url + "/", "https://attacker.example.com"} {
+			other.published = published
+			e := newOAuthRouteEnv(t, testOAuth(primary.url, aigv1b1.MCPRouteOAuthIssuer{Issuer: other.url}))
+			_, message := e.reconcile()
+			require.Contains(t, message, other.url+" (tokens refused)")
+			require.Equal(t, []egv1a1.JWTProvider{
+				provider("mcp-jwt-provider", primary.url, primary.url+"/certs"),
+			}, e.providers())
+		}
+	})
+
+	t.Run("a metadata document of another issuer does not hide the right one", func(t *testing.T) {
+		primary := newTestIssuer(t)
+		mux := http.NewServeMux()
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		issuer := server.URL + "/realms/main"
+		for path, document := range map[string]map[string]any{
+			// The first location looked at, and the last one.
+			oauthWellKnownAuthorizationServerMetadataPath + "/realms/main": {"issuer": server.URL, "jwks_uri": server.URL + "/wrong"},
+			"/realms/main" + oidcWellKnownMetadataPath:                     {"issuer": issuer, "jwks_uri": issuer + "/certs"},
+		} {
+			mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(document)
+			})
+		}
+		e := newOAuthRouteEnv(t, testOAuth(primary.url, aigv1b1.MCPRouteOAuthIssuer{Issuer: issuer}))
+		_, message := e.reconcile()
+		require.Equal(t, reconciledMessage, message)
+		require.Equal(t, provider("mcp-jwt-provider-1", issuer, issuer+"/certs"), e.providers()[1])
+	})
+
 	t.Run("HTTPS keys are fetched through a backend with TLS settings", func(t *testing.T) {
 		primary, other := newTestIssuer(t), newTestIssuer(t)
 		other.jwksURI = "https://keys.example.com/certs"
@@ -387,4 +426,33 @@ func TestMCPRouteController_AdditionalIssuers(t *testing.T) {
 		require.ErrorContains(t, err, "failed to auto-discover JWKS URI")
 		require.Equal(t, aigv1b1.ConditionTypeNotAccepted, e.route().Status.Conditions[0].Type)
 	})
+}
+
+func TestMCPRouteController_nextAdditionalIssuerRetry(t *testing.T) {
+	c := &MCPRouteController{}
+	key, other := types.NamespacedName{Namespace: "ns", Name: "route"}, types.NamespacedName{Namespace: "ns", Name: "other"}
+
+	for _, want := range []time.Duration{1, 2, 4, 8, 15, 15} {
+		require.Equal(t, want*time.Minute, c.nextAdditionalIssuerRetry(key, 1))
+	}
+	require.Equal(t, time.Minute, c.nextAdditionalIssuerRetry(other, 1))
+	// A changed route starts again, as does one that had all its issuers in between.
+	require.Equal(t, time.Minute, c.nextAdditionalIssuerRetry(key, 2))
+	require.Equal(t, 2*time.Minute, c.nextAdditionalIssuerRetry(key, 2))
+	c.additionalIssuerRetries.Delete(key)
+	require.Equal(t, time.Minute, c.nextAdditionalIssuerRetry(key, 2))
+}
+
+func Test_additionalIssuerJWKSURI_canceled(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := additionalIssuerJWKSURI(ctx, &aigv1b1.MCPRouteOAuthIssuer{Issuer: server.URL})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), httpClientTimeout)
 }

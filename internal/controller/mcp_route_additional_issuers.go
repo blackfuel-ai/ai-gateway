@@ -17,6 +17,7 @@ import (
 	"time"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	aigv1b1 "github.com/envoyproxy/ai-gateway/api/v1beta1"
@@ -29,10 +30,13 @@ const (
 	mcpJWTProviderName = "mcp-jwt-provider"
 
 	// additionalIssuerRetryInterval is the delay before the JWKS URI of an additional issuer is looked up again.
-	additionalIssuerRetryInterval = time.Minute
-	// additionalIssuerMaxRetryElapsedTime bounds the retries within one reconciliation. It is short since
-	// the reconciliation is itself retried and other routes wait for it.
-	additionalIssuerMaxRetryElapsedTime = 2 * time.Second
+	// It doubles up to additionalIssuerMaxRetryInterval, since each retry is a full reconciliation of the route
+	// that also refreshes the configuration of its Gateways.
+	additionalIssuerRetryInterval    = time.Minute
+	additionalIssuerMaxRetryInterval = 15 * time.Minute
+	// additionalIssuerDiscoveryTimeout bounds the lookups of all the additional issuers of a route within one
+	// reconciliation. It is short since the reconciliation is itself retried and other routes wait for it.
+	additionalIssuerDiscoveryTimeout = 5 * time.Second
 
 	// maxJWKSURILength is the maximum length Envoy Gateway accepts for the URI of a remote JWKS.
 	maxJWKSURILength = 253
@@ -42,16 +46,18 @@ const (
 // with the name, the issuer and the keys replaced.
 //
 // An issuer whose JWKS URI cannot be determined never affects the others. It keeps the remote JWKS it has
-// in current, the providers of the existing SecurityPolicy, if any. Otherwise it is left out, so that its
-// tokens are refused. Either way it is described in the second result.
+// in current, the providers of the existing SecurityPolicy, if any, as issuer does when its own lookup fails.
+// Otherwise it is left out, so that its tokens are refused. Either way it is described in the second result.
 func (c *MCPRouteController) additionalIssuerJWTProviders(
 	ctx context.Context, issuers []aigv1b1.MCPRouteOAuthIssuer, primary *egv1a1.JWTProvider, current []egv1a1.JWTProvider,
 ) (providers []egv1a1.JWTProvider, undetermined []string) {
 	jwksURIs := make([]string, len(issuers))
 	errs := make([]error, len(issuers))
+	discoveryCtx, cancel := context.WithTimeout(ctx, additionalIssuerDiscoveryTimeout)
+	defer cancel()
 	var wg sync.WaitGroup
 	for i := range issuers {
-		wg.Go(func() { jwksURIs[i], errs[i] = additionalIssuerJWKSURI(&issuers[i]) })
+		wg.Go(func() { jwksURIs[i], errs[i] = additionalIssuerJWKSURI(discoveryCtx, &issuers[i]) })
 	}
 	wg.Wait()
 
@@ -84,15 +90,44 @@ func (c *MCPRouteController) additionalIssuerJWTProviders(
 }
 
 // additionalIssuerJWKSURI returns the JWKS URI of the issuer, discovered from its metadata unless explicit.
-func additionalIssuerJWKSURI(issuer *aigv1b1.MCPRouteOAuthIssuer) (string, error) {
+func additionalIssuerJWKSURI(ctx context.Context, issuer *aigv1b1.MCPRouteOAuthIssuer) (string, error) {
 	jwksURI := ptr.Deref(issuer.JWKSURI, "")
 	if issuer.JWKSURI == nil {
-		var err error
-		if jwksURI, err = discoverJWKSURI(issuer.Issuer, "", additionalIssuerMaxRetryElapsedTime); err != nil {
+		metadata, err := fetchOAuthAuthServerMetadataChecked(ctx, issuer.Issuer, "", additionalIssuerDiscoveryTimeout,
+			func(metadata *OAuthAuthServerMetadata) error {
+				// The document must be that of the issuer, see https://datatracker.ietf.org/doc/html/rfc8414#section-3.3
+				if metadata.Issuer != issuer.Issuer {
+					return fmt.Errorf("the document is that of issuer %q", metadata.Issuer)
+				}
+				if metadata.JwksURI == "" {
+					return errors.New("missing jwks_uri")
+				}
+				return nil
+			})
+		if err != nil {
 			return "", err
 		}
+		jwksURI = metadata.JwksURI
 	}
 	return jwksURI, validateJWKSURI(jwksURI)
+}
+
+// additionalIssuerRetry is the last delay given to a generation of a route.
+type additionalIssuerRetry struct {
+	generation int64
+	delay      time.Duration
+}
+
+// nextAdditionalIssuerRetry returns the delay before the lookup of the additional issuers of a route is retried.
+func (c *MCPRouteController) nextAdditionalIssuerRetry(route types.NamespacedName, generation int64) time.Duration {
+	next := additionalIssuerRetry{generation: generation, delay: additionalIssuerRetryInterval}
+	if v, ok := c.additionalIssuerRetries.Load(route); ok {
+		if last := v.(additionalIssuerRetry); last.generation == generation {
+			next.delay = min(2*last.delay, additionalIssuerMaxRetryInterval)
+		}
+	}
+	c.additionalIssuerRetries.Store(route, next)
+	return next.delay
 }
 
 // validateJWKSURI rejects the URIs that would make the whole SecurityPolicy invalid, and with it the

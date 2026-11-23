@@ -126,7 +126,7 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 		} else {
 			// Auto-discover JWKS URI from authorization server metadata.
 			c.logger.Info("Auto-discovering JWKS URI from authorization server metadata", "issuer", oauth.Issuer)
-			jwksURI, discoveryErr := discoverJWKSURI(oauth.Issuer, ptr.Deref(oauth.AuthorizationServerMetadataURL, ""), maxRetryElapsedTime)
+			jwksURI, discoveryErr := c.discoverJWKSURI(oauth)
 			if discoveryErr != nil {
 				return nil, fmt.Errorf("failed to auto-discover JWKS URI: %w", discoveryErr)
 			}
@@ -717,10 +717,18 @@ func (e *invalidMetadataError) Unwrap() error { return e.err }
 // fetchOAuthAuthServerMetadata fetches OAuth authorization server metadata from the well-known endpoint
 // with exponential backoff retry logic. It returns the fetched metadata or an error if all attempts fail.
 func fetchOAuthAuthServerMetadata(authServer, metadataURL string, maxRetryElapsedTime time.Duration) (*OAuthAuthServerMetadata, error) {
+	return fetchOAuthAuthServerMetadataChecked(context.Background(), authServer, metadataURL, maxRetryElapsedTime, nil)
+}
+
+// fetchOAuthAuthServerMetadataChecked is fetchOAuthAuthServerMetadata within the given context. A document that
+// check, if not nil, returns an error for is unusable, so that the next URL variant is tried.
+func fetchOAuthAuthServerMetadataChecked(
+	ctx context.Context, authServer, metadataURL string, maxRetryElapsedTime time.Duration, check func(*OAuthAuthServerMetadata) error,
+) (*OAuthAuthServerMetadata, error) {
 	// An explicitly configured metadata URL is used verbatim: the whole point of the field is that
 	// the document lives somewhere the issuer does not lead to, so there is nothing to derive.
 	if metadataURL != "" {
-		metadata, err := fetchFirstUsableMetadata([]string{metadataURL}, maxRetryElapsedTime)
+		metadata, err := fetchFirstUsableMetadata(ctx, []string{metadataURL}, maxRetryElapsedTime, check)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch authorization server metadata from %q: %w", metadataURL, err)
 		}
@@ -763,7 +771,7 @@ func fetchOAuthAuthServerMetadata(authServer, metadataURL string, maxRetryElapse
 		),
 	}
 
-	metadata, err := fetchFirstUsableMetadata(wellKnownURLVariants, maxRetryElapsedTime)
+	metadata, err := fetchFirstUsableMetadata(ctx, wellKnownURLVariants, maxRetryElapsedTime, check)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover authorization server metadata for issuer %q: %w", authServer, err)
 	}
@@ -773,11 +781,17 @@ func fetchOAuthAuthServerMetadata(authServer, metadataURL string, maxRetryElapse
 // fetchFirstUsableMetadata tries each candidate URL in order, with exponential backoff per URL,
 // and returns the first usable document. A URL that answers with a 4xx or with a document we
 // cannot use is a miss, and the next URL is tried. Any other failure is returned immediately.
-func fetchFirstUsableMetadata(candidateURLs []string, maxRetryElapsedTime time.Duration) (*OAuthAuthServerMetadata, error) {
+func fetchFirstUsableMetadata(
+	ctx context.Context, candidateURLs []string, maxRetryElapsedTime time.Duration, check func(*OAuthAuthServerMetadata) error,
+) (*OAuthAuthServerMetadata, error) {
 	httpClient := &http.Client{Timeout: httpClientTimeout}
 
 	fetchOnce := func(wellKnownURL string, metadata *OAuthAuthServerMetadata) error {
-		resp, err := httpClient.Get(wellKnownURL)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnownURL, nil)
+		if err != nil {
+			return backoff.Permanent(fmt.Errorf("failed to fetch OAuth authorization server metadata: %w", err))
+		}
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			urlError, dnsError := &url.Error{}, &net.DNSError{}
 			if errors.As(err, &urlError) || errors.As(err, &dnsError) {
@@ -823,6 +837,11 @@ func fetchFirstUsableMetadata(candidateURLs []string, maxRetryElapsedTime time.D
 		if fetched.Issuer == "" {
 			return backoff.Permanent(&invalidMetadataError{url: wellKnownURL, err: errors.New("missing issuer")})
 		}
+		if check != nil {
+			if err := check(&fetched); err != nil {
+				return backoff.Permanent(&invalidMetadataError{url: wellKnownURL, err: err})
+			}
+		}
 		*metadata = fetched
 		return nil
 	}
@@ -834,7 +853,7 @@ func fetchFirstUsableMetadata(candidateURLs []string, maxRetryElapsedTime time.D
 		b.MaxElapsedTime = maxRetryElapsedTime
 		err := backoff.Retry(func() error {
 			return fetchOnce(wellKnownURL, &metadata)
-		}, b)
+		}, backoff.WithContext(b, ctx))
 		if err == nil { // Success.
 			return &metadata, nil
 		}
@@ -889,9 +908,9 @@ func (c *MCPRouteController) newRemoteJWKS(ctx context.Context, jwksURI string) 
 
 // discoverJWKSURI attempts to discover the JWKS URI from the OAuth authorization server metadata.
 // It fetches the well-known metadata endpoint and extracts the jwks_uri field.
-func discoverJWKSURI(issuer, metadataURL string, maxRetryElapsedTime time.Duration) (string, error) {
+func (c *MCPRouteController) discoverJWKSURI(oauth *aigv1b1.MCPRouteOAuth) (string, error) {
 	// Fetch OAuth authorization server metadata.
-	metadata, err := fetchOAuthAuthServerMetadata(issuer, metadataURL, maxRetryElapsedTime)
+	metadata, err := fetchOAuthAuthServerMetadata(oauth.Issuer, ptr.Deref(oauth.AuthorizationServerMetadataURL, ""), maxRetryElapsedTime)
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("failed to fetch authorization server metadata: %w", err)
