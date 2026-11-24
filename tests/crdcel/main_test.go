@@ -358,6 +358,27 @@ func TestMCPRoutes(t *testing.T) {
 			name:   "jwks_both.yaml",
 			expErr: "spec.securityPolicy.oauth.jwks: Invalid value: \"object\": remoteJWKS and localJWKS cannot both be specified.",
 		},
+		{name: "additional_issuers.yaml"},
+		{
+			name:   "additional_issuers_repeat_issuer.yaml",
+			expErr: "additionalIssuers must not repeat issuer",
+		},
+		{
+			name:   "additional_issuers_duplicate.yaml",
+			expErr: "spec.securityPolicy.oauth.additionalIssuers[1]: Duplicate value",
+		},
+		{
+			name:   "additional_issuers_too_many.yaml",
+			expErr: "spec.securityPolicy.oauth.additionalIssuers: Too many: 4: must have at most 3 items",
+		},
+		{
+			name:   "additional_issuers_invalid_uri.yaml",
+			expErr: "spec.securityPolicy.oauth.additionalIssuers[0].issuer: Invalid value",
+		},
+		{
+			name:   "additional_issuers_invalid_jwks_uri.yaml",
+			expErr: "spec.securityPolicy.oauth.additionalIssuers[0].jwksUri: Invalid value",
+		},
 		{
 			name:   "authorization_with_jwt_without_oauth.yaml",
 			expErr: "spec.securityPolicy: Invalid value: \"object\": oauth must be configured when any authorization rule uses a jwt source or references request.auth.jwt in a cel expression",

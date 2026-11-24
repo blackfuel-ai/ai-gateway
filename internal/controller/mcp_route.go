@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/go-logr/logr"
@@ -45,6 +46,9 @@ type MCPRouteController struct {
 	logger logr.Logger
 	// gatewayEventChan is a channel to send events to the gateway controller.
 	gatewayEventChan chan event.GenericEvent
+	// additionalIssuerRetries maps the [types.NamespacedName] of the routes that wait for the JWKS URI of an
+	// additional issuer to their additionalIssuerRetry.
+	additionalIssuerRetries sync.Map
 }
 
 // NewMCPRouteController creates a new reconcile.TypedReconciler[reconcile.Request] for the MCPRoute resource.
@@ -67,6 +71,7 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 	var MCPRoute aigv1b1.MCPRoute
 	if err := c.client.Get(ctx, req.NamespacedName, &MCPRoute); err != nil {
 		if client.IgnoreNotFound(err) == nil {
+			c.additionalIssuerRetries.Delete(req.NamespacedName)
 			c.logger.Info("Deleting MCPRoute",
 				"namespace", req.Namespace, "name", req.Name)
 			return ctrl.Result{}, nil
@@ -74,7 +79,8 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := c.syncMCPRoute(ctx, &MCPRoute); err != nil {
+	undeterminedIssuers, err := c.syncMCPRoute(ctx, &MCPRoute)
+	if err != nil {
 		c.logger.Error(err, "failed to sync MCPRoute")
 		c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeNotAccepted, err.Error())
 		return ctrl.Result{}, err
@@ -86,30 +92,36 @@ func (c *MCPRouteController) Reconcile(ctx context.Context, req reconcile.Reques
 		}
 		return reconcile.Result{}, nil
 	}
-	c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeAccepted, "MCP Gateway Route reconciled successfully")
+	c.updateMCPRouteStatus(ctx, &MCPRoute, aigv1b1.ConditionTypeAccepted,
+		"MCP Gateway Route reconciled successfully"+undeterminedIssuersMessage(undeterminedIssuers))
+	if len(undeterminedIssuers) > 0 {
+		return reconcile.Result{RequeueAfter: c.nextAdditionalIssuerRetry(req.NamespacedName, MCPRoute.Generation)}, nil
+	}
+	c.additionalIssuerRetries.Delete(req.NamespacedName)
 	return reconcile.Result{}, nil
 }
 
 // syncMCPRoute is the main logic for reconciling the MCPRoute resource.
 // This is decoupled from the Reconcile method to centralize the error handling and status updates.
-func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1.MCPRoute) error {
+// It returns the additional issuers whose JWKS URI could not be determined, see additionalIssuerJWTProviders.
+func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1.MCPRoute) ([]string, error) {
 	// On deletion, propagate to the referenced Gateways and clean up the shared Backend if this
 	// is the last MCPRoute in the namespace.
 	if onDelete, err := handleFinalizer(ctx, c.client, c.logger, mcpRoute, c.onMCPRouteDeleted); err != nil || onDelete {
-		return err
+		return nil, err
 	}
 
 	// Validate prefixMode=Never (whether set per-backend or inherited from the route-level
 	// default): each effectively-Never backend must declare toolSelector.include, and tool
 	// names must be unique across all effectively-Never backends on the route.
 	if err := validatePerBackendPrefixMode(mcpRoute); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Ensure the shared per-namespace MCP proxy Backend exists before creating/updating the HTTPRoute.
 	sharedBackendName, err := c.ensureMCPProxyBackend(ctx, mcpRoute.Namespace)
 	if err != nil {
-		return fmt.Errorf("failed to ensure MCP proxy Backend: %w", err)
+		return nil, fmt.Errorf("failed to ensure MCP proxy Backend: %w", err)
 	}
 
 	// Clean up the old per-MCPRoute Backend left from before the shared-Backend refactor.
@@ -122,20 +134,20 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 	mainHTTPRouteName := internalapi.MCPMainHTTPRoutePrefix + mcpRoute.Name
 	mainHTTPRoute, existing, err := c.getOrNewHTTPRouteRoute(ctx, mcpRoute, mainHTTPRouteName)
 	if err != nil {
-		return fmt.Errorf("failed to get or create HTTPRoute: %w", err)
+		return nil, fmt.Errorf("failed to get or create HTTPRoute: %w", err)
 	}
 	if err = c.newMainHTTPRoute(mainHTTPRoute, mcpRoute, sharedBackendName); err != nil {
-		return fmt.Errorf("failed to construct a new HTTPRoute: %w", err)
+		return nil, fmt.Errorf("failed to construct a new HTTPRoute: %w", err)
 	}
 
 	// Create or Update the main HTTPRoute.
 	if err = c.createOrUpdateHTTPRoute(ctx, mainHTTPRoute, existing); err != nil {
-		return fmt.Errorf("failed to create or update HTTPRoute: %w", err)
+		return nil, fmt.Errorf("failed to create or update HTTPRoute: %w", err)
 	}
 
 	existingPerBackendRoutes, err := c.listExistingPerBackendHTTPRoutes(ctx, mcpRoute)
 	if err != nil {
-		return fmt.Errorf("failed to list existing per-backend HTTPRoutes: %w", err)
+		return nil, fmt.Errorf("failed to list existing per-backend HTTPRoutes: %w", err)
 	}
 
 	// Build HTTPRoute for each backend in the MCPRoute to avoid the hard limit of 16 Rules per HTTPRoute.
@@ -150,32 +162,33 @@ func (c *MCPRouteController) syncMCPRoute(ctx context.Context, mcpRoute *aigv1b1
 		if !existing {
 			httpRoute, err = c.newHTTPRoute(mcpRoute, name)
 			if err != nil {
-				return fmt.Errorf("failed to construct a new HTTPRoute for backend %s: %w", ref.Name, err)
+				return nil, fmt.Errorf("failed to construct a new HTTPRoute for backend %s: %w", ref.Name, err)
 			}
 		}
 		if err = c.newPerBackendRefHTTPRoute(ctx, httpRoute, mcpRoute, ref); err != nil {
-			return fmt.Errorf("failed to construct a new HTTPRoute for backend %s: %w", ref.Name, err)
+			return nil, fmt.Errorf("failed to construct a new HTTPRoute for backend %s: %w", ref.Name, err)
 		}
 		if err = c.createOrUpdateHTTPRoute(ctx, httpRoute, existing); err != nil {
-			return fmt.Errorf("failed to create or update HTTPRoute for backend %s: %w", ref.Name, err)
+			return nil, fmt.Errorf("failed to create or update HTTPRoute for backend %s: %w", ref.Name, err)
 		}
 		delete(existingPerBackendRoutes, name)
 	}
 
 	if err = c.deleteOrphanedPerBackendResources(ctx, mcpRoute, existingPerBackendRoutes); err != nil {
-		return fmt.Errorf("failed to delete orphaned per-backend resources: %w", err)
+		return nil, fmt.Errorf("failed to delete orphaned per-backend resources: %w", err)
 	}
 
 	// Reconciles MCPRouteSecurityPolicy and creates/updates its associated envoy gateway resources.
-	if err = c.syncMCPRouteSecurityPolicy(ctx, mcpRoute, mainHTTPRouteName); err != nil {
-		return fmt.Errorf("failed to sync MCP route security policy: %w", err)
+	undeterminedIssuers, err := c.syncMCPRouteSecurityPolicy(ctx, mcpRoute, mainHTTPRouteName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sync MCP route security policy: %w", err)
 	}
 
 	err = c.syncGateways(ctx, mcpRoute)
 	if err != nil {
-		return fmt.Errorf("failed to sync gw pods: %w", err)
+		return nil, fmt.Errorf("failed to sync gw pods: %w", err)
 	}
-	return nil
+	return undeterminedIssuers, nil
 }
 
 func mcpPerBackendRefHTTPRouteName(mcpRouteName string, backendName gwapiv1.ObjectName) string {
