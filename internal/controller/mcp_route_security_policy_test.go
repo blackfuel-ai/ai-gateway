@@ -418,7 +418,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy(t *testing.T) {
 			}
 
 			httpRouteName := "test-http-route"
-			_, err = c.syncMCPRouteSecurityPolicy(t.Context(), tt.mcpRoute, httpRouteName)
+			err = c.syncMCPRouteSecurityPolicy(t.Context(), tt.mcpRoute, httpRouteName)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -525,7 +525,7 @@ func TestMCPRouteControllerCleanupSecurityPolicyResources(t *testing.T) {
 
 	httpRouteName := "test-http-route"
 
-	_, err = c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName)
+	err = c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName)
 	require.NoError(t, err)
 
 	securityPolicyName := internalapi.MCPGeneratedResourceCommonPrefix + mcpRoute.Name
@@ -552,7 +552,7 @@ func TestMCPRouteControllerCleanupSecurityPolicyResources(t *testing.T) {
 	mcpRouteWithoutSecurityPolicy := mcpRoute.DeepCopy()
 	mcpRouteWithoutSecurityPolicy.Spec.SecurityPolicy = nil
 
-	_, err = c.syncMCPRouteSecurityPolicy(t.Context(), mcpRouteWithoutSecurityPolicy, httpRouteName)
+	err = c.syncMCPRouteSecurityPolicy(t.Context(), mcpRouteWithoutSecurityPolicy, httpRouteName)
 	require.NoError(t, err)
 
 	err = fakeClient.Get(t.Context(), client.ObjectKey{Name: securityPolicyName, Namespace: mcpRoute.Namespace}, &securityPolicy)
@@ -601,8 +601,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy_DisableOAuthKeepsAPIKey(t
 	require.NoError(t, fakeClient.Create(t.Context(), mcpRoute))
 
 	httpRouteName := "test-http-route"
-	_, err := c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName)
-	require.NoError(t, err)
+	require.NoError(t, c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName))
 
 	securityPolicyName := internalapi.MCPGeneratedResourceCommonPrefix + mcpRoute.Name
 	backendTrafficPolicyName := oauthProtectedResourceMetadataName(mcpRoute.Name)
@@ -622,8 +621,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy_DisableOAuthKeepsAPIKey(t
 	// Remove OAuth configuration and reconcile again.
 	mcpRoute.Spec.SecurityPolicy.OAuth = nil
 	require.NoError(t, fakeClient.Update(t.Context(), mcpRoute))
-	_, err = c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName)
-	require.NoError(t, err)
+	require.NoError(t, c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName))
 
 	// SecurityPolicy should remain with API key config only.
 	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKey{Name: securityPolicyName, Namespace: mcpRoute.Namespace}, &sp))
@@ -631,7 +629,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy_DisableOAuthKeepsAPIKey(t
 	require.NotNil(t, sp.Spec.APIKeyAuth)
 
 	// OAuth-specific resources should be removed.
-	err = fakeClient.Get(t.Context(), client.ObjectKey{Name: backendTrafficPolicyName, Namespace: mcpRoute.Namespace}, &egv1a1.BackendTrafficPolicy{})
+	err := fakeClient.Get(t.Context(), client.ObjectKey{Name: backendTrafficPolicyName, Namespace: mcpRoute.Namespace}, &egv1a1.BackendTrafficPolicy{})
 	require.Error(t, err)
 	require.True(t, apierrors.IsNotFound(err))
 
@@ -679,8 +677,7 @@ func TestMCPRouteController_syncMCPRouteSecurityPolicy_ClaimToHeaders(t *testing
 	require.NoError(t, fakeClient.Create(t.Context(), mcpRoute))
 
 	httpRouteName := "test-http-route"
-	_, err := c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName)
-	require.NoError(t, err)
+	require.NoError(t, c.syncMCPRouteSecurityPolicy(t.Context(), mcpRoute, httpRouteName))
 
 	// Verify SecurityPolicy was created with ClaimToHeaders.
 	securityPolicyName := internalapi.MCPGeneratedResourceCommonPrefix + mcpRoute.Name

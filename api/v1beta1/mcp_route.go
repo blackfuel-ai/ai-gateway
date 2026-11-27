@@ -461,37 +461,12 @@ type MCPRouteSecurityPolicy struct {
 
 // MCPRouteOAuth defines a MCP spec compatible OAuth authentication configuration for a MCPRoute.
 // Reference: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
-//
-// +kubebuilder:validation:XValidation:rule="!has(self.additionalIssuers) || self.additionalIssuers.all(i, i.issuer != self.issuer)",message="additionalIssuers must not repeat issuer"
 type MCPRouteOAuth struct {
 	// Issuer is the authorization server's issuer identity.
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Format=uri
 	Issuer string `json:"issuer"`
-
-	// AdditionalIssuers lists further issuers whose access tokens are accepted beside those of Issuer.
-	// It is meant for phasing the move of an authorization server from one host to another: accept the
-	// tokens of both hosts, switch Issuer, and remove the old host last.
-	//
-	// A token is accepted when it passes in full for one accepted issuer: its "iss" claim, its signature
-	// by that issuer's own keys, and Audiences. ClaimToHeaders and the authorization rules then apply as
-	// they do to a token from Issuer. Claims are not qualified by the issuer, so tokens with an equal "sub"
-	// claim identify the same subject whichever issuer they come from. Only list issuers trusted as much as
-	// Issuer; a rule that must tell them apart can match on the "iss" claim.
-	//
-	// Issuer alone is advertised in the metadata the gateway publishes. AuthorizationServerMetadataURL and
-	// JWKS apply to Issuer only.
-	//
-	// The generated SecurityPolicy names the JWT provider of Issuer "mcp-jwt-provider", and that of the
-	// entry at position N of this list, counting from 1, "mcp-jwt-provider-N". A SecurityPolicy merged with
-	// it that refers to a JWT provider by name must name each of them.
-	//
-	// +optional
-	// +listType=map
-	// +listMapKey=issuer
-	// +kubebuilder:validation:MaxItems=3
-	AdditionalIssuers []MCPRouteOAuthIssuer `json:"additionalIssuers,omitempty"`
 
 	// Audiences is a list of JWT audiences allowed access.
 	// It is recommended to set this field for token audience validation, as it is a security best practice to prevent token misuse.
@@ -547,34 +522,6 @@ type MCPRouteOAuth struct {
 	// +kubebuilder:validation:MaxItems=16
 	// +optional
 	ClaimToHeaders []egv1a1.ClaimToHeader `json:"claimToHeaders,omitempty"`
-}
-
-// MCPRouteOAuthIssuer defines a further issuer whose access tokens a MCPRoute accepts.
-type MCPRouteOAuthIssuer struct {
-	// Issuer is the issuer identity, compared with the "iss" claim of the token.
-	//
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Format=uri
-	// +kubebuilder:validation:Pattern=`^https?://[^\s/]\S*$`
-	// +kubebuilder:validation:MaxLength=253
-	Issuer string `json:"issuer"`
-
-	// JWKSURI is the URI of the JSON Web Key Set (JWKS) of this issuer. Local keys and custom backend
-	// settings are not supported for additional issuers.
-	//
-	// If not specified, the JWKS URI is discovered from the OAuth 2.0 Authorization Server Metadata of
-	// this issuer, as per RFC 8414. The metadata must name this very issuer, so set this field for an
-	// authorization server whose metadata names the same host whichever host is asked. The keys of
-	// another issuer are never used. When the discovery fails, the other issuers and the route are unaffected: the JWKS URI already in use for this issuer is kept,
-	// or its tokens are refused if there is none, and the controller retries the discovery. The status of
-	// the route names the issuer meanwhile. Remove the entry to stop accepting the issuer.
-	//
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Format=uri
-	// +kubebuilder:validation:Pattern=`^https?://[^\s/]\S*$`
-	// +kubebuilder:validation:MaxLength=253
-	// +optional
-	JWKSURI *string `json:"jwksUri,omitempty"`
 }
 
 // MCPRouteAuthorization defines the authorization configuration for a MCPRoute.

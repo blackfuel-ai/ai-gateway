@@ -17,9 +17,6 @@ spec:
   securityPolicy:
     oauth:
       issuer: "http://localhost:8080/realms/master"
-      # Uncomment to also accept the tokens the same Keycloak issues on another host, e.g. while it moves there.
-      # additionalIssuers:
-      #   - issuer: "http://keycloak.example.com:8080/realms/master"
       jwks:
         remoteJWKS:
           uri: http://localhost:8080/realms/master/protocol/openid-connect/certs

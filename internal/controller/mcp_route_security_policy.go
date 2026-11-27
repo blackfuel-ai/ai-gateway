@@ -43,8 +43,7 @@ const (
 )
 
 // syncMCPRouteSecurityPolicy reconciles MCPRouteSecurityPolicy and creates/updates its associated envoy gateway resources.
-// It returns the additional issuers whose JWKS URI could not be determined, see additionalIssuerJWTProviders.
-func (c *MCPRouteController) syncMCPRouteSecurityPolicy(ctx context.Context, mcpRoute *aigv1b1.MCPRoute, httpRouteName string) (undeterminedIssuers []string, err error) {
+func (c *MCPRouteController) syncMCPRouteSecurityPolicy(ctx context.Context, mcpRoute *aigv1b1.MCPRoute, httpRouteName string) error {
 	securityPolicy := mcpRoute.Spec.SecurityPolicy
 	hasOAuth := securityPolicy != nil && securityPolicy.OAuth != nil
 	hasAPIKeyAuth := securityPolicy != nil && securityPolicy.APIKeyAuth != nil
@@ -53,42 +52,41 @@ func (c *MCPRouteController) syncMCPRouteSecurityPolicy(ctx context.Context, mcp
 
 	if securityPolicyConfigured {
 		// Create and manage SecurityPolicy to enforce client authentication on the MCP proxy rule.
-		if undeterminedIssuers, err = c.ensureSecurityPolicy(ctx, mcpRoute, httpRouteName); err != nil {
-			return nil, fmt.Errorf("failed to ensure SecurityPolicy: %w", err)
+		if secErr := c.ensureSecurityPolicy(ctx, mcpRoute, httpRouteName); secErr != nil {
+			return fmt.Errorf("failed to ensure SecurityPolicy: %w", secErr)
 		}
 
 		// Create OAuth-related resources if OAuth is configured.
 		if hasOAuth {
 			if err := c.ensureOAuthResources(ctx, mcpRoute, httpRouteName); err != nil {
-				return nil, fmt.Errorf("failed to ensure OAuth resources: %w", err)
+				return fmt.Errorf("failed to ensure OAuth resources: %w", err)
 			}
 		} else {
 			// Clean up any OAuth-specific resources if OAuth is no longer configured.
 			if err := c.cleanupOAuthResources(ctx, mcpRoute); err != nil {
-				return nil, fmt.Errorf("failed to cleanup OAuth resources: %w", err)
+				return fmt.Errorf("failed to cleanup OAuth resources: %w", err)
 			}
 		}
 	} else {
 		// Clean up existing SecurityPolicy resources if no authentication is configured.
 		if err := c.cleanupSecurityPolicyResources(ctx, mcpRoute); err != nil {
-			return nil, fmt.Errorf("failed to cleanup SecurityPolicy resources: %w", err)
+			return fmt.Errorf("failed to cleanup SecurityPolicy resources: %w", err)
 		}
 
 		// Clean up any existing OAuth-specific resources if no authentication is configured.
 		if err := c.cleanupOAuthResources(ctx, mcpRoute); err != nil {
-			return nil, fmt.Errorf("failed to cleanup OAuth resources: %w", err)
+			return fmt.Errorf("failed to cleanup OAuth resources: %w", err)
 		}
 	}
 
-	return undeterminedIssuers, nil
+	return nil
 }
 
 // ensureSecurityPolicy ensures that the SecurityPolicy resource exists with the configured authentication methods.
-// It returns the additional issuers whose JWKS URI could not be determined, see additionalIssuerJWTProviders.
-func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute *aigv1b1.MCPRoute, httpRouteName string) (undeterminedIssuers []string, err error) {
+func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute *aigv1b1.MCPRoute, httpRouteName string) error {
 	var securityPolicy egv1a1.SecurityPolicy
 	securityPolicyName := internalapi.MCPGeneratedResourceCommonPrefix + mcpRoute.Name
-	err = c.client.Get(ctx, client.ObjectKey{Name: securityPolicyName, Namespace: mcpRoute.Namespace}, &securityPolicy)
+	err := c.client.Get(ctx, client.ObjectKey{Name: securityPolicyName, Namespace: mcpRoute.Namespace}, &securityPolicy)
 	existingPolicy := err == nil
 
 	if apierrors.IsNotFound(err) {
@@ -101,10 +99,10 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 		}
 		// Set owner reference to mcpRoute for garbage collection.
 		if err = ctrlutil.SetControllerReference(mcpRoute, &securityPolicy, c.client.Scheme()); err != nil {
-			return nil, fmt.Errorf("failed to set controller reference for SecurityPolicy: %w", err)
+			return fmt.Errorf("failed to set controller reference for SecurityPolicy: %w", err)
 		}
 	} else if err != nil {
-		return nil, fmt.Errorf("failed to get SecurityPolicy: %w", err)
+		return fmt.Errorf("failed to get SecurityPolicy: %w", err)
 	}
 
 	securityPolicySpec := egv1a1.SecurityPolicySpec{}
@@ -113,8 +111,9 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 	if oauth := mcpRoute.Spec.SecurityPolicy.OAuth; oauth != nil {
 		c.logger.Info("Configuring OAuth in SecurityPolicy")
 
+		name := "mcp-jwt-provider"
 		jwtProvider := egv1a1.JWTProvider{
-			Name:      mcpJWTProviderName,
+			Name:      name,
 			Issuer:    oauth.Issuer,
 			Audiences: oauth.Audiences,
 		}
@@ -128,11 +127,23 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 			c.logger.Info("Auto-discovering JWKS URI from authorization server metadata", "issuer", oauth.Issuer)
 			jwksURI, discoveryErr := c.discoverJWKSURI(oauth)
 			if discoveryErr != nil {
-				return nil, fmt.Errorf("failed to auto-discover JWKS URI: %w", discoveryErr)
+				return fmt.Errorf("failed to auto-discover JWKS URI: %w", discoveryErr)
 			}
 			c.logger.Info("Found JWKS URI from authorization server metadata", "issuer", oauth.Issuer, "jwks_uri", jwksURI)
 
-			jwtProvider.RemoteJWKS = c.newRemoteJWKS(ctx, jwksURI)
+			jwtProvider.RemoteJWKS = &egv1a1.RemoteJWKS{
+				URI: jwksURI,
+			}
+
+			// If the JWKS URI is an HTTPS backend, try to discover the backend service for Envoy to fetch JWKS.
+			if strings.HasPrefix(jwksURI, "https://") {
+				c.logger.Info("Auto-discovering backends with TLS config to fetch JWKS URI", "jwks_uri", jwksURI)
+				jwtProvider.RemoteJWKS.BackendRefs, err = c.tryGetBackendsForJWKS(ctx, jwksURI)
+				if err != nil {
+					// log the error but continue, hoping the JWKS can be fetched without explicitly setting the backend cluster.
+					c.logger.Error(err, "could not find a backend with TLS config to fetch the remote JWKS", "jwks_uri", jwksURI)
+				}
+			}
 		}
 
 		// Project the verified "sub" claim into a trusted, gateway-set header so the MCP proxy can
@@ -151,17 +162,6 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 
 		securityPolicySpec.JWT = &egv1a1.JWT{
 			Providers: []egv1a1.JWTProvider{jwtProvider},
-		}
-
-		// Envoy Gateway accepts a token that any one of the providers accepts.
-		if len(oauth.AdditionalIssuers) > 0 {
-			var current []egv1a1.JWTProvider
-			if securityPolicy.Spec.JWT != nil {
-				current = securityPolicy.Spec.JWT.Providers
-			}
-			var additional []egv1a1.JWTProvider
-			additional, undeterminedIssuers = c.additionalIssuerJWTProviders(ctx, oauth.AdditionalIssuers, &jwtProvider, current)
-			securityPolicySpec.JWT.Providers = append(securityPolicySpec.JWT.Providers, additional...)
 		}
 	}
 
@@ -200,16 +200,16 @@ func (c *MCPRouteController) ensureSecurityPolicy(ctx context.Context, mcpRoute 
 	if existingPolicy {
 		c.logger.Info("Updating SecurityPolicy", "namespace", securityPolicy.Namespace, "name", securityPolicy.Name)
 		if err = c.client.Update(ctx, &securityPolicy); err != nil {
-			return nil, fmt.Errorf("failed to update SecurityPolicy: %w", err)
+			return fmt.Errorf("failed to update SecurityPolicy: %w", err)
 		}
 	} else {
 		c.logger.Info("Creating SecurityPolicy", "namespace", securityPolicy.Namespace, "name", securityPolicy.Name)
 		if err = c.client.Create(ctx, &securityPolicy); err != nil {
-			return nil, fmt.Errorf("failed to create SecurityPolicy: %w", err)
+			return fmt.Errorf("failed to create SecurityPolicy: %w", err)
 		}
 	}
 
-	return undeterminedIssuers, nil
+	return nil
 }
 
 // ensureOAuthProtectedResourceMetadataBTP ensures that the BackendTrafficPolicy resource exists with response override for WWW-Authenticate header.
@@ -717,18 +717,10 @@ func (e *invalidMetadataError) Unwrap() error { return e.err }
 // fetchOAuthAuthServerMetadata fetches OAuth authorization server metadata from the well-known endpoint
 // with exponential backoff retry logic. It returns the fetched metadata or an error if all attempts fail.
 func fetchOAuthAuthServerMetadata(authServer, metadataURL string, maxRetryElapsedTime time.Duration) (*OAuthAuthServerMetadata, error) {
-	return fetchOAuthAuthServerMetadataChecked(context.Background(), authServer, metadataURL, maxRetryElapsedTime, nil)
-}
-
-// fetchOAuthAuthServerMetadataChecked is fetchOAuthAuthServerMetadata within the given context. A document that
-// check, if not nil, returns an error for is unusable, so that the next URL variant is tried.
-func fetchOAuthAuthServerMetadataChecked(
-	ctx context.Context, authServer, metadataURL string, maxRetryElapsedTime time.Duration, check func(*OAuthAuthServerMetadata) error,
-) (*OAuthAuthServerMetadata, error) {
 	// An explicitly configured metadata URL is used verbatim: the whole point of the field is that
 	// the document lives somewhere the issuer does not lead to, so there is nothing to derive.
 	if metadataURL != "" {
-		metadata, err := fetchFirstUsableMetadata(ctx, []string{metadataURL}, maxRetryElapsedTime, check)
+		metadata, err := fetchFirstUsableMetadata([]string{metadataURL}, maxRetryElapsedTime)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch authorization server metadata from %q: %w", metadataURL, err)
 		}
@@ -771,7 +763,7 @@ func fetchOAuthAuthServerMetadataChecked(
 		),
 	}
 
-	metadata, err := fetchFirstUsableMetadata(ctx, wellKnownURLVariants, maxRetryElapsedTime, check)
+	metadata, err := fetchFirstUsableMetadata(wellKnownURLVariants, maxRetryElapsedTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover authorization server metadata for issuer %q: %w", authServer, err)
 	}
@@ -781,17 +773,11 @@ func fetchOAuthAuthServerMetadataChecked(
 // fetchFirstUsableMetadata tries each candidate URL in order, with exponential backoff per URL,
 // and returns the first usable document. A URL that answers with a 4xx or with a document we
 // cannot use is a miss, and the next URL is tried. Any other failure is returned immediately.
-func fetchFirstUsableMetadata(
-	ctx context.Context, candidateURLs []string, maxRetryElapsedTime time.Duration, check func(*OAuthAuthServerMetadata) error,
-) (*OAuthAuthServerMetadata, error) {
+func fetchFirstUsableMetadata(candidateURLs []string, maxRetryElapsedTime time.Duration) (*OAuthAuthServerMetadata, error) {
 	httpClient := &http.Client{Timeout: httpClientTimeout}
 
 	fetchOnce := func(wellKnownURL string, metadata *OAuthAuthServerMetadata) error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnownURL, nil)
-		if err != nil {
-			return backoff.Permanent(fmt.Errorf("failed to fetch OAuth authorization server metadata: %w", err))
-		}
-		resp, err := httpClient.Do(req)
+		resp, err := httpClient.Get(wellKnownURL)
 		if err != nil {
 			urlError, dnsError := &url.Error{}, &net.DNSError{}
 			if errors.As(err, &urlError) || errors.As(err, &dnsError) {
@@ -837,11 +823,6 @@ func fetchFirstUsableMetadata(
 		if fetched.Issuer == "" {
 			return backoff.Permanent(&invalidMetadataError{url: wellKnownURL, err: errors.New("missing issuer")})
 		}
-		if check != nil {
-			if err := check(&fetched); err != nil {
-				return backoff.Permanent(&invalidMetadataError{url: wellKnownURL, err: err})
-			}
-		}
 		*metadata = fetched
 		return nil
 	}
@@ -853,7 +834,7 @@ func fetchFirstUsableMetadata(
 		b.MaxElapsedTime = maxRetryElapsedTime
 		err := backoff.Retry(func() error {
 			return fetchOnce(wellKnownURL, &metadata)
-		}, backoff.WithContext(b, ctx))
+		}, b)
 		if err == nil { // Success.
 			return &metadata, nil
 		}
@@ -885,25 +866,6 @@ func oauthProtectedResourceMetadataName(mcpRouteName string) string {
 
 func oauthAuthServerMetadataFilterName(mcpRouteName string) string {
 	return fmt.Sprintf("%s%s%s", internalapi.MCPGeneratedResourceCommonPrefix, mcpRouteName, oauthAuthServerMetadataSuffix)
-}
-
-// newRemoteJWKS returns the configuration to fetch the JWKS at the given URI.
-func (c *MCPRouteController) newRemoteJWKS(ctx context.Context, jwksURI string) *egv1a1.RemoteJWKS {
-	remoteJWKS := &egv1a1.RemoteJWKS{
-		URI: jwksURI,
-	}
-
-	// If the JWKS URI is an HTTPS backend, try to discover the backend service for Envoy to fetch JWKS.
-	if strings.HasPrefix(jwksURI, "https://") {
-		c.logger.Info("Auto-discovering backends with TLS config to fetch JWKS URI", "jwks_uri", jwksURI)
-		var err error
-		remoteJWKS.BackendRefs, err = c.tryGetBackendsForJWKS(ctx, jwksURI)
-		if err != nil {
-			// log the error but continue, hoping the JWKS can be fetched without explicitly setting the backend cluster.
-			c.logger.Error(err, "could not find a backend with TLS config to fetch the remote JWKS", "jwks_uri", jwksURI)
-		}
-	}
-	return remoteJWKS
 }
 
 // discoverJWKSURI attempts to discover the JWKS URI from the OAuth authorization server metadata.
