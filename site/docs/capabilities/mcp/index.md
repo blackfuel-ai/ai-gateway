@@ -343,55 +343,6 @@ resource metadata the gateway publishes. When `jwks` is not set, the JWKS URI is
 the document fetched here. If that document cannot be fetched, the MCPRoute is not accepted and the
 reason appears in its status conditions.
 
-#### Moving the authorization server to another host
-
-Tokens carry the host of their authorization server in the `iss` claim, so a route that accepts a single
-issuer refuses the tokens of the new host until `issuer` is switched, and those of the old host right
-after. List the other host in `additionalIssuers` to accept the tokens of both meanwhile:
-
-```yaml
-securityPolicy:
-  oauth:
-    issuer: "https://old.example.com/realms/master"
-    additionalIssuers:
-      - issuer: "https://new.example.com/realms/master"
-```
-
-1. Accept both: add the new host to `additionalIssuers`, and check that its tokens pass.
-2. Switch: make the new host `issuer` and move the old one to `additionalIssuers`. Clients that read the
-   published metadata now get their tokens from the new host, and tokens of the old one still pass. When
-   `jwks` or `authorizationServerMetadataUrl` is set, change it along with `issuer`.
-3. Stop accepting the old host: remove it from `additionalIssuers` once no client uses it.
-
-A token is accepted when it passes in full for one accepted issuer: its `iss` claim, its signature by that
-issuer's own keys, and `audiences`. `claimToHeaders` and the authorization rules then apply as they do to
-a token from `issuer`. Only `issuer` is advertised in the metadata the gateway publishes.
-
-The keys of an additional issuer are discovered from its own metadata, whose `issuer` must be the one of the
-entry, trailing slash included. Set `jwksUri` on the entry when the issuer publishes none, or when the
-authorization server names the same host in its metadata whichever host is asked, until or after it moves. Local keys and custom backend settings, which `jwks` supports for `issuer`, are not
-available for additional issuers. If the JWKS URI of one cannot be determined, the route and the other
-issuers are unaffected: the JWKS URI already in use for it is kept, or its tokens are refused if there is
-none. The status condition of the MCPRoute names the issuer, and the gateway tries again after a minute, then
-at growing intervals of up to 15 minutes. An unreachable issuer is not a revoked one: to stop accepting its
-tokens, remove it from the list.
-
-:::warning
-Claims are not qualified by the issuer: tokens with an equal `sub` claim identify the same subject, and
-match the same rules, whichever accepted issuer they come from. Only list issuers you trust as much as
-`issuer`. A rule that must tell them apart can match on the `iss` claim.
-:::
-
-:::info
-In the generated `SecurityPolicy`, the JWT provider of `issuer` is named `mcp-jwt-provider` and that of the
-entry at position N of `additionalIssuers`, counting from 1, `mcp-jwt-provider-N`. A parent `SecurityPolicy`
-merged with it that refers to `mcp-jwt-provider` by name only covers the tokens of `issuer`: name the other
-providers as well. The same goes for anything that reads the claims from Envoy's dynamic metadata, where
-they are stored under the name of the provider.
-:::
-
-#### OAuth flow
-
 The OAuth flow follows the MCP specification's authorization code flow with PKCE:
 
 ```mermaid
